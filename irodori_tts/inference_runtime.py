@@ -230,6 +230,7 @@ class RuntimeKey:
     compile_model: bool = False
     compile_dynamic: bool = False
     enable_watermark: bool = False
+    attention_backend: str = "auto"
 
 
 @dataclass
@@ -280,6 +281,10 @@ class SamplingRequest:
     waveex: WaveExConfig | None = None
     initial_noise: torch.Tensor | None = None
     initial_noise_offset: int = 0
+    # speaker_state のパディング設定
+    ## 参照音声長による SDPA 形状変動を抑え、cuDNN カーネルキャッシュヒット率を上げる
+    speaker_ref_fixed_length: int | None = None
+    speaker_ref_bucket_sizes: list[int] | None = None
 
 
 @dataclass
@@ -309,6 +314,9 @@ class _ReferenceCacheKey:
     latent_patch_size: int
     speaker_patch_size: int
     lora_adapter: str | None
+    # パディング設定もキャッシュキーに含め、異なるパディング条件でキャッシュ混在を防ぐ
+    speaker_ref_fixed_length: int | None = None
+    speaker_ref_bucket_sizes: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -356,6 +364,54 @@ def _maybe_compile_inference_model(
         **compile_kwargs,
     )
     return model
+
+
+def _configure_attention_backend(attention_backend: str) -> None:
+    """
+    Configure the global SDPA backend preference for inference.
+
+    Args:
+        attention_backend (str): Backend name (`auto`, `mem_efficient`, `cudnn`, `math`, `flash`)
+
+    Raises:
+        ValueError: Unsupported backend name was specified
+    """
+
+    backend = str(attention_backend).strip().lower().replace("-", "_")
+    if backend in {"", "auto", "default"}:
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_cudnn_sdp(True)
+        torch.backends.cuda.enable_math_sdp(True)
+        return
+    if backend in {"mem", "memory_efficient", "mem_efficient", "efficient"}:
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_cudnn_sdp(False)
+        torch.backends.cuda.enable_math_sdp(False)
+        return
+    if backend == "cudnn":
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_cudnn_sdp(True)
+        torch.backends.cuda.enable_math_sdp(False)
+        return
+    if backend == "math":
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_cudnn_sdp(False)
+        torch.backends.cuda.enable_math_sdp(True)
+        return
+    if backend == "flash":
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_cudnn_sdp(False)
+        torch.backends.cuda.enable_math_sdp(False)
+        return
+    raise ValueError(
+        "attention_backend must be one of: auto, mem_efficient, cudnn, math, flash. "
+        f"Got {attention_backend!r}."
+    )
 
 
 def _move_inference_module(
@@ -600,6 +656,7 @@ class InferenceRuntime:
     def from_key(cls, key: RuntimeKey) -> InferenceRuntime:
         model_device = resolve_runtime_device(key.model_device)
         codec_device = resolve_runtime_device(key.codec_device)
+        _configure_attention_backend(key.attention_backend)
         model_dtype = resolve_runtime_dtype(
             precision=key.model_precision,
             device=model_device,
@@ -805,6 +862,12 @@ class InferenceRuntime:
             latent_patch_size=int(self.model_cfg.latent_patch_size),
             speaker_patch_size=int(self.model_cfg.speaker_patch_size),
             lora_adapter=lora_adapter,
+            speaker_ref_fixed_length=req.speaker_ref_fixed_length,
+            speaker_ref_bucket_sizes=(
+                tuple(req.speaker_ref_bucket_sizes)
+                if req.speaker_ref_bucket_sizes is not None
+                else None
+            ),
         )
 
     def _get_cached_reference_condition(
@@ -1059,7 +1122,10 @@ class InferenceRuntime:
                 )
             return None, None
         if req.no_ref:
-            ref_len = max(1, int(self.model_cfg.speaker_patch_size))
+            # cuDNN SDPA は系列長1の自己注意を扱えない環境がある
+            ## no_ref は全マスク False のダミー参照を speaker_encoder に通すため、
+            ## 話者条件ありの固定長パディングとは別に、cuDNN が選べる最小長を確保する
+            ref_len = max(4, int(self.model_cfg.speaker_patch_size))
             ref_latent_patched = torch.zeros(
                 (
                     batch_size,
@@ -1141,11 +1207,52 @@ class InferenceRuntime:
             raise ValueError(
                 "Reference latent length became zero after patchify. Use longer reference audio."
             )
-        ref_mask = torch.ones(
-            (1, ref_latent_patched.shape[1]),
-            dtype=torch.bool,
-            device=self.model_device,
-        )
+
+        # speaker_state の系列長を固定長またはバケットサイズにパディングする
+        ## 参照音声ごとに speaker_state 長が異なると SDPA の K/V 形状が変わり、
+        ## cuDNN が毎回カーネルを再探索して話者切替時に 600-900ms のペナルティが発生する
+        actual_patches = int(ref_latent_patched.shape[1])
+        target_patches = actual_patches
+        if req.speaker_ref_fixed_length is not None:
+            # パターンA: 全参照音声を固定長に統一
+            target_patches = max(actual_patches, int(req.speaker_ref_fixed_length))
+        elif req.speaker_ref_bucket_sizes is not None:
+            # パターンB: 最寄りのバケットサイズにパディング
+            for bucket_size in sorted(req.speaker_ref_bucket_sizes):
+                if bucket_size >= actual_patches:
+                    target_patches = bucket_size
+                    break
+            else:
+                # 最大バケットより長い場合はそのまま (切詰めない)
+                target_patches = actual_patches
+
+        if target_patches > actual_patches:
+            # ゼロパディングで拡張し、mask で有効範囲を記録
+            padded = torch.zeros(
+                (1, target_patches, ref_latent_patched.shape[2]),
+                dtype=ref_latent_patched.dtype,
+                device=ref_latent_patched.device,
+            )
+            padded[:, :actual_patches] = ref_latent_patched
+            ref_latent_patched = padded
+            ref_mask = torch.zeros(
+                (1, target_patches),
+                dtype=torch.bool,
+                device=self.model_device,
+            )
+            ref_mask[:, :actual_patches] = True
+            messages.append(
+                f"[runtime] speaker ref padded: actual={actual_patches}, "
+                f"target={target_patches}, mode="
+                f"{'fixed' if req.speaker_ref_fixed_length is not None else 'bucket'}"
+            )
+        else:
+            ref_mask = torch.ones(
+                (1, ref_latent_patched.shape[1]),
+                dtype=torch.bool,
+                device=self.model_device,
+            )
+
         condition = _ReferenceCondition(latent=ref_latent_patched, mask=ref_mask)
         self._put_cached_reference_condition(cache_key, condition)
         return self._expand_reference_condition(condition, batch_size=batch_size)
