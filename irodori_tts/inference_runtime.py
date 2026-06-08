@@ -69,7 +69,9 @@ def resolve_runtime_device(device: str | torch.device) -> torch.device:
         if not _is_xpu_available():
             raise ValueError("XPU device requested but torch.xpu.is_available() is False.")
         return torch.device("xpu")
-    raise ValueError(f"Unsupported inference device={resolved!s}. Expected one of: cpu, cuda, mps, xpu.")
+    raise ValueError(
+        f"Unsupported inference device={resolved!s}. Expected one of: cpu, cuda, mps, xpu."
+    )
 
 
 def list_available_runtime_devices() -> list[str]:
@@ -963,7 +965,7 @@ class InferenceRuntime:
         batch_size: int,
         messages: list[str],
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        if not self.model_cfg.use_speaker_condition:
+        if not self.model_cfg.use_speaker_condition_resolved:
             return None, None
         if req.no_ref or req.ref_embed is not None:
             return None, None

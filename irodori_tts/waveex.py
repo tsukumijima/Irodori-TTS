@@ -22,11 +22,10 @@ warm-up phase.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 import torch
-
 
 # ---------------------------------------------------------------------------
 # Wavelet filter bank (orthogonal). Coefficients taken from PyWavelets.
