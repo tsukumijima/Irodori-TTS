@@ -130,6 +130,8 @@ def sample_euler_rf_cfg(
     caption_mask: torch.Tensor | None = None,
     speaker_state_override: torch.Tensor | None = None,
     speaker_mask_override: torch.Tensor | None = None,
+    caption_state_override: torch.Tensor | None = None,
+    caption_mask_override: torch.Tensor | None = None,
     encoded_conditions: EncodedConditions | None = None,
     speaker_uncond_mode: str = "mask",
     num_steps: int = 40,
@@ -152,6 +154,8 @@ def sample_euler_rf_cfg(
     sway_coeff: float = -1.0,
     waveex: WaveExConfig | None = None,
     noise_dtype: torch.dtype | None = None,
+    initial_noise: torch.Tensor | None = None,
+    initial_noise_offset: int = 0,
 ) -> torch.Tensor:
     """
     Euler sampling over RF ODE with text/reference/caption conditioning CFG.
@@ -165,16 +169,43 @@ def sample_euler_rf_cfg(
     latent_dim = model.cfg.patched_latent_dim
 
     rng, rng_device = _make_rng(seed=seed, device=device)
-    x_t = torch.randn(
-        (batch_size, sequence_length, latent_dim),
-        device=rng_device,
-        dtype=dtype if noise_dtype is None else noise_dtype,
-        generator=rng,
-    )
-    if rng_device != device:
-        x_t = x_t.to(device=device)
-    if x_t.dtype != dtype:
-        x_t = x_t.to(dtype=dtype)
+    if initial_noise is None:
+        x_t = torch.randn(
+            (batch_size, sequence_length, latent_dim),
+            device=rng_device,
+            dtype=dtype if noise_dtype is None else noise_dtype,
+            generator=rng,
+        )
+        if rng_device != device:
+            x_t = x_t.to(device=device)
+        if x_t.dtype != dtype:
+            x_t = x_t.to(dtype=dtype)
+    else:
+        if int(initial_noise_offset) < 0:
+            raise ValueError(f"initial_noise_offset must be non-negative, got {initial_noise_offset!r}.")
+        if initial_noise.ndim != 3:
+            raise ValueError(
+                f"initial_noise must have shape (B, T, C), got {tuple(initial_noise.shape)}."
+            )
+        if initial_noise.shape[0] != batch_size:
+            raise ValueError(
+                f"initial_noise batch size mismatch: expected {batch_size}, got {initial_noise.shape[0]}."
+            )
+        if initial_noise.shape[2] != latent_dim:
+            raise ValueError(
+                f"initial_noise latent dim mismatch: expected {latent_dim}, got {initial_noise.shape[2]}."
+            )
+        noise_start = int(initial_noise_offset)
+        noise_end = noise_start + int(sequence_length)
+        if noise_end > int(initial_noise.shape[1]):
+            raise ValueError(
+                f"initial_noise is too short: need end index {noise_end}, "
+                f"available {initial_noise.shape[1]}."
+            )
+
+        # Request-level streaming experiments pass one long noise tensor and let each
+        # chunk consume a non-overlapping span. Clone because the ODE loop updates x_t in-place.
+        x_t = initial_noise[:, noise_start:noise_end, :].to(device=device, dtype=dtype).clone()
     if truncation_factor is not None:
         x_t = x_t * float(truncation_factor)
 
@@ -241,6 +272,8 @@ def sample_euler_rf_cfg(
             caption_mask=caption_mask,
             speaker_state_override=speaker_state_override,
             speaker_mask_override=speaker_mask_override,
+            caption_state_override=caption_state_override,
+            caption_mask_override=caption_mask_override,
             speaker_uncond_mode=speaker_uncond_mode,
         )
     else:

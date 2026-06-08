@@ -278,6 +278,8 @@ class SamplingRequest:
     tail_mean_threshold: float = 0.1
     lora_adapter: str | None = None
     waveex: WaveExConfig | None = None
+    initial_noise: torch.Tensor | None = None
+    initial_noise_offset: int = 0
 
 
 @dataclass
@@ -289,6 +291,8 @@ class SamplingResult:
     total_to_decode: float
     used_seed: int
     messages: list[str]
+    latent_steps: int = 0
+    patched_steps: int = 0
 
 
 @dataclass(frozen=True)
@@ -315,6 +319,21 @@ class _ReferenceCondition:
 
 @dataclass(frozen=True)
 class _SpeakerCondition:
+    state: torch.Tensor
+    mask: torch.Tensor
+
+
+@dataclass(frozen=True)
+class _CaptionCacheKey:
+    text: str
+    max_caption_len: int
+    model_device: str
+    model_dtype: str
+    lora_adapter: str | None
+
+
+@dataclass(frozen=True)
+class _CaptionCondition:
     state: torch.Tensor
     mask: torch.Tensor
 
@@ -572,6 +591,10 @@ class InferenceRuntime:
             OrderedDict()
         )
         self._speaker_condition_cache_max_entries = 32
+        self._caption_condition_cache: OrderedDict[_CaptionCacheKey, _CaptionCondition] = (
+            OrderedDict()
+        )
+        self._caption_condition_cache_max_entries = 64
 
     @classmethod
     def from_key(cls, key: RuntimeKey) -> InferenceRuntime:
@@ -898,6 +921,129 @@ class InferenceRuntime:
         messages.append("info: cached speaker conditioning.")
         return self._expand_speaker_condition(condition, batch_size=batch_size)
 
+    def _caption_cache_key(
+        self,
+        req: SamplingRequest,
+        caption_text: str,
+        caption_max_len: int,
+    ) -> _CaptionCacheKey:
+        """
+        キャプション条件キャッシュのキーを作る
+
+        Args:
+            req (SamplingRequest): 合成リクエスト
+            caption_text (str): VoiceDesign キャプション本文
+            caption_max_len (int): キャプションの最大トークン長
+
+        Returns:
+            _CaptionCacheKey: 同じ条件だけを再利用するためのキャッシュキー
+        """
+
+        # LoRA と dtype が変わると同じ文章でも潜在表現が変わるため、テキスト以外の推論条件もキーに含める
+        lora_adapter = self._resolve_lora_adapter_path(req.lora_adapter)
+        return _CaptionCacheKey(
+            text=caption_text,
+            max_caption_len=int(caption_max_len),
+            model_device=str(self.model_device),
+            model_dtype=str(self._model_dtype),
+            lora_adapter=lora_adapter,
+        )
+
+    def _get_cached_caption_condition(
+        self,
+        key: _CaptionCacheKey,
+        *,
+        batch_size: int,
+        messages: list[str],
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        cached = self._caption_condition_cache.get(key)
+        if cached is None:
+            return None, None
+        self._caption_condition_cache.move_to_end(key)
+        messages.append("info: using cached caption conditioning.")
+        return self._expand_caption_condition(cached, batch_size=batch_size)
+
+    def _put_cached_caption_condition(
+        self,
+        key: _CaptionCacheKey,
+        condition: _CaptionCondition,
+    ) -> None:
+        """キャプション条件を LRU キャッシュへ保存する"""
+
+        # キャプションは voice ほど種類が固定されないため、上限を超えた古い条件から破棄する
+        self._caption_condition_cache[key] = condition
+        self._caption_condition_cache.move_to_end(key)
+        while len(self._caption_condition_cache) > self._caption_condition_cache_max_entries:
+            self._caption_condition_cache.popitem(last=False)
+
+    @staticmethod
+    def _expand_caption_condition(
+        condition: _CaptionCondition,
+        *,
+        batch_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """1件分だけ保持したキャプション条件を候補数ぶんに複製する"""
+
+        # 候補生成では全候補が同じキャプションを使うため、エンコード済み表現をそのまま複製できる
+        if batch_size <= 1:
+            return condition.state, condition.mask
+        return condition.state.repeat(batch_size, 1, 1), condition.mask.repeat(batch_size, 1)
+
+    def _load_cached_caption_condition(
+        self,
+        *,
+        req: SamplingRequest,
+        caption_text: str,
+        caption_ids: torch.Tensor,
+        caption_mask: torch.Tensor,
+        caption_max_len: int,
+        batch_size: int,
+        messages: list[str],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        VoiceDesign キャプションをエンコードし、同一キャプションなら再利用する
+
+        Args:
+            req (SamplingRequest): 合成リクエスト
+            caption_text (str): 空白除去済みのキャプション本文
+            caption_ids (torch.Tensor): キャプションのトークン ID
+            caption_mask (torch.Tensor): キャプションの有効トークンマスク
+            caption_max_len (int): キャプションの最大トークン長
+            batch_size (int): 候補生成数
+            messages (list[str]): ランタイムログへ返すメッセージ
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: キャプション状態とマスク
+        """
+
+        # 無印 v3 などのキャプション非対応モデルでは、この経路に入ること自体が呼び出し側の不整合
+        if self.model_cfg.use_caption_condition is False:
+            raise RuntimeError("Caption conditioning cache was requested for a model without caption support.")
+        if self.model.caption_encoder is None or self.model.caption_norm is None:
+            raise RuntimeError("Caption conditioning is enabled but caption modules are missing.")
+
+        cache_key = self._caption_cache_key(req, caption_text, caption_max_len)
+        cached_state, cached_mask = self._get_cached_caption_condition(
+            cache_key,
+            batch_size=batch_size,
+            messages=messages,
+        )
+        if cached_state is not None and cached_mask is not None:
+            return cached_state, cached_mask
+
+        # キャプションはリクエスト内の全チャンクで同一なので、1件分だけエンコードして保存する
+        ## 候補数ぶんまとめてエンコードすると、キャッシュにも同じテンソルが重複して残ってしまう
+        with torch.inference_mode():
+            caption_state = self.model.caption_encoder(caption_ids[:1], caption_mask[:1])
+            caption_state = self.model.caption_norm(caption_state)
+        condition = _CaptionCondition(
+            state=caption_state.detach(),
+            mask=caption_mask[:1].detach(),
+        )
+        self._put_cached_caption_condition(cache_key, condition)
+        messages.append("info: cached caption conditioning.")
+        return self._expand_caption_condition(condition, batch_size=batch_size)
+
     def _load_reference_latent(
         self,
         *,
@@ -1210,12 +1356,15 @@ class InferenceRuntime:
             text_mask = text_mask.to(self.model_device)
             caption_ids = None
             caption_mask = None
+            caption_state_override = None
+            caption_mask_override = None
             if self.model_cfg.use_caption_condition:
                 if self.caption_tokenizer is None:
                     raise RuntimeError(
                         "Caption conditioning is enabled but caption tokenizer is not loaded."
                     )
                 caption_text = "" if req.caption is None else str(req.caption).strip()
+                msg_count_before_caption = len(messages)
                 caption_ids, caption_mask = self.caption_tokenizer.batch_encode(
                     [caption_text] * num_candidates,
                     max_length=caption_max_len,
@@ -1224,6 +1373,18 @@ class InferenceRuntime:
                     caption_mask.zero_()
                 caption_ids = caption_ids.to(self.model_device)
                 caption_mask = caption_mask.to(self.model_device)
+                if caption_text != "":
+                    caption_state_override, caption_mask_override = self._load_cached_caption_condition(
+                        req=req,
+                        caption_text=caption_text,
+                        caption_ids=caption_ids,
+                        caption_mask=caption_mask,
+                        caption_max_len=caption_max_len,
+                        batch_size=num_candidates,
+                        messages=messages,
+                    )
+                for msg in messages[msg_count_before_caption:]:
+                    _log(msg)
 
             t0 = _measure_start(self.model_device, self.codec_device)
             msg_count_before_ref = len(messages)
@@ -1310,6 +1471,8 @@ class InferenceRuntime:
                     caption_mask=caption_mask,
                     speaker_state_override=speaker_state_override,
                     speaker_mask_override=speaker_mask_override,
+                    caption_state_override=caption_state_override,
+                    caption_mask_override=caption_mask_override,
                     speaker_uncond_mode=req.speaker_uncond_mode,
                 )
                 pred_log_frames = self.model.predict_duration_log_frames(
@@ -1388,6 +1551,8 @@ class InferenceRuntime:
                 caption_mask=caption_mask,
                 speaker_state_override=speaker_state_override,
                 speaker_mask_override=speaker_mask_override,
+                caption_state_override=caption_state_override,
+                caption_mask_override=caption_mask_override,
                 speaker_uncond_mode=req.speaker_uncond_mode,
                 num_steps=int(req.num_steps),
                 cfg_scale_text=cfg_scale_text,
@@ -1409,6 +1574,8 @@ class InferenceRuntime:
                 waveex=req.waveex,
                 encoded_conditions=encoded_conditions,
                 noise_dtype=noise_dtype,
+                initial_noise=req.initial_noise,
+                initial_noise_offset=int(req.initial_noise_offset),
             )
             stage_sec = _measure_end(self.model_device, t0)
             stage_timings.append(("sample_rf", stage_sec))
@@ -1504,6 +1671,8 @@ class InferenceRuntime:
             total_to_decode=total_to_decode,
             used_seed=used_seed,
             messages=messages,
+            latent_steps=int(latent_steps),
+            patched_steps=int(patched_steps),
         )
 
     def unload(self) -> None:

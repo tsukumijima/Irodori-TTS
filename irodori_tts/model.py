@@ -39,15 +39,27 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Te
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
     t = torch.arange(end, dtype=torch.float32)
     freqs = torch.outer(t, freqs)
-    return torch.complex(torch.cos(freqs), torch.sin(freqs))
+    return torch.stack((torch.cos(freqs), torch.sin(freqs)), dim=-1)
 
 
 def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     # x: (B, S, H, Dh), Dh must be even.
-    x_ = torch.view_as_complex(x.float().reshape(*x.shape[:3], -1, 2))
-    x_ = x_ * freqs_cis[None, :, None, :]
-    x_ = torch.view_as_real(x_).reshape_as(x)
-    return x_.type_as(x)
+    # ONNX exporter cannot lower complex tensors, so keep the same complex rotation
+    # as explicit real-valued cos/sin arithmetic.
+    x_pair = x.float().reshape(*x.shape[:3], -1, 2)
+    x_real = x_pair[..., 0]
+    x_imag = x_pair[..., 1]
+    freqs = freqs_cis.to(device=x.device, dtype=torch.float32)
+    cos = freqs[..., 0][None, :, None, :]
+    sin = freqs[..., 1][None, :, None, :]
+    out = torch.stack(
+        (
+            x_real * cos - x_imag * sin,
+            x_real * sin + x_imag * cos,
+        ),
+        dim=-1,
+    )
+    return out.reshape_as(x).type_as(x)
 
 
 def get_timestep_embedding(timestep: torch.Tensor, dim: int) -> torch.Tensor:
@@ -658,7 +670,7 @@ class TextEncoder(nn.Module):
         )
         self.head_dim = dim // heads
         self.register_buffer(
-            "_freqs_cis_cache", torch.empty(0, 0, dtype=torch.complex64), persistent=False
+            "_freqs_cis_cache", torch.empty(0, 0, 2, dtype=torch.float32), persistent=False
         )
 
     def _rope_freqs(self, seq_len: int, device: torch.device) -> torch.Tensor:
@@ -701,7 +713,7 @@ class ReferenceLatentEncoder(nn.Module):
         )
         self.head_dim = cfg.speaker_dim // cfg.speaker_heads
         self.register_buffer(
-            "_freqs_cis_cache", torch.empty(0, 0, dtype=torch.complex64), persistent=False
+            "_freqs_cis_cache", torch.empty(0, 0, 2, dtype=torch.float32), persistent=False
         )
 
     def _rope_freqs(self, seq_len: int, device: torch.device) -> torch.Tensor:
@@ -1337,7 +1349,7 @@ class TextToLatentRFDiT(nn.Module):
         if self.head_dim % 2 != 0:
             raise ValueError("model head_dim must be even for RoPE")
         self.register_buffer(
-            "_freqs_cis_cache", torch.empty(0, 0, dtype=torch.complex64), persistent=False
+            "_freqs_cis_cache", torch.empty(0, 0, 2, dtype=torch.float32), persistent=False
         )
 
     def set_gradient_checkpointing(self, enabled: bool) -> None:
@@ -1488,6 +1500,8 @@ class TextToLatentRFDiT(nn.Module):
         caption_mask: torch.Tensor | None = None,
         speaker_state_override: torch.Tensor | None = None,
         speaker_mask_override: torch.Tensor | None = None,
+        caption_state_override: torch.Tensor | None = None,
+        caption_mask_override: torch.Tensor | None = None,
         speaker_uncond_mode: str = "mask",
         text_condition_dropout: torch.Tensor | None = None,
         speaker_condition_dropout: torch.Tensor | None = None,
@@ -1520,13 +1534,24 @@ class TextToLatentRFDiT(nn.Module):
                 raise RuntimeError(
                     "Caption conditioning is enabled but caption modules are missing."
                 )
-            if caption_input_ids is None or caption_mask is None:
+            has_direct_caption = caption_state_override is not None
+            if not has_direct_caption and (caption_input_ids is None or caption_mask is None):
                 raise ValueError(
                     "caption_input_ids and caption_mask are required when caption conditioning is enabled."
                 )
+            if has_direct_caption and caption_mask_override is None:
+                raise ValueError(
+                    "caption_mask_override is required when caption_state_override is provided."
+                )
+            if has_direct_caption:
+                caption_mask = caption_mask_override
             if caption_condition_dropout is not None:
                 caption_mask = caption_mask.clone()
                 caption_mask[caption_condition_dropout] = False
+        elif caption_state_override is not None:
+            raise ValueError(
+                "caption_state_override was provided but caption conditioning is disabled."
+            )
 
         text_state = self.text_encoder(text_input_ids, text_mask)
         text_state = self.text_norm(text_state)
@@ -1545,8 +1570,11 @@ class TextToLatentRFDiT(nn.Module):
             )
         caption_state = None
         if self.cfg.use_caption_condition:
-            caption_state = self.caption_encoder(caption_input_ids, caption_mask)
-            caption_state = self.caption_norm(caption_state)
+            if caption_state_override is None:
+                caption_state = self.caption_encoder(caption_input_ids, caption_mask)
+                caption_state = self.caption_norm(caption_state)
+            else:
+                caption_state = caption_state_override.to(device=text_state.device, dtype=text_state.dtype)
         return text_state, text_mask, ref_state, ref_mask, caption_state, caption_mask
 
     def encode_speaker_condition(
