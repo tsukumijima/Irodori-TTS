@@ -75,9 +75,13 @@ class DACVAECodec:
                 # Let DACVAE.load surface a clearer error if this is not a valid path/repo.
                 pass
 
-        model = DACVAE.load(location).eval().to(device)
+        # GPU 上で FP32 の VAE を一度展開するとロード直後の VRAM が膨らむため、
+        # CPU 上で構築したモデルを目的 dtype のまま GPU へ移す
+        model = DACVAE.load(location).eval()
         if dtype is not None:
-            model = model.to(dtype=dtype)
+            model = model.to(device=device, dtype=dtype)
+        else:
+            model = model.to(device=device)
 
         decoder = getattr(model, "decoder", None)
         if decoder is not None and hasattr(decoder, "alpha"):

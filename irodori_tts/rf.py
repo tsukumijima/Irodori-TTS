@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from .model import TextToLatentRFDiT
+from .model import EncodedConditions, TextToLatentRFDiT
 from .speaker_inversion import SPEAKER_INVERSION_UNCOND_MODES
 from .waveex import WaveExBuffer, WaveExConfig
 
@@ -130,6 +130,7 @@ def sample_euler_rf_cfg(
     caption_mask: torch.Tensor | None = None,
     speaker_state_override: torch.Tensor | None = None,
     speaker_mask_override: torch.Tensor | None = None,
+    encoded_conditions: EncodedConditions | None = None,
     speaker_uncond_mode: str = "mask",
     num_steps: int = 40,
     cfg_scale_text: float = 3.0,
@@ -150,6 +151,7 @@ def sample_euler_rf_cfg(
     t_schedule_mode: str = "linear",
     sway_coeff: float = -1.0,
     waveex: WaveExConfig | None = None,
+    noise_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """
     Euler sampling over RF ODE with text/reference/caption conditioning CFG.
@@ -164,10 +166,15 @@ def sample_euler_rf_cfg(
 
     rng, rng_device = _make_rng(seed=seed, device=device)
     x_t = torch.randn(
-        (batch_size, sequence_length, latent_dim), device=rng_device, dtype=dtype, generator=rng
+        (batch_size, sequence_length, latent_dim),
+        device=rng_device,
+        dtype=dtype if noise_dtype is None else noise_dtype,
+        generator=rng,
     )
     if rng_device != device:
         x_t = x_t.to(device=device)
+    if x_t.dtype != dtype:
+        x_t = x_t.to(dtype=dtype)
     if truncation_factor is not None:
         x_t = x_t * float(truncation_factor)
 
@@ -217,24 +224,34 @@ def sample_euler_rf_cfg(
     use_joint_cfg = cfg_guidance_mode == "joint"
     use_alternating_cfg = cfg_guidance_mode == "alternating"
 
-    (
-        text_state_cond,
-        text_mask_cond,
-        speaker_state_cond,
-        speaker_mask_cond,
-        caption_state_cond,
-        caption_mask_cond,
-    ) = model.encode_conditions(
-        text_input_ids=text_input_ids,
-        text_mask=text_mask,
-        ref_latent=ref_latent,
-        ref_mask=ref_mask,
-        caption_input_ids=caption_input_ids,
-        caption_mask=caption_mask,
-        speaker_state_override=speaker_state_override,
-        speaker_mask_override=speaker_mask_override,
-        speaker_uncond_mode=speaker_uncond_mode,
-    )
+    if encoded_conditions is None:
+        (
+            text_state_cond,
+            text_mask_cond,
+            speaker_state_cond,
+            speaker_mask_cond,
+            caption_state_cond,
+            caption_mask_cond,
+        ) = model.encode_conditions(
+            text_input_ids=text_input_ids,
+            text_mask=text_mask,
+            ref_latent=ref_latent,
+            ref_mask=ref_mask,
+            caption_input_ids=caption_input_ids,
+            caption_mask=caption_mask,
+            speaker_state_override=speaker_state_override,
+            speaker_mask_override=speaker_mask_override,
+            speaker_uncond_mode=speaker_uncond_mode,
+        )
+    else:
+        (
+            text_state_cond,
+            text_mask_cond,
+            speaker_state_cond,
+            speaker_mask_cond,
+            caption_state_cond,
+            caption_mask_cond,
+        ) = encoded_conditions
     text_state_uncond = torch.zeros_like(text_state_cond)
     text_mask_uncond = torch.zeros_like(text_mask_cond)
     speaker_state_uncond = None

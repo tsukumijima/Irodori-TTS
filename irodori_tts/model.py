@@ -25,6 +25,14 @@ DURATION_ARCHITECTURES = {
     "token_sum_adarn_zero_no_aux",
     "token_sum_dual_adarn_zero_no_aux",
 }
+EncodedConditions = tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+]
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
@@ -1484,14 +1492,7 @@ class TextToLatentRFDiT(nn.Module):
         text_condition_dropout: torch.Tensor | None = None,
         speaker_condition_dropout: torch.Tensor | None = None,
         caption_condition_dropout: torch.Tensor | None = None,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor | None,
-        torch.Tensor | None,
-        torch.Tensor | None,
-        torch.Tensor | None,
-    ]:
+    ) -> EncodedConditions:
         if text_condition_dropout is not None:
             text_mask = text_mask.clone()
             text_mask[text_condition_dropout] = False
@@ -1531,45 +1532,74 @@ class TextToLatentRFDiT(nn.Module):
         text_state = self.text_norm(text_state)
         ref_state = None
         if self.cfg.use_speaker_condition_resolved:
-            if speaker_state_override is not None:
-                ref_state, ref_mask = self._expand_speaker_condition_batch(
-                    speaker_state_override,
-                    speaker_mask_override,
-                    batch_size=text_input_ids.shape[0],
-                    speaker_dim=self.cfg.speaker_dim,
-                )
-                ref_state = ref_state.to(device=text_state.device, dtype=text_state.dtype)
-                ref_mask = ref_mask.to(device=text_state.device, dtype=torch.bool)
-            else:
-                speaker_inversion = getattr(self, "speaker_inversion", None)
-                if isinstance(speaker_inversion, SpeakerInversionEmbedding):
-                    ref_state, ref_mask = speaker_inversion(
-                        batch_size=text_input_ids.shape[0],
-                        device=text_state.device,
-                        dtype=text_state.dtype,
-                    )
-                else:
-                    ref_latent, ref_mask = patch_sequence_with_mask(
-                        seq=ref_latent,
-                        mask=ref_mask,
-                        patch_size=self.cfg.speaker_patch_size,
-                    )
-                    ref_state = self.speaker_encoder(ref_latent, ref_mask)
-                    ref_state = self.speaker_norm(ref_state)
-                    ref_state, ref_mask = self._prepend_masked_mean_token(ref_state, ref_mask)
-            ref_state, ref_mask = self._apply_speaker_condition_dropout(
-                speaker_state=ref_state,
-                speaker_mask=ref_mask,
-                dropout_mask=speaker_condition_dropout,
-                uncond_state=None,
-                uncond_mask=None,
-                uncond_mode=speaker_uncond_mode,
+            ref_state, ref_mask = self.encode_speaker_condition(
+                batch_size=text_input_ids.shape[0],
+                dtype=text_state.dtype,
+                device=text_state.device,
+                ref_latent=ref_latent,
+                ref_mask=ref_mask,
+                speaker_state_override=speaker_state_override,
+                speaker_mask_override=speaker_mask_override,
+                speaker_uncond_mode=speaker_uncond_mode,
+                speaker_condition_dropout=speaker_condition_dropout,
             )
         caption_state = None
         if self.cfg.use_caption_condition:
             caption_state = self.caption_encoder(caption_input_ids, caption_mask)
             caption_state = self.caption_norm(caption_state)
         return text_state, text_mask, ref_state, ref_mask, caption_state, caption_mask
+
+    def encode_speaker_condition(
+        self,
+        *,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        ref_latent: torch.Tensor | None,
+        ref_mask: torch.Tensor | None,
+        speaker_state_override: torch.Tensor | None = None,
+        speaker_mask_override: torch.Tensor | None = None,
+        speaker_uncond_mode: str = "mask",
+        speaker_condition_dropout: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.cfg.use_speaker_condition_resolved:
+            raise ValueError("Speaker conditioning is disabled.")
+
+        if speaker_state_override is not None:
+            ref_state, ref_mask = self._expand_speaker_condition_batch(
+                speaker_state_override,
+                speaker_mask_override,
+                batch_size=batch_size,
+                speaker_dim=self.cfg.speaker_dim,
+            )
+            ref_state = ref_state.to(device=device, dtype=dtype)
+            ref_mask = ref_mask.to(device=device, dtype=torch.bool)
+        else:
+            speaker_inversion = getattr(self, "speaker_inversion", None)
+            if isinstance(speaker_inversion, SpeakerInversionEmbedding):
+                ref_state, ref_mask = speaker_inversion(
+                    batch_size=batch_size,
+                    device=device,
+                    dtype=dtype,
+                )
+            else:
+                ref_latent, ref_mask = patch_sequence_with_mask(
+                    seq=ref_latent,
+                    mask=ref_mask,
+                    patch_size=self.cfg.speaker_patch_size,
+                )
+                ref_state = self.speaker_encoder(ref_latent, ref_mask)
+                ref_state = self.speaker_norm(ref_state)
+                ref_state, ref_mask = self._prepend_masked_mean_token(ref_state, ref_mask)
+
+        return self._apply_speaker_condition_dropout(
+            speaker_state=ref_state,
+            speaker_mask=ref_mask,
+            dropout_mask=speaker_condition_dropout,
+            uncond_state=None,
+            uncond_mask=None,
+            uncond_mode=speaker_uncond_mode,
+        )
 
     def forward_with_encoded_conditions(
         self,

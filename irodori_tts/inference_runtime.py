@@ -7,6 +7,7 @@ import math
 import secrets
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -89,7 +90,9 @@ def default_runtime_device() -> str:
 
 def list_available_runtime_precisions(device: str | torch.device) -> list[str]:
     resolved = resolve_runtime_device(device)
-    if resolved.type in ("cuda", "xpu"):
+    if resolved.type == "cuda":
+        return ["fp32", "bf16", "fp16"]
+    if resolved.type == "xpu":
         return ["fp32", "bf16"]
     return ["fp32"]
 
@@ -158,23 +161,60 @@ def find_flattening_point(
     """
     if latent.ndim != 2:
         raise ValueError(f"Expected latent shape (T, D), got {tuple(latent.shape)}")
-    total_steps = int(latent.shape[0])
+    return int(
+        find_flattening_points(
+            latent.unsqueeze(0),
+            target_value=target_value,
+            window_size=window_size,
+            std_threshold=std_threshold,
+            mean_threshold=mean_threshold,
+        )[0].item()
+    )
+
+
+def find_flattening_points(
+    latents: torch.Tensor,
+    target_value: float = 0.0,
+    window_size: int = 20,
+    std_threshold: float = 0.05,
+    mean_threshold: float = 0.1,
+) -> torch.Tensor:
+    """
+    Echo-style heuristic: find first index where each trailing window becomes near-flat and near-zero.
+
+    Args:
+      latents: (B, T, D) latent sequence batch.
+    Returns:
+      Flattening indices in [0, T], shape (B,).
+    """
+    if latents.ndim != 3:
+        raise ValueError(f"Expected latents shape (B, T, D), got {tuple(latents.shape)}")
+    batch_size = int(latents.shape[0])
+    total_steps = int(latents.shape[1])
     if total_steps <= 0 or window_size <= 0:
-        return total_steps
+        return torch.full(
+            (batch_size,),
+            total_steps,
+            dtype=torch.long,
+            device=latents.device,
+        )
 
     pad = torch.zeros(
-        (window_size, latent.shape[1]),
-        device=latent.device,
-        dtype=latent.dtype,
+        (batch_size, window_size, latents.shape[2]),
+        device=latents.device,
+        dtype=latents.dtype,
     )
-    padded = torch.cat([latent, pad], dim=0)
-    for i in range(padded.shape[0] - window_size):
-        window = padded[i : i + window_size]
-        window_std = window.std(unbiased=False)
-        window_mean = window.mean()
-        if window_std < std_threshold and torch.abs(window_mean - target_value) < mean_threshold:
-            return int(i)
-    return total_steps
+    padded = torch.cat([latents, pad], dim=1)
+    windows = padded.unfold(1, window_size, 1)[:, :total_steps]
+    flattened_windows = windows.reshape(batch_size, total_steps, -1)
+    window_std = flattened_windows.std(dim=2, unbiased=False)
+    window_mean = flattened_windows.mean(dim=2)
+    matches = (window_std < std_threshold) & (
+        torch.abs(window_mean - target_value) < mean_threshold
+    )
+    first_matches = torch.argmax(matches.to(torch.long), dim=1)
+    fallback = torch.full_like(first_matches, total_steps)
+    return torch.where(matches.any(dim=1), first_matches, fallback)
 
 
 @dataclass(frozen=True)
@@ -189,6 +229,7 @@ class RuntimeKey:
     codec_deterministic_decode: bool = True
     compile_model: bool = False
     compile_dynamic: bool = False
+    enable_watermark: bool = False
 
 
 @dataclass
@@ -227,6 +268,8 @@ class SamplingRequest:
     speaker_kv_max_layers: int | None = None
     speaker_uncond_mode: str = "mask"
     seed: int | None = None
+    noise_precision: str | None = None
+    chunk_seed_mode: str = "same"
     t_schedule_mode: str = "linear"
     sway_coeff: float = -1.0
     trim_tail: bool = True
@@ -246,6 +289,34 @@ class SamplingResult:
     total_to_decode: float
     used_seed: int
     messages: list[str]
+
+
+@dataclass(frozen=True)
+class _ReferenceCacheKey:
+    source_type: str
+    path: str
+    mtime_ns: int
+    size: int
+    max_ref_seconds: float | None
+    ref_normalize_db: float | None
+    ref_ensure_max: bool
+    model_device: str
+    model_dtype: str
+    latent_patch_size: int
+    speaker_patch_size: int
+    lora_adapter: str | None
+
+
+@dataclass(frozen=True)
+class _ReferenceCondition:
+    latent: torch.Tensor
+    mask: torch.Tensor
+
+
+@dataclass(frozen=True)
+class _SpeakerCondition:
+    state: torch.Tensor
+    mask: torch.Tensor
 
 
 def _maybe_compile_inference_model(
@@ -274,22 +345,18 @@ def _move_inference_module(
     device: torch.device,
     dtype: torch.dtype,
 ) -> torch.nn.Module:
-    module.to(device=device)
-    with torch.no_grad():
-        for param in module.parameters():
-            if param.is_floating_point() and param.dtype != dtype:
-                param.data = param.data.to(device=device, dtype=dtype)
-                if param.grad is not None:
-                    param.grad.data = param.grad.data.to(device=device, dtype=dtype)
-        for child in module.modules():
-            for name, buffer in child._buffers.items():
-                if buffer is None:
-                    continue
-                if buffer.is_floating_point() and buffer.dtype != dtype:
-                    child._buffers[name] = buffer.to(device=device, dtype=dtype)
-                elif buffer.device != device:
-                    child._buffers[name] = buffer.to(device=device)
+    # GPU 上で FP32 の中間テンソルを作らないよう、device と dtype を同時に確定する
+    module.to(device=device, dtype=dtype)
     return module
+
+
+def _empty_cuda_cache_if_needed(*devices: torch.device) -> None:
+    if torch.cuda.is_available() is False:
+        return
+    for device in devices:
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+            return
 
 
 def resolve_runtime_dtype(*, precision: str, device: torch.device) -> torch.dtype:
@@ -300,7 +367,11 @@ def resolve_runtime_dtype(*, precision: str, device: torch.device) -> torch.dtyp
         if device.type not in ("cuda", "xpu"):
             raise ValueError("precision='bf16' currently requires CUDA or XPU device.")
         return torch.bfloat16
-    raise ValueError(f"Unsupported precision={precision!r}. Expected one of: fp32, bf16.")
+    if mode == "fp16":
+        if device.type != "cuda":
+            raise ValueError("precision='fp16' currently requires CUDA device.")
+        return torch.float16
+    raise ValueError(f"Unsupported precision={precision!r}. Expected one of: fp32, bf16, fp16.")
 
 
 def resolve_cfg_scales(
@@ -485,10 +556,22 @@ class InferenceRuntime:
         self.codec = codec
         self.default_text_max_len = default_text_max_len
         self.default_caption_max_len = default_caption_max_len
-        self.watermarker = SilentCipherWatermarker(device=str(self.codec_device))
+        self.watermarker = (
+            SilentCipherWatermarker(device=str(self.codec_device))
+            if bool(self.key.enable_watermark)
+            else None
+        )
         self._infer_lock = threading.Lock()
         self._model_dtype = next(self.model.parameters()).dtype
         self._lora_adapter_names: dict[str, str] = {}
+        self._reference_condition_cache: OrderedDict[_ReferenceCacheKey, _ReferenceCondition] = (
+            OrderedDict()
+        )
+        self._reference_condition_cache_max_entries = 32
+        self._speaker_condition_cache: OrderedDict[_ReferenceCacheKey, _SpeakerCondition] = (
+            OrderedDict()
+        )
+        self._speaker_condition_cache_max_entries = 32
 
     @classmethod
     def from_key(cls, key: RuntimeKey) -> InferenceRuntime:
@@ -508,8 +591,10 @@ class InferenceRuntime:
         )
         model_cfg = ModelConfig(**model_cfg_dict)
 
-        model = TextToLatentRFDiT(model_cfg).to(model_device)
+        # checkpoint は FP32 のため、GPU へ載せる前に CPU 上で state_dict を反映する
+        model = TextToLatentRFDiT(model_cfg)
         model.load_state_dict(model_state)
+        del model_state
         model = _move_inference_module(model, device=model_device, dtype=model_dtype)
         model.eval()
         model = _maybe_compile_inference_model(
@@ -560,6 +645,7 @@ class InferenceRuntime:
             deterministic_encode=bool(key.codec_deterministic_encode),
             deterministic_decode=bool(key.codec_deterministic_decode),
         )
+        _empty_cuda_cache_if_needed(model_device, codec_device)
         if model_cfg.latent_dim != codec.latent_dim:
             raise ValueError(
                 f"Latent dimension mismatch: checkpoint latent_dim={model_cfg.latent_dim} but codec latent_dim={codec.latent_dim}. "
@@ -668,6 +754,150 @@ class InferenceRuntime:
         self.model.eval()
         return nullcontext()
 
+    def _reference_cache_key(self, req: SamplingRequest) -> _ReferenceCacheKey | None:
+        source_type: str
+        source_path: str | None
+        if req.ref_latent is not None:
+            source_type = "latent"
+            source_path = req.ref_latent
+        elif req.ref_wav is not None:
+            source_type = "wav"
+            source_path = req.ref_wav
+        else:
+            return None
+
+        path = Path(str(source_path)).expanduser()
+        stat = path.stat()
+        lora_adapter = self._resolve_lora_adapter_path(req.lora_adapter)
+        return _ReferenceCacheKey(
+            source_type=source_type,
+            path=str(path.resolve()),
+            mtime_ns=int(stat.st_mtime_ns),
+            size=int(stat.st_size),
+            max_ref_seconds=None if req.max_ref_seconds is None else float(req.max_ref_seconds),
+            ref_normalize_db=None if req.ref_normalize_db is None else float(req.ref_normalize_db),
+            ref_ensure_max=bool(req.ref_ensure_max),
+            model_device=str(self.model_device),
+            model_dtype=str(self._model_dtype),
+            latent_patch_size=int(self.model_cfg.latent_patch_size),
+            speaker_patch_size=int(self.model_cfg.speaker_patch_size),
+            lora_adapter=lora_adapter,
+        )
+
+    def _get_cached_reference_condition(
+        self,
+        key: _ReferenceCacheKey | None,
+        *,
+        batch_size: int,
+        messages: list[str],
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if key is None:
+            return None, None
+        cached = self._reference_condition_cache.get(key)
+        if cached is None:
+            return None, None
+        self._reference_condition_cache.move_to_end(key)
+        messages.append("info: using cached reference conditioning.")
+        return self._expand_reference_condition(cached, batch_size=batch_size)
+
+    def _put_cached_reference_condition(
+        self,
+        key: _ReferenceCacheKey | None,
+        condition: _ReferenceCondition,
+    ) -> None:
+        if key is None:
+            return
+        self._reference_condition_cache[key] = condition
+        self._reference_condition_cache.move_to_end(key)
+        while len(self._reference_condition_cache) > self._reference_condition_cache_max_entries:
+            self._reference_condition_cache.popitem(last=False)
+
+    @staticmethod
+    def _expand_reference_condition(
+        condition: _ReferenceCondition,
+        *,
+        batch_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if batch_size <= 1:
+            return condition.latent, condition.mask
+        return condition.latent.repeat(batch_size, 1, 1), condition.mask.repeat(batch_size, 1)
+
+    def _get_cached_speaker_condition(
+        self,
+        key: _ReferenceCacheKey | None,
+        *,
+        batch_size: int,
+        messages: list[str],
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if key is None:
+            return None, None
+        cached = self._speaker_condition_cache.get(key)
+        if cached is None:
+            return None, None
+        self._speaker_condition_cache.move_to_end(key)
+        messages.append("info: using cached speaker conditioning.")
+        return self._expand_speaker_condition(cached, batch_size=batch_size)
+
+    def _put_cached_speaker_condition(
+        self,
+        key: _ReferenceCacheKey | None,
+        condition: _SpeakerCondition,
+    ) -> None:
+        if key is None:
+            return
+        self._speaker_condition_cache[key] = condition
+        self._speaker_condition_cache.move_to_end(key)
+        while len(self._speaker_condition_cache) > self._speaker_condition_cache_max_entries:
+            self._speaker_condition_cache.popitem(last=False)
+
+    @staticmethod
+    def _expand_speaker_condition(
+        condition: _SpeakerCondition,
+        *,
+        batch_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if batch_size <= 1:
+            return condition.state, condition.mask
+        return condition.state.repeat(batch_size, 1, 1), condition.mask.repeat(batch_size, 1)
+
+    def _load_cached_speaker_condition(
+        self,
+        *,
+        req: SamplingRequest,
+        ref_latent: torch.Tensor | None,
+        ref_mask: torch.Tensor | None,
+        batch_size: int,
+        messages: list[str],
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if not self.model_cfg.use_speaker_condition:
+            return None, None
+        if req.no_ref or req.ref_embed is not None:
+            return None, None
+        if ref_latent is None or ref_mask is None:
+            return None, None
+
+        cache_key = self._reference_cache_key(req)
+        cached_state, cached_mask = self._get_cached_speaker_condition(
+            cache_key,
+            batch_size=batch_size,
+            messages=messages,
+        )
+        if cached_state is not None and cached_mask is not None:
+            return cached_state, cached_mask
+
+        state, mask = self.model.encode_speaker_condition(
+            batch_size=1,
+            dtype=self._model_dtype,
+            device=self.model_device,
+            ref_latent=ref_latent[:1],
+            ref_mask=ref_mask[:1],
+            speaker_uncond_mode=req.speaker_uncond_mode,
+        )
+        condition = _SpeakerCondition(state=state.detach(), mask=mask.detach())
+        self._put_cached_speaker_condition(cache_key, condition)
+        messages.append("info: cached speaker conditioning.")
+        return self._expand_speaker_condition(condition, batch_size=batch_size)
+
     def _load_reference_latent(
         self,
         *,
@@ -700,6 +930,15 @@ class InferenceRuntime:
 
         if req.ref_wav is None and req.ref_latent is None:
             raise ValueError("Specify either ref_wav/ref_latent, or set no_ref=True.")
+
+        cache_key = self._reference_cache_key(req)
+        cached_latent, cached_mask = self._get_cached_reference_condition(
+            cache_key,
+            batch_size=batch_size,
+            messages=messages,
+        )
+        if cached_latent is not None and cached_mask is not None:
+            return cached_latent, cached_mask
 
         max_ref_latent_steps = None
         if req.max_ref_seconds is not None and req.max_ref_seconds > 0:
@@ -756,14 +995,14 @@ class InferenceRuntime:
             raise ValueError(
                 "Reference latent length became zero after patchify. Use longer reference audio."
             )
-        if batch_size > 1:
-            ref_latent_patched = ref_latent_patched.repeat(batch_size, 1, 1)
         ref_mask = torch.ones(
-            (batch_size, ref_latent_patched.shape[1]),
+            (1, ref_latent_patched.shape[1]),
             dtype=torch.bool,
             device=self.model_device,
         )
-        return ref_latent_patched, ref_mask
+        condition = _ReferenceCondition(latent=ref_latent_patched, mask=ref_mask)
+        self._put_cached_reference_condition(cache_key, condition)
+        return self._expand_reference_condition(condition, batch_size=batch_size)
 
     def _load_speaker_embedding_condition(
         self,
@@ -823,7 +1062,7 @@ class InferenceRuntime:
                 self.key.model_precision,
                 self.key.codec_device,
                 self.key.codec_precision,
-                self.watermarker.ready,
+                self.watermarker is not None and self.watermarker.ready,
                 req.cfg_guidance_mode,
                 req.seconds,
                 req.num_steps,
@@ -1002,6 +1241,20 @@ class InferenceRuntime:
                     batch_size=num_candidates,
                     messages=messages,
                 )
+                (
+                    cached_speaker_state,
+                    cached_speaker_mask,
+                ) = self._load_cached_speaker_condition(
+                    req=req,
+                    ref_latent=ref_latent,
+                    ref_mask=ref_mask,
+                    batch_size=num_candidates,
+                    messages=messages,
+                )
+                if cached_speaker_state is not None and cached_speaker_mask is not None:
+                    speaker_state_override = cached_speaker_state
+                    speaker_mask_override = cached_speaker_mask
+                    ref_latent, ref_mask = None, None
             else:
                 ref_latent, ref_mask = None, None
             stage_sec = _measure_end(self.model_device, t0, self.codec_device)
@@ -1011,6 +1264,7 @@ class InferenceRuntime:
             _log(f"[runtime] prepare_reference: {stage_sec * 1000.0:.1f} ms")
 
             hop_length = int(self.codec.model.hop_length)
+            encoded_conditions = None
             if manual_seconds is not None:
                 clamped_seconds = min(max_seconds, max(min_seconds, manual_seconds))
                 if clamped_seconds != manual_seconds:
@@ -1040,7 +1294,7 @@ class InferenceRuntime:
                     max_text_len=text_max_len,
                     has_speaker=has_speaker_duration,
                 ).to(self.model_device)
-                (
+                encoded_conditions = (
                     duration_text_state,
                     duration_text_mask,
                     duration_speaker_state,
@@ -1113,6 +1367,16 @@ class InferenceRuntime:
                     _log(msg)
 
             t0 = _measure_start(self.model_device)
+            noise_dtype = None
+            if req.noise_precision is not None and str(req.noise_precision).strip().lower() not in {
+                "",
+                "model",
+                "runtime",
+            }:
+                noise_dtype = resolve_runtime_dtype(
+                    precision=str(req.noise_precision),
+                    device=self.model_device,
+                )
             z_patched = sample_euler_rf_cfg(
                 model=self.model,
                 text_input_ids=text_ids,
@@ -1143,6 +1407,8 @@ class InferenceRuntime:
                 t_schedule_mode=str(req.t_schedule_mode),
                 sway_coeff=float(req.sway_coeff),
                 waveex=req.waveex,
+                encoded_conditions=encoded_conditions,
+                noise_dtype=noise_dtype,
             )
             stage_sec = _measure_end(self.model_device, t0)
             stage_timings.append(("sample_rf", stage_sec))
@@ -1171,47 +1437,45 @@ class InferenceRuntime:
             z = z[:, :latent_steps]
 
             t0 = _measure_start(self.model_device, self.codec_device)
+            hop_length = int(self.codec.model.hop_length)
+            max_samples_per_candidate = torch.full(
+                (num_candidates,),
+                int(target_samples),
+                dtype=torch.long,
+                device=self.model_device,
+            )
+            if bool(req.trim_tail):
+                flattening_points = find_flattening_points(
+                    z,
+                    window_size=max(1, int(req.tail_window_size)),
+                    std_threshold=float(req.tail_std_threshold),
+                    mean_threshold=float(req.tail_mean_threshold),
+                )
+                flattening_samples = flattening_points * hop_length
+                max_samples_per_candidate = torch.where(
+                    flattening_samples > 0,
+                    torch.minimum(max_samples_per_candidate, flattening_samples),
+                    max_samples_per_candidate,
+                )
+            max_samples_list = [
+                int(max_samples)
+                for max_samples in max_samples_per_candidate.detach().cpu().tolist()
+            ]
             trimmed_audios: list[torch.Tensor] = []
             if decode_mode == "batch":
                 audio_batch = self.codec.decode_latent(z).cpu()
                 for i in range(num_candidates):
                     audio_i = audio_batch[i]
-                    max_samples = target_samples
-                    if bool(req.trim_tail):
-                        flattening_point = find_flattening_point(
-                            z[i],
-                            window_size=max(1, int(req.tail_window_size)),
-                            std_threshold=float(req.tail_std_threshold),
-                            mean_threshold=float(req.tail_mean_threshold),
-                        )
-                        flattening_samples = int(
-                            flattening_point * int(self.codec.model.hop_length)
-                        )
-                        if flattening_samples > 0:
-                            max_samples = min(max_samples, flattening_samples)
-                    trimmed_audios.append(audio_i[:, :max_samples])
+                    trimmed_audios.append(audio_i[:, : max_samples_list[i]])
             else:
                 for i in range(num_candidates):
                     audio_i = self.codec.decode_latent(z[i : i + 1]).cpu()[0]
-                    max_samples = target_samples
-                    if bool(req.trim_tail):
-                        flattening_point = find_flattening_point(
-                            z[i],
-                            window_size=max(1, int(req.tail_window_size)),
-                            std_threshold=float(req.tail_std_threshold),
-                            mean_threshold=float(req.tail_mean_threshold),
-                        )
-                        flattening_samples = int(
-                            flattening_point * int(self.codec.model.hop_length)
-                        )
-                        if flattening_samples > 0:
-                            max_samples = min(max_samples, flattening_samples)
-                    trimmed_audios.append(audio_i[:, :max_samples])
+                    trimmed_audios.append(audio_i[:, : max_samples_list[i]])
             stage_sec = _measure_end(self.model_device, t0, self.codec_device)
             stage_timings.append(("decode_latent", stage_sec))
             _log(f"[runtime] decode_latent ({decode_mode}): {stage_sec * 1000.0:.1f} ms")
 
-            if self.watermarker.ready:
+            if self.watermarker is not None and self.watermarker.ready:
                 t0 = _measure_start(self.codec_device)
                 trimmed_audios = self.watermarker.encode_batch(
                     trimmed_audios,
@@ -1220,7 +1484,7 @@ class InferenceRuntime:
                 stage_sec = _measure_end(self.codec_device, t0)
                 stage_timings.append(("silentcipher_watermark", stage_sec))
                 _log(f"[runtime] silentcipher_watermark: {stage_sec * 1000.0:.1f} ms")
-            else:
+            elif self.watermarker is not None:
                 msg = (
                     "warning: SilentCipher watermark is unavailable; generated audio was not "
                     "watermarked."
