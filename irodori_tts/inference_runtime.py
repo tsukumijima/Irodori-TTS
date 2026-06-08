@@ -252,6 +252,7 @@ class SamplingRequest:
     max_ref_seconds: float | None = 30.0
     max_text_len: int | None = None
     max_caption_len: int | None = None
+    latent_patch_bucket_multiple: int | None = None
     num_steps: int = 40
     cfg_scale_text: float = 3.0
     cfg_scale_caption: float = 3.0
@@ -298,6 +299,13 @@ class SamplingResult:
     messages: list[str]
     latent_steps: int = 0
     patched_steps: int = 0
+    sampling_patched_steps: int = 0
+    predicted_duration_frames: float | None = None
+    scaled_duration_frames: float | None = None
+    rounded_duration_frames: int | None = None
+    min_duration_frames: int | None = None
+    max_duration_frames: int | None = None
+    duration_was_clamped: bool = False
 
 
 @dataclass(frozen=True)
@@ -1544,9 +1552,32 @@ class InferenceRuntime:
                     _log(duration_msg)
                 target_samples = max(1, int(clamped_seconds * self.codec.sample_rate))
                 latent_steps = math.ceil(target_samples / hop_length)
+                pred_frames = None
+                scaled_frames = None
+                rounded_frames = int(latent_steps)
+                min_frames = max(1, math.ceil(min_seconds * self.codec.sample_rate / hop_length))
+                max_frames = max(1, math.floor(max_seconds * self.codec.sample_rate / hop_length))
+                duration_was_clamped = clamped_seconds != manual_seconds
                 duration_msg = f"info: using manual duration {clamped_seconds:.3f}s."
                 messages.append(duration_msg)
                 _log(duration_msg)
+                t0 = _measure_start(self.model_device)
+                encoded_conditions = self.model.encode_conditions(
+                    text_input_ids=text_ids,
+                    text_mask=text_mask,
+                    ref_latent=ref_latent,
+                    ref_mask=ref_mask,
+                    caption_input_ids=caption_ids,
+                    caption_mask=caption_mask,
+                    speaker_state_override=speaker_state_override,
+                    speaker_mask_override=speaker_mask_override,
+                    caption_state_override=caption_state_override,
+                    caption_mask_override=caption_mask_override,
+                    speaker_uncond_mode=req.speaker_uncond_mode,
+                )
+                stage_sec = _measure_end(self.model_device, t0)
+                stage_timings.append(("encode_conditions", stage_sec))
+                _log(f"[runtime] encode_conditions: {stage_sec * 1000.0:.1f} ms")
             elif self.model_cfg.use_duration_predictor:
                 t0 = _measure_start(self.model_device)
                 has_speaker_duration = torch.zeros(
@@ -1604,8 +1635,9 @@ class InferenceRuntime:
                 scaled_frames = pred_frames * duration_scale
                 min_frames = max(1, math.ceil(min_seconds * self.codec.sample_rate / hop_length))
                 max_frames = max(1, math.floor(max_seconds * self.codec.sample_rate / hop_length))
-                latent_steps = int(round(scaled_frames))
-                latent_steps = max(min_frames, min(max_frames, latent_steps))
+                rounded_frames = int(round(scaled_frames))
+                latent_steps = max(min_frames, min(max_frames, rounded_frames))
+                duration_was_clamped = latent_steps != rounded_frames
                 target_samples = int(latent_steps * hop_length)
                 stage_sec = _measure_end(self.model_device, t0)
                 stage_timings.append(("predict_duration", stage_sec))
@@ -1621,10 +1653,46 @@ class InferenceRuntime:
                 fallback_seconds = 30.0
                 target_samples = int(fallback_seconds * self.codec.sample_rate)
                 latent_steps = math.ceil(target_samples / hop_length)
+                pred_frames = None
+                scaled_frames = None
+                rounded_frames = None
+                min_frames = None
+                max_frames = None
+                duration_was_clamped = False
                 msg = "info: checkpoint has no duration predictor; falling back to 30.000s."
                 messages.append(msg)
                 _log(msg)
             patched_steps = math.ceil(latent_steps / self.model_cfg.latent_patch_size)
+            sampling_patched_steps = int(patched_steps)
+            latent_mask = None
+            bucket_multiple = (
+                None
+                if req.latent_patch_bucket_multiple is None
+                else int(req.latent_patch_bucket_multiple)
+            )
+            if bucket_multiple is not None:
+                if bucket_multiple <= 0:
+                    raise ValueError(
+                        "latent_patch_bucket_multiple must be > 0 when provided, "
+                        f"got {req.latent_patch_bucket_multiple}"
+                    )
+                sampling_patched_steps = (
+                    math.ceil(sampling_patched_steps / bucket_multiple) * bucket_multiple
+                )
+                if sampling_patched_steps != patched_steps:
+                    latent_mask = torch.zeros(
+                        (num_candidates, sampling_patched_steps),
+                        dtype=torch.bool,
+                        device=self.model_device,
+                    )
+                    latent_mask[:, :patched_steps] = True
+                    msg = (
+                        "info: latent patch bucket enabled "
+                        f"(actual_patches={patched_steps}, sampling_patches={sampling_patched_steps}, "
+                        f"multiple={bucket_multiple})."
+                    )
+                    messages.append(msg)
+                    _log(msg)
 
             if isinstance(self.train_cfg, dict):
                 fixed_steps = self.train_cfg.get("fixed_target_latent_steps")
@@ -1653,7 +1721,7 @@ class InferenceRuntime:
                 text_mask=text_mask,
                 ref_latent=ref_latent,
                 ref_mask=ref_mask,
-                sequence_length=patched_steps,
+                sequence_length=sampling_patched_steps,
                 caption_input_ids=caption_ids,
                 caption_mask=caption_mask,
                 speaker_state_override=speaker_state_override,
@@ -1683,6 +1751,7 @@ class InferenceRuntime:
                 noise_dtype=noise_dtype,
                 initial_noise=req.initial_noise,
                 initial_noise_offset=int(req.initial_noise_offset),
+                latent_mask=latent_mask,
             )
             stage_sec = _measure_end(self.model_device, t0)
             stage_timings.append(("sample_rf", stage_sec))
@@ -1780,6 +1849,13 @@ class InferenceRuntime:
             messages=messages,
             latent_steps=int(latent_steps),
             patched_steps=int(patched_steps),
+            sampling_patched_steps=int(sampling_patched_steps),
+            predicted_duration_frames=None if pred_frames is None else float(pred_frames),
+            scaled_duration_frames=None if scaled_frames is None else float(scaled_frames),
+            rounded_duration_frames=None if rounded_frames is None else int(rounded_frames),
+            min_duration_frames=None if min_frames is None else int(min_frames),
+            max_duration_frames=None if max_frames is None else int(max_frames),
+            duration_was_clamped=bool(duration_was_clamped),
         )
 
     def unload(self) -> None:

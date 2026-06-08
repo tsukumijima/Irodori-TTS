@@ -156,6 +156,7 @@ def sample_euler_rf_cfg(
     noise_dtype: torch.dtype | None = None,
     initial_noise: torch.Tensor | None = None,
     initial_noise_offset: int = 0,
+    latent_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Euler sampling over RF ODE with text/reference/caption conditioning CFG.
@@ -208,6 +209,15 @@ def sample_euler_rf_cfg(
         x_t = initial_noise[:, noise_start:noise_end, :].to(device=device, dtype=dtype).clone()
     if truncation_factor is not None:
         x_t = x_t * float(truncation_factor)
+    if latent_mask is not None:
+        if latent_mask.ndim != 2:
+            raise ValueError(f"latent_mask must have shape (B, S), got {tuple(latent_mask.shape)}.")
+        if latent_mask.shape[0] != batch_size or latent_mask.shape[1] != sequence_length:
+            raise ValueError(
+                "latent_mask shape mismatch: "
+                f"expected ({batch_size}, {sequence_length}), got {tuple(latent_mask.shape)}."
+            )
+        latent_mask = latent_mask.to(device=device, dtype=torch.bool)
 
     if cfg_scale is not None:
         # Backward compatibility for old single-scale caller.
@@ -411,6 +421,9 @@ def sample_euler_rf_cfg(
     independent_speaker_mask = _cat_optional_tensors([bundle[3] for bundle in independent_bundles])
     independent_caption_state = _cat_optional_tensors([bundle[4] for bundle in independent_bundles])
     independent_caption_mask = _cat_optional_tensors([bundle[5] for bundle in independent_bundles])
+    independent_latent_mask = (
+        None if latent_mask is None else torch.cat([latent_mask] * cfg_batch_mult, dim=0)
+    )
 
     joint_uncond_bundle = _bundle(
         text_state=text_state_uncond,
@@ -581,6 +594,7 @@ def sample_euler_rf_cfg(
                     caption_state=independent_caption_state,
                     caption_mask=independent_caption_mask,
                     context_kv_cache=context_kv_cfg,
+                    latent_mask=independent_latent_mask,
                 )
                 chunks = v_out.chunk(cfg_batch_mult, dim=0)
                 v = chunks[0]
@@ -597,6 +611,7 @@ def sample_euler_rf_cfg(
                     caption_state=caption_state_cond,
                     caption_mask=caption_mask_cond,
                     context_kv_cache=context_kv_cond,
+                    latent_mask=latent_mask,
                 )
                 if use_joint_cfg:
                     if len(enabled_cfg_names) > 1:
@@ -617,6 +632,7 @@ def sample_euler_rf_cfg(
                         caption_state=joint_uncond_bundle[4],
                         caption_mask=joint_uncond_bundle[5],
                         context_kv_cache=context_kv_joint_uncond,
+                        latent_mask=latent_mask,
                     )
                     v = v_cond + joint_scale * (v_cond - v_uncond_joint)
                 elif use_alternating_cfg:
@@ -632,6 +648,7 @@ def sample_euler_rf_cfg(
                         caption_state=alt_bundle[4],
                         caption_mask=alt_bundle[5],
                         context_kv_cache=context_kv_alternating.get(alt_name),
+                        latent_mask=latent_mask,
                     )
                     v = v_cond + cfg_scales[alt_name] * (v_cond - v_uncond_alt)
                 else:
@@ -647,6 +664,7 @@ def sample_euler_rf_cfg(
                 caption_state=caption_state_cond,
                 caption_mask=caption_mask_cond,
                 context_kv_cache=context_kv_cond,
+                latent_mask=latent_mask,
             )
 
         if rescale_k is not None and rescale_sigma is not None:
