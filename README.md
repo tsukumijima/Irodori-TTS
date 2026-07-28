@@ -60,6 +60,11 @@ cd Irodori-TTS
 uv sync --extra cu128  # NVIDIA CUDA 12.8 (Linux/Windows)
 ```
 
+The default installation contains the inference runtime only. Add the
+`watermark`, `gradio`, `data`, `training`, or `lora` extra for the corresponding
+optional workflow. For example, a CUDA training environment can be installed
+with `uv sync --extra cu128 --extra training --extra data`.
+
 If you want to explicitly select a PyTorch backend, use one of the backend
 extras below:
 
@@ -150,6 +155,12 @@ uv run --no-sync python infer.py \
 ```
 
 ### Gradio Web UI
+
+Install the Gradio extra before starting either web UI:
+
+```bash
+uv sync --extra cu128 --extra gradio
+```
 
 ```bash
 uv run --no-sync python gradio_app.py --server-name 0.0.0.0 --server-port 7860
@@ -275,7 +286,14 @@ For tuning guidance and detailed explanations of inference options, see the
 
 Generated audio is passed through [SilentCipher](https://github.com/sony/silentcipher) watermarking automatically when the dependency and model files are available.
 
+Install it explicitly with `uv sync --extra cu128 --extra watermark`. The
+inference runtime continues without watermarking when this extra is absent.
+
 ## Training
+
+Install the data preparation dependencies with
+`uv sync --extra cu128 --extra data` before preparing manifests. Add
+`--extra training` for training runs.
 
 ### 1. Prepare Manifest (Precompute DACVAE Latents)
 
