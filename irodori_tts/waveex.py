@@ -118,12 +118,12 @@ def available_wavelets() -> list[str]:
     return sorted(_WAVELET_BANKS.keys())
 
 
-def _get_filter_bank(name: str, *, device: torch.device, dtype: torch.dtype) -> dict[str, torch.Tensor]:
+def _get_filter_bank(
+    name: str, *, device: torch.device, dtype: torch.dtype
+) -> dict[str, torch.Tensor]:
     key = str(name).strip().lower()
     if key not in _WAVELET_BANKS:
-        raise ValueError(
-            f"Unsupported wavelet={name!r}. Expected one of: {available_wavelets()}"
-        )
+        raise ValueError(f"Unsupported wavelet={name!r}. Expected one of: {available_wavelets()}")
     bank = _WAVELET_BANKS[key]
     return {k: v.to(device=device, dtype=dtype) for k, v in bank.items()}
 
@@ -252,9 +252,7 @@ class WaveExConfig:
 
     def __post_init__(self) -> None:
         if self.taylor_order not in (1, 2):
-            raise ValueError(
-                f"taylor_order must be 1 or 2, got {self.taylor_order}."
-            )
+            raise ValueError(f"taylor_order must be 1 or 2, got {self.taylor_order}.")
         if self.high_freq_mode not in {"extrapolate", "freeze", "zero"}:
             raise ValueError(
                 "high_freq_mode must be one of: extrapolate, freeze, zero; "
@@ -264,8 +262,7 @@ class WaveExConfig:
             raise ValueError(f"history_size must be >= 2, got {self.history_size}.")
         if self.wavelet.lower() not in _WAVELET_BANKS:
             raise ValueError(
-                f"Unsupported wavelet={self.wavelet!r}. "
-                f"Expected one of: {available_wavelets()}"
+                f"Unsupported wavelet={self.wavelet!r}. Expected one of: {available_wavelets()}"
             )
 
     def resolve_ode_step_indices(self, num_steps: int) -> set[int]:
@@ -429,9 +426,7 @@ def parse_ode_step_indices(spec: str | None, *, num_steps: int) -> tuple[int, ..
                 f"Invalid ODE step index {part!r} in --waveex-ode-steps={spec!r}."
             ) from exc
         if value < 0 or value >= num_steps:
-            raise ValueError(
-                f"--waveex-ode-steps index {value} is out of range [0, {num_steps})."
-            )
+            raise ValueError(f"--waveex-ode-steps index {value} is out of range [0, {num_steps}).")
         indices.append(value)
     return tuple(sorted(set(indices)))
 
