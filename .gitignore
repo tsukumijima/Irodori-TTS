@@ -219,3 +219,6 @@ gradio_outputs/
 gradio_outputs_voicedesign/
 outputs/
 data/
+
+# Machine-local experiment configs contain non-portable paths.
+configs/train_500m_v3_voice_design_lora_*.yaml
