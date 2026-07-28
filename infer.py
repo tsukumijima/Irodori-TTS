@@ -33,6 +33,23 @@ def _parse_optional_float(value: str) -> float | None:
     return out
 
 
+def _parse_condition_token_scale(value: str) -> tuple[str, float]:
+    raw = str(value)
+    if "=" not in raw:
+        raise argparse.ArgumentTypeError("Expected condition token scale as token=scale.")
+    token, scale_raw = raw.split("=", 1)
+    token = token.strip()
+    if token == "":
+        raise argparse.ArgumentTypeError("Condition token name must not be empty.")
+    try:
+        scale = float(scale_raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Condition token scale must be a number.") from exc
+    if not math.isfinite(scale):
+        raise argparse.ArgumentTypeError("Condition token scale must be finite.")
+    return token, scale
+
+
 def _print_timings(timings: list[tuple[str, float]], total_to_decode: float) -> None:
     print("[timing] ---- post-model-load to decode ----")
     for name, sec in timings:
@@ -231,6 +248,7 @@ def main() -> None:
     parser.add_argument("--cfg-scale-text", type=float, default=3.0)
     parser.add_argument("--cfg-scale-caption", type=float, default=3.0)
     parser.add_argument("--cfg-scale-speaker", type=float, default=5.0)
+    parser.add_argument("--cfg-scale-condition", type=float, default=0.0)
     parser.add_argument(
         "--cfg-guidance-mode",
         choices=["independent", "joint", "alternating"],
@@ -250,6 +268,19 @@ def main() -> None:
     )
     parser.add_argument("--cfg-min-t", type=float, default=0.5)
     parser.add_argument("--cfg-max-t", type=float, default=1.0)
+    parser.add_argument(
+        "--speaker-condition-token",
+        action="append",
+        default=None,
+        help="Speaker condition token name from the LoRA adapter metadata. Repeat to pass multiple tokens.",
+    )
+    parser.add_argument(
+        "--condition-token-scale",
+        action="append",
+        type=_parse_condition_token_scale,
+        default=None,
+        help="Condition token strength in token=scale form. Tokens not listed here use 1.0.",
+    )
     parser.add_argument(
         "--truncation-factor",
         type=float,
@@ -455,18 +486,26 @@ def main() -> None:
     use_speaker_for_request = bool(
         runtime.model_cfg.use_speaker_condition_resolved and not args.no_ref
     )
-    cfg_scale_text, cfg_scale_caption, cfg_scale_speaker, scale_messages = resolve_cfg_scales(
-        cfg_guidance_mode=str(args.cfg_guidance_mode),
-        cfg_scale_text=float(args.cfg_scale_text),
-        cfg_scale_caption=float(args.cfg_scale_caption),
-        cfg_scale_speaker=float(args.cfg_scale_speaker),
-        cfg_scale=float(args.cfg_scale) if args.cfg_scale is not None else None,
-        use_caption_condition=bool(
-            runtime.model_cfg.use_caption_condition
-            and args.caption is not None
-            and str(args.caption).strip() != ""
-        ),
-        use_speaker_condition=use_speaker_for_request,
+    condition_token_scales = (
+        None if args.condition_token_scale is None else dict(args.condition_token_scale)
+    )
+    has_condition_tokens = bool(args.speaker_condition_token)
+    cfg_scale_text, cfg_scale_caption, cfg_scale_speaker, cfg_scale_condition, scale_messages = (
+        resolve_cfg_scales(
+            cfg_guidance_mode=str(args.cfg_guidance_mode),
+            cfg_scale_text=float(args.cfg_scale_text),
+            cfg_scale_caption=float(args.cfg_scale_caption),
+            cfg_scale_speaker=float(args.cfg_scale_speaker),
+            cfg_scale_condition=float(args.cfg_scale_condition),
+            cfg_scale=float(args.cfg_scale) if args.cfg_scale is not None else None,
+            use_caption_condition=bool(
+                runtime.model_cfg.use_caption_condition
+                and args.caption is not None
+                and str(args.caption).strip() != ""
+            ),
+            use_speaker_condition=use_speaker_for_request,
+            use_token_condition=has_condition_tokens,
+        )
     )
     for msg in scale_messages:
         print(msg)
@@ -508,6 +547,7 @@ def main() -> None:
             cfg_scale_text=cfg_scale_text,
             cfg_scale_caption=cfg_scale_caption,
             cfg_scale_speaker=cfg_scale_speaker,
+            cfg_scale_condition=cfg_scale_condition,
             cfg_guidance_mode=str(args.cfg_guidance_mode),
             cfg_scale=None,
             cfg_min_t=float(args.cfg_min_t),
@@ -536,6 +576,8 @@ def main() -> None:
             tail_std_threshold=float(args.tail_std_threshold),
             tail_mean_threshold=float(args.tail_mean_threshold),
             lora_adapter=None if args.lora_adapter is None else str(args.lora_adapter),
+            speaker_condition_tokens=args.speaker_condition_token,
+            condition_token_scales=condition_token_scales,
             waveex=waveex_cfg,
         ),
         log_fn=None,

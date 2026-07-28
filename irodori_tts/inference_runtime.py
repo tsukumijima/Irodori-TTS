@@ -14,8 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import soundfile as sf
 import torch
-import torchaudio
 from safetensors import safe_open
 from safetensors.torch import load_file as load_safetensors_file
 
@@ -23,8 +24,8 @@ from .codec import DACVAECodec, patchify_latent, unpatchify_latent
 from .config import ModelConfig
 from .duration import build_duration_features
 from .lora import checkpoint_state_uses_lora, is_lora_adapter_dir, load_lora_adapter
-from .model import TextToLatentRFDiT
-from .rf import sample_euler_rf_cfg
+from .model import EncodedConditions, TextToLatentRFDiT
+from .rf import TrajectoryIntervention, VelocityFieldGuidance, sample_euler_rf_cfg
 from .speaker_inversion import (
     load_speaker_inversion_payload,
     speaker_inversion_batch_tensors,
@@ -88,6 +89,30 @@ def list_available_runtime_devices() -> list[str]:
 
 def default_runtime_device() -> str:
     return list_available_runtime_devices()[0]
+
+
+class ContextCapacityExceededError(ValueError):
+    """エンコード済み条件の有効トークン数が推論実装の固定容量を超えたことを表す。"""
+
+    def __init__(
+        self,
+        *,
+        actual: int,
+        capacity: int,
+        text_tokens: int,
+        speaker_tokens: int,
+        caption_tokens: int,
+    ) -> None:
+        super().__init__(
+            "Encoded context capacity exceeded: "
+            f"actual={actual}, capacity={capacity}, text={text_tokens}, "
+            f"speaker={speaker_tokens}, caption={caption_tokens}."
+        )
+        self.actual = actual
+        self.capacity = capacity
+        self.text_tokens = text_tokens
+        self.speaker_tokens = speaker_tokens
+        self.caption_tokens = caption_tokens
 
 
 def list_available_runtime_precisions(device: str | torch.device) -> list[str]:
@@ -259,6 +284,7 @@ class SamplingRequest:
     cfg_scale_text: float = 3.0
     cfg_scale_caption: float = 3.0
     cfg_scale_speaker: float = 5.0
+    cfg_scale_condition: float = 0.0
     cfg_guidance_mode: str = "independent"
     cfg_scale: float | None = None
     cfg_min_t: float = 0.5
@@ -267,6 +293,7 @@ class SamplingRequest:
     rescale_k: float | None = None
     rescale_sigma: float | None = None
     context_kv_cache: bool = True
+    cudnn_packed_attention: bool = False
     speaker_kv_scale: float | None = None
     speaker_kv_min_t: float | None = None
     speaker_kv_max_layers: int | None = None
@@ -281,6 +308,8 @@ class SamplingRequest:
     tail_std_threshold: float = 0.05
     tail_mean_threshold: float = 0.1
     lora_adapter: str | None = None
+    speaker_condition_tokens: list[str] | None = None
+    condition_token_scales: dict[str, float] | None = None
     waveex: WaveExConfig | None = None
     initial_noise: torch.Tensor | None = None
     initial_noise_offset: int = 0
@@ -288,6 +317,9 @@ class SamplingRequest:
     ## 参照音声長による SDPA 形状変動を抑え、cuDNN カーネルキャッシュヒット率を上げる
     speaker_ref_fixed_length: int | None = None
     speaker_ref_bucket_sizes: list[int] | None = None
+    # 後方互換のため、新規フィールドは既存の位置引数列の末尾へ追加
+    velocity_field_guidance: VelocityFieldGuidance | None = None
+    trajectory_intervention: TrajectoryIntervention | None = None
 
 
 @dataclass
@@ -324,6 +356,9 @@ class _ReferenceCacheKey:
     latent_patch_size: int
     speaker_patch_size: int
     lora_adapter: str | None
+    condition_token_ids: tuple[int, ...] = ()
+    condition_token_scales: tuple[float, ...] = ()
+    condition_vocabulary_hash: str | None = None
     # パディング設定もキャッシュキーに含め、異なるパディング条件でキャッシュ混在を防ぐ
     speaker_ref_fixed_length: int | None = None
     speaker_ref_bucket_sizes: tuple[int, ...] | None = None
@@ -348,12 +383,29 @@ class _CaptionCacheKey:
     model_device: str
     model_dtype: str
     lora_adapter: str | None
+    condition_token_ids: tuple[int, ...] = ()
+    condition_token_scales: tuple[float, ...] = ()
+    condition_vocabulary_hash: str | None = None
 
 
 @dataclass(frozen=True)
 class _CaptionCondition:
     state: torch.Tensor
     mask: torch.Tensor
+
+
+@dataclass(frozen=True)
+class _ConditionVocabulary:
+    token_to_id: dict[str, int]
+    vocabulary_hash: str
+
+
+@dataclass(frozen=True)
+class _ResolvedConditionTokens:
+    token_names: tuple[str, ...]
+    token_ids: tuple[int, ...]
+    token_scales: tuple[float, ...]
+    vocabulary_hash: str
 
 
 def _maybe_compile_inference_model(
@@ -466,19 +518,23 @@ def resolve_cfg_scales(
     cfg_scale_caption: float,
     cfg_scale_speaker: float,
     cfg_scale: float | None,
+    cfg_scale_condition: float = 0.0,
     use_caption_condition: bool = True,
     use_speaker_condition: bool = True,
-) -> tuple[float, float, float, list[str]]:
+    use_token_condition: bool = False,
+) -> tuple[float, float, float, float, list[str]]:
     """Normalize/validate CFG scales for guidance mode."""
     messages: list[str] = []
     text_val = float(cfg_scale_text)
     caption_val = float(cfg_scale_caption)
     speaker_val = float(cfg_scale_speaker)
+    condition_val = float(cfg_scale_condition)
 
     if cfg_scale is not None:
         text_val = float(cfg_scale)
         caption_val = float(cfg_scale)
         speaker_val = float(cfg_scale)
+        condition_val = float(cfg_scale)
     if not use_speaker_condition:
         if speaker_val > 0.0:
             messages.append(
@@ -486,18 +542,25 @@ def resolve_cfg_scales(
                 "ignoring cfg_scale_speaker."
             )
         speaker_val = 0.0
+    if not use_token_condition:
+        if condition_val > 0.0:
+            messages.append(
+                "info: condition token guidance is disabled for this request; "
+                "ignoring cfg_scale_condition."
+            )
+        condition_val = 0.0
 
     mode = str(cfg_guidance_mode).strip().lower()
-    enabled_vals = [value for value in (text_val, speaker_val) if value > 0.0]
+    enabled_vals = [value for value in (text_val, speaker_val, condition_val) if value > 0.0]
     if use_caption_condition and caption_val > 0.0:
         enabled_vals.append(caption_val)
     if mode == "joint" and enabled_vals and (max(enabled_vals) - min(enabled_vals) > 1e-6):
         raise ValueError(
-            "cfg_guidance_mode='joint' requires equal enabled cfg_scale_text/cfg_scale_caption/cfg_scale_speaker, "
+            "cfg_guidance_mode='joint' requires equal enabled cfg_scale_text/cfg_scale_caption/cfg_scale_speaker/cfg_scale_condition, "
             "or set cfg_scale."
         )
 
-    return text_val, caption_val, speaker_val, messages
+    return text_val, caption_val, speaker_val, condition_val, messages
 
 
 def _load_torch_checkpoint_payload(path: Path) -> dict:
@@ -629,6 +692,7 @@ class InferenceRuntime:
         codec: DACVAECodec,
         default_text_max_len: int,
         default_caption_max_len: int,
+        max_encoded_context_tokens: int | None = None,
     ) -> None:
         self.key = key
         self.model_device = resolve_runtime_device(key.model_device)
@@ -641,6 +705,13 @@ class InferenceRuntime:
         self.codec = codec
         self.default_text_max_len = default_text_max_len
         self.default_caption_max_len = default_caption_max_len
+        if max_encoded_context_tokens is not None and max_encoded_context_tokens <= 0:
+            raise ValueError(
+                "max_encoded_context_tokens must be greater than zero when provided: "
+                f"{max_encoded_context_tokens}"
+            )
+        # 固定長エンジンを接続した製品ランタイムだけが上限を設定し、通常の eager 推論は従来どおり無制限に扱う
+        self.max_encoded_context_tokens = max_encoded_context_tokens
         self.watermarker = (
             SilentCipherWatermarker(device=str(self.codec_device))
             if bool(self.key.enable_watermark)
@@ -661,6 +732,7 @@ class InferenceRuntime:
             OrderedDict()
         )
         self._caption_condition_cache_max_entries = 64
+        self._condition_vocabulary_cache: dict[str, _ConditionVocabulary] = {}
 
     @classmethod
     def from_key(cls, key: RuntimeKey) -> InferenceRuntime:
@@ -754,6 +826,48 @@ class InferenceRuntime:
             default_caption_max_len=default_caption_max_len,
         )
 
+    def _validate_encoded_context_capacity(
+        self,
+        encoded_conditions: EncodedConditions,
+    ) -> None:
+        """
+        RF の K/V 構築前に、固定長エンジンへ収まる有効条件トークン数か検査する。
+
+        Args:
+            encoded_conditions (EncodedConditions): 検査するエンコード済み条件
+        """
+
+        capacity = self.max_encoded_context_tokens
+        if capacity is None:
+            return
+
+        _, text_mask, _, speaker_mask, _, caption_mask = encoded_conditions
+        text_lengths = text_mask.to(dtype=torch.int64).sum(dim=1)
+        speaker_lengths = (
+            torch.zeros_like(text_lengths)
+            if speaker_mask is None
+            else speaker_mask.to(dtype=torch.int64).sum(dim=1)
+        )
+        caption_lengths = (
+            torch.zeros_like(text_lengths)
+            if caption_mask is None
+            else caption_mask.to(dtype=torch.int64).sum(dim=1)
+        )
+        context_lengths = text_lengths + speaker_lengths + caption_lengths
+        maximum_context_length = int(context_lengths.max().item())
+        if maximum_context_length <= capacity:
+            return
+
+        # 超過した候補と同じ行の内訳を返し、話者参照・本文・キャプションのどこを短縮すべきか判別できるようにする
+        maximum_index = int(context_lengths.argmax().item())
+        raise ContextCapacityExceededError(
+            actual=maximum_context_length,
+            capacity=capacity,
+            text_tokens=int(text_lengths[maximum_index].item()),
+            speaker_tokens=int(speaker_lengths[maximum_index].item()),
+            caption_tokens=int(caption_lengths[maximum_index].item()),
+        )
+
     def _resolve_lora_adapter_path(self, adapter_path: str | None) -> str | None:
         if adapter_path is None:
             return None
@@ -774,6 +888,132 @@ class InferenceRuntime:
     def _adapter_name_for_path(path: str) -> str:
         digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:16]
         return f"runtime_{digest}"
+
+    def _load_condition_vocabulary(self, adapter_path: str) -> _ConditionVocabulary:
+        cached = self._condition_vocabulary_cache.get(adapter_path)
+        if cached is not None:
+            return cached
+
+        metadata_path = Path(adapter_path) / "irodori_lora_metadata.json"
+        if not metadata_path.is_file():
+            raise ValueError(
+                "Condition tokens require irodori_lora_metadata.json in the LoRA adapter directory."
+            )
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        condition_vocabulary = payload.get("condition_vocabulary")
+        if not isinstance(condition_vocabulary, dict):
+            raise ValueError(f"LoRA metadata is missing condition_vocabulary: {metadata_path}")
+        token_to_id_raw = condition_vocabulary.get("token_to_id")
+        if not isinstance(token_to_id_raw, dict):
+            raise ValueError(
+                f"LoRA condition_vocabulary.token_to_id must be an object: {metadata_path}"
+            )
+        token_to_id = {str(token): int(token_id) for token, token_id in token_to_id_raw.items()}
+        raw_hash = payload.get("condition_vocabulary_hash") or condition_vocabulary.get("sha256")
+        if raw_hash is None:
+            # metadata に hash がない古い adapter でも、キャッシュ分離に使える安定 hash を作る
+            encoded = json.dumps(token_to_id, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            vocabulary_hash = hashlib.sha256(encoded).hexdigest()
+        else:
+            vocabulary_hash = str(raw_hash)
+        vocabulary = _ConditionVocabulary(
+            token_to_id=token_to_id,
+            vocabulary_hash=vocabulary_hash,
+        )
+        self._condition_vocabulary_cache[adapter_path] = vocabulary
+        return vocabulary
+
+    def _ensure_condition_embedding_for_adapter(self, adapter_path: str) -> None:
+        if not (Path(adapter_path) / "irodori_lora_metadata.json").is_file():
+            return
+        vocabulary = self._load_condition_vocabulary(adapter_path)
+        vocab_size = len(vocabulary.token_to_id)
+        if vocab_size <= 0:
+            return
+        current_embedding = getattr(self.model, "speaker_condition_embedding", None)
+        if current_embedding is not None:
+            if int(current_embedding.num_embeddings) != int(vocab_size):
+                raise ValueError(
+                    "LoRA condition vocabulary size mismatch: "
+                    f"model={int(current_embedding.num_embeddings)} adapter={vocab_size}"
+                )
+            return
+
+        # base checkpoint は条件 embedding を持たないため、PEFT が modules_to_save を復元する前に器を作る
+        self.model.speaker_condition_embedding = torch.nn.Embedding(
+            int(vocab_size),
+            int(self.model_cfg.speaker_dim),
+        )
+        self.model.cfg.speaker_condition_vocab_size = int(vocab_size)
+        self.model.cfg.speaker_condition_vocab_hash = vocabulary.vocabulary_hash
+        self.model_cfg.speaker_condition_vocab_size = int(vocab_size)
+        self.model_cfg.speaker_condition_vocab_hash = vocabulary.vocabulary_hash
+        self.model = _move_inference_module(
+            self.model,
+            device=self.model_device,
+            dtype=self._model_dtype,
+        )
+
+    def _resolve_condition_tokens(
+        self,
+        req: SamplingRequest,
+        *,
+        lora_adapter: str | None,
+    ) -> _ResolvedConditionTokens | None:
+        raw_tokens = req.speaker_condition_tokens
+        if raw_tokens is None or len(raw_tokens) == 0:
+            if req.condition_token_scales:
+                raise ValueError(
+                    "condition_token_scales cannot be specified without speaker_condition_tokens."
+                )
+            return None
+        if lora_adapter is None:
+            raise ValueError("speaker_condition_tokens require a LoRA adapter.")
+        if self.model_cfg.use_speaker_condition_resolved is False:
+            raise ValueError("speaker_condition_tokens require speaker conditioning support.")
+
+        vocabulary = self._load_condition_vocabulary(lora_adapter)
+        token_names = tuple(str(token).strip() for token in raw_tokens)
+        if any(token == "" for token in token_names):
+            raise ValueError("speaker_condition_tokens must not contain empty token names.")
+
+        token_ids: list[int] = []
+        unknown_tokens: list[str] = []
+        for token_name in token_names:
+            token_id = vocabulary.token_to_id.get(token_name)
+            if token_id is None:
+                unknown_tokens.append(token_name)
+                continue
+            token_ids.append(int(token_id))
+        if unknown_tokens:
+            allowed = ", ".join(sorted(vocabulary.token_to_id))
+            raise ValueError(
+                "Unknown speaker condition token(s): "
+                f"{', '.join(unknown_tokens)}. Allowed tokens: {allowed}"
+            )
+
+        scale_map = req.condition_token_scales or {}
+        unknown_scale_tokens = sorted(
+            str(token) for token in scale_map if str(token) not in token_names
+        )
+        if unknown_scale_tokens:
+            raise ValueError(
+                "condition_token_scales contains token(s) not present in speaker_condition_tokens: "
+                f"{', '.join(unknown_scale_tokens)}"
+            )
+        token_scales: list[float] = []
+        for token_name in token_names:
+            scale = float(scale_map.get(token_name, 1.0))
+            if not math.isfinite(scale):
+                raise ValueError(f"condition token scale must be finite: {token_name}")
+            token_scales.append(scale)
+
+        return _ResolvedConditionTokens(
+            token_names=token_names,
+            token_ids=tuple(token_ids),
+            token_scales=tuple(token_scales),
+            vocabulary_hash=vocabulary.vocabulary_hash,
+        )
 
     def _prepare_lora_for_request(
         self,
@@ -817,6 +1057,8 @@ class InferenceRuntime:
         if self.key.compile_model:
             raise RuntimeError("Dynamic LoRA loading is not compatible with compile_model=True.")
 
+        self._ensure_condition_embedding_for_adapter(resolved_path)
+
         adapter_name = self._lora_adapter_names.get(resolved_path)
         if adapter_name is None:
             adapter_name = self._adapter_name_for_path(resolved_path)
@@ -844,7 +1086,13 @@ class InferenceRuntime:
         self.model.eval()
         return nullcontext()
 
-    def _reference_cache_key(self, req: SamplingRequest) -> _ReferenceCacheKey | None:
+    def _reference_cache_key(
+        self,
+        req: SamplingRequest,
+        *,
+        resolved_condition_tokens: _ResolvedConditionTokens | None,
+        lora_adapter: str | None,
+    ) -> _ReferenceCacheKey | None:
         source_type: str
         source_path: str | None
         if req.ref_latent is not None:
@@ -858,7 +1106,6 @@ class InferenceRuntime:
 
         path = Path(str(source_path)).expanduser()
         stat = path.stat()
-        lora_adapter = self._resolve_lora_adapter_path(req.lora_adapter)
         return _ReferenceCacheKey(
             source_type=source_type,
             path=str(path.resolve()),
@@ -872,6 +1119,15 @@ class InferenceRuntime:
             latent_patch_size=int(self.model_cfg.latent_patch_size),
             speaker_patch_size=int(self.model_cfg.speaker_patch_size),
             lora_adapter=lora_adapter,
+            condition_token_ids=()
+            if resolved_condition_tokens is None
+            else resolved_condition_tokens.token_ids,
+            condition_token_scales=()
+            if resolved_condition_tokens is None
+            else resolved_condition_tokens.token_scales,
+            condition_vocabulary_hash=None
+            if resolved_condition_tokens is None
+            else resolved_condition_tokens.vocabulary_hash,
             speaker_ref_fixed_length=req.speaker_ref_fixed_length,
             speaker_ref_bucket_sizes=(
                 tuple(req.speaker_ref_bucket_sizes)
@@ -960,6 +1216,8 @@ class InferenceRuntime:
         self,
         *,
         req: SamplingRequest,
+        resolved_condition_tokens: _ResolvedConditionTokens | None,
+        lora_adapter: str | None,
         ref_latent: torch.Tensor | None,
         ref_mask: torch.Tensor | None,
         batch_size: int,
@@ -972,7 +1230,11 @@ class InferenceRuntime:
         if ref_latent is None or ref_mask is None:
             return None, None
 
-        cache_key = self._reference_cache_key(req)
+        cache_key = self._reference_cache_key(
+            req,
+            resolved_condition_tokens=resolved_condition_tokens,
+            lora_adapter=lora_adapter,
+        )
         cached_state, cached_mask = self._get_cached_speaker_condition(
             cache_key,
             batch_size=batch_size,
@@ -999,6 +1261,9 @@ class InferenceRuntime:
         req: SamplingRequest,
         caption_text: str,
         caption_max_len: int,
+        *,
+        resolved_condition_tokens: _ResolvedConditionTokens | None,
+        lora_adapter: str | None,
     ) -> _CaptionCacheKey:
         """
         キャプション条件キャッシュのキーを作る
@@ -1013,13 +1278,21 @@ class InferenceRuntime:
         """
 
         # LoRA と dtype が変わると同じ文章でも潜在表現が変わるため、テキスト以外の推論条件もキーに含める
-        lora_adapter = self._resolve_lora_adapter_path(req.lora_adapter)
         return _CaptionCacheKey(
             text=caption_text,
             max_caption_len=int(caption_max_len),
             model_device=str(self.model_device),
             model_dtype=str(self._model_dtype),
             lora_adapter=lora_adapter,
+            condition_token_ids=()
+            if resolved_condition_tokens is None
+            else resolved_condition_tokens.token_ids,
+            condition_token_scales=()
+            if resolved_condition_tokens is None
+            else resolved_condition_tokens.token_scales,
+            condition_vocabulary_hash=None
+            if resolved_condition_tokens is None
+            else resolved_condition_tokens.vocabulary_hash,
         )
 
     def _get_cached_caption_condition(
@@ -1066,6 +1339,8 @@ class InferenceRuntime:
         self,
         *,
         req: SamplingRequest,
+        resolved_condition_tokens: _ResolvedConditionTokens | None,
+        lora_adapter: str | None,
         caption_text: str,
         caption_ids: torch.Tensor,
         caption_mask: torch.Tensor,
@@ -1091,11 +1366,19 @@ class InferenceRuntime:
 
         # 無印 v3 などのキャプション非対応モデルでは、この経路に入ること自体が呼び出し側の不整合
         if self.model_cfg.use_caption_condition is False:
-            raise RuntimeError("Caption conditioning cache was requested for a model without caption support.")
+            raise RuntimeError(
+                "Caption conditioning cache was requested for a model without caption support."
+            )
         if self.model.caption_encoder is None or self.model.caption_norm is None:
             raise RuntimeError("Caption conditioning is enabled but caption modules are missing.")
 
-        cache_key = self._caption_cache_key(req, caption_text, caption_max_len)
+        cache_key = self._caption_cache_key(
+            req,
+            caption_text,
+            caption_max_len,
+            resolved_condition_tokens=resolved_condition_tokens,
+            lora_adapter=lora_adapter,
+        )
         cached_state, cached_mask = self._get_cached_caption_condition(
             cache_key,
             batch_size=batch_size,
@@ -1121,6 +1404,8 @@ class InferenceRuntime:
         self,
         *,
         req: SamplingRequest,
+        resolved_condition_tokens: _ResolvedConditionTokens | None,
+        lora_adapter: str | None,
         batch_size: int,
         messages: list[str],
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
@@ -1153,7 +1438,11 @@ class InferenceRuntime:
         if req.ref_wav is None and req.ref_latent is None:
             raise ValueError("Specify either ref_wav/ref_latent, or set no_ref=True.")
 
-        cache_key = self._reference_cache_key(req)
+        cache_key = self._reference_cache_key(
+            req,
+            resolved_condition_tokens=resolved_condition_tokens,
+            lora_adapter=lora_adapter,
+        )
         cached_latent, cached_mask = self._get_cached_reference_condition(
             cache_key,
             batch_size=batch_size,
@@ -1427,14 +1716,27 @@ class InferenceRuntime:
                 "Expected one of: independent, joint, alternating."
             )
 
-        cfg_scale_text, cfg_scale_caption, cfg_scale_speaker, scale_messages = resolve_cfg_scales(
+        lora_adapter = self._resolve_lora_adapter_path(req.lora_adapter)
+        resolved_condition_tokens = self._resolve_condition_tokens(
+            req,
+            lora_adapter=lora_adapter,
+        )
+        (
+            cfg_scale_text,
+            cfg_scale_caption,
+            cfg_scale_speaker,
+            cfg_scale_condition,
+            scale_messages,
+        ) = resolve_cfg_scales(
             cfg_guidance_mode=cfg_mode,
             cfg_scale_text=req.cfg_scale_text,
             cfg_scale_caption=req.cfg_scale_caption,
             cfg_scale_speaker=req.cfg_scale_speaker,
+            cfg_scale_condition=req.cfg_scale_condition,
             cfg_scale=req.cfg_scale,
             use_caption_condition=has_caption_text,
             use_speaker_condition=use_speaker_for_request,
+            use_token_condition=resolved_condition_tokens is not None,
         )
         messages.extend(scale_messages)
         for msg in scale_messages:
@@ -1471,6 +1773,21 @@ class InferenceRuntime:
             _log(f"[runtime] tokenize_text: {stage_sec * 1000.0:.1f} ms")
             text_ids = text_ids.to(self.model_device)
             text_mask = text_mask.to(self.model_device)
+            condition_token_ids = None
+            condition_token_mask = None
+            condition_token_scales = None
+            if resolved_condition_tokens is not None:
+                condition_token_ids = torch.tensor(
+                    [list(resolved_condition_tokens.token_ids)] * num_candidates,
+                    dtype=torch.long,
+                    device=self.model_device,
+                )
+                condition_token_mask = torch.ones_like(condition_token_ids, dtype=torch.bool)
+                condition_token_scales = torch.tensor(
+                    [list(resolved_condition_tokens.token_scales)] * num_candidates,
+                    dtype=self._model_dtype,
+                    device=self.model_device,
+                )
             caption_ids = None
             caption_mask = None
             caption_state_override = None
@@ -1491,14 +1808,18 @@ class InferenceRuntime:
                 caption_ids = caption_ids.to(self.model_device)
                 caption_mask = caption_mask.to(self.model_device)
                 if caption_text != "":
-                    caption_state_override, caption_mask_override = self._load_cached_caption_condition(
-                        req=req,
-                        caption_text=caption_text,
-                        caption_ids=caption_ids,
-                        caption_mask=caption_mask,
-                        caption_max_len=caption_max_len,
-                        batch_size=num_candidates,
-                        messages=messages,
+                    caption_state_override, caption_mask_override = (
+                        self._load_cached_caption_condition(
+                            req=req,
+                            resolved_condition_tokens=resolved_condition_tokens,
+                            lora_adapter=lora_adapter,
+                            caption_text=caption_text,
+                            caption_ids=caption_ids,
+                            caption_mask=caption_mask,
+                            caption_max_len=caption_max_len,
+                            batch_size=num_candidates,
+                            messages=messages,
+                        )
                     )
                 for msg in messages[msg_count_before_caption:]:
                     _log(msg)
@@ -1516,6 +1837,8 @@ class InferenceRuntime:
             if speaker_state_override is None:
                 ref_latent, ref_mask = self._load_reference_latent(
                     req=req,
+                    resolved_condition_tokens=resolved_condition_tokens,
+                    lora_adapter=lora_adapter,
                     batch_size=num_candidates,
                     messages=messages,
                 )
@@ -1524,6 +1847,8 @@ class InferenceRuntime:
                     cached_speaker_mask,
                 ) = self._load_cached_speaker_condition(
                     req=req,
+                    resolved_condition_tokens=resolved_condition_tokens,
+                    lora_adapter=lora_adapter,
                     ref_latent=ref_latent,
                     ref_mask=ref_mask,
                     batch_size=num_candidates,
@@ -1543,6 +1868,7 @@ class InferenceRuntime:
 
             hop_length = int(self.codec.model.hop_length)
             encoded_conditions = None
+            encoded_conditions_without_condition_tokens = None
             if manual_seconds is not None:
                 clamped_seconds = min(max_seconds, max(min_seconds, manual_seconds))
                 if clamped_seconds != manual_seconds:
@@ -1576,7 +1902,24 @@ class InferenceRuntime:
                     caption_state_override=caption_state_override,
                     caption_mask_override=caption_mask_override,
                     speaker_uncond_mode=req.speaker_uncond_mode,
+                    condition_token_ids=condition_token_ids,
+                    condition_token_mask=condition_token_mask,
+                    condition_token_scales=condition_token_scales,
                 )
+                if condition_token_ids is not None and cfg_scale_condition > 0.0:
+                    encoded_conditions_without_condition_tokens = self.model.encode_conditions(
+                        text_input_ids=text_ids,
+                        text_mask=text_mask,
+                        ref_latent=ref_latent,
+                        ref_mask=ref_mask,
+                        caption_input_ids=caption_ids,
+                        caption_mask=caption_mask,
+                        speaker_state_override=speaker_state_override,
+                        speaker_mask_override=speaker_mask_override,
+                        caption_state_override=caption_state_override,
+                        caption_mask_override=caption_mask_override,
+                        speaker_uncond_mode=req.speaker_uncond_mode,
+                    )
                 stage_sec = _measure_end(self.model_device, t0)
                 stage_timings.append(("encode_conditions", stage_sec))
                 _log(f"[runtime] encode_conditions: {stage_sec * 1000.0:.1f} ms")
@@ -1614,7 +1957,24 @@ class InferenceRuntime:
                     caption_state_override=caption_state_override,
                     caption_mask_override=caption_mask_override,
                     speaker_uncond_mode=req.speaker_uncond_mode,
+                    condition_token_ids=condition_token_ids,
+                    condition_token_mask=condition_token_mask,
+                    condition_token_scales=condition_token_scales,
                 )
+                if condition_token_ids is not None and cfg_scale_condition > 0.0:
+                    encoded_conditions_without_condition_tokens = self.model.encode_conditions(
+                        text_input_ids=text_ids,
+                        text_mask=text_mask,
+                        ref_latent=ref_latent,
+                        ref_mask=ref_mask,
+                        caption_input_ids=caption_ids,
+                        caption_mask=caption_mask,
+                        speaker_state_override=speaker_state_override,
+                        speaker_mask_override=speaker_mask_override,
+                        caption_state_override=caption_state_override,
+                        caption_mask_override=caption_mask_override,
+                        speaker_uncond_mode=req.speaker_uncond_mode,
+                    )
                 pred_log_frames = self.model.predict_duration_log_frames(
                     text_state=duration_text_state,
                     text_mask=duration_text_mask,
@@ -1664,6 +2024,44 @@ class InferenceRuntime:
                 msg = "info: checkpoint has no duration predictor; falling back to 30.000s."
                 messages.append(msg)
                 _log(msg)
+                # 固定 context 容量を持つ実装では、DurationPredictor の有無にかかわらず RF 前の条件検査が必要
+                if self.max_encoded_context_tokens is not None:
+                    encoded_conditions = self.model.encode_conditions(
+                        text_input_ids=text_ids,
+                        text_mask=text_mask,
+                        ref_latent=ref_latent,
+                        ref_mask=ref_mask,
+                        caption_input_ids=caption_ids,
+                        caption_mask=caption_mask,
+                        speaker_state_override=speaker_state_override,
+                        speaker_mask_override=speaker_mask_override,
+                        caption_state_override=caption_state_override,
+                        caption_mask_override=caption_mask_override,
+                        speaker_uncond_mode=req.speaker_uncond_mode,
+                        condition_token_ids=condition_token_ids,
+                        condition_token_mask=condition_token_mask,
+                        condition_token_scales=condition_token_scales,
+                    )
+                    if condition_token_ids is not None and cfg_scale_condition > 0.0:
+                        encoded_conditions_without_condition_tokens = self.model.encode_conditions(
+                            text_input_ids=text_ids,
+                            text_mask=text_mask,
+                            ref_latent=ref_latent,
+                            ref_mask=ref_mask,
+                            caption_input_ids=caption_ids,
+                            caption_mask=caption_mask,
+                            speaker_state_override=speaker_state_override,
+                            speaker_mask_override=speaker_mask_override,
+                            caption_state_override=caption_state_override,
+                            caption_mask_override=caption_mask_override,
+                            speaker_uncond_mode=req.speaker_uncond_mode,
+                        )
+
+            # TensorRT など固定コンテキスト容量を持つ実装では、K/V キャッシュや RF 本体へ入る前に超過を確定させる
+            ## パディング後の shape ではなく mask の有効数を数えるため、通常参照・Speaker Inversion・no_ref を同じ契約で扱える
+            if encoded_conditions is not None:
+                self._validate_encoded_context_capacity(encoded_conditions)
+
             patched_steps = math.ceil(latent_steps / self.model_cfg.latent_patch_size)
             sampling_patched_steps = int(patched_steps)
             latent_mask = None
@@ -1735,6 +2133,7 @@ class InferenceRuntime:
                 cfg_scale_text=cfg_scale_text,
                 cfg_scale_caption=cfg_scale_caption,
                 cfg_scale_speaker=cfg_scale_speaker,
+                cfg_scale_condition=cfg_scale_condition,
                 cfg_guidance_mode=cfg_mode,
                 cfg_min_t=float(req.cfg_min_t),
                 cfg_max_t=float(req.cfg_max_t),
@@ -1743,6 +2142,7 @@ class InferenceRuntime:
                 rescale_k=rescale_k,
                 rescale_sigma=rescale_sigma,
                 use_context_kv_cache=bool(req.context_kv_cache),
+                use_cudnn_packed_attention=bool(req.cudnn_packed_attention),
                 speaker_kv_scale=speaker_kv_scale,
                 speaker_kv_max_layers=speaker_kv_max_layers,
                 speaker_kv_min_t=speaker_kv_min_t,
@@ -1750,10 +2150,16 @@ class InferenceRuntime:
                 sway_coeff=float(req.sway_coeff),
                 waveex=req.waveex,
                 encoded_conditions=encoded_conditions,
+                encoded_conditions_without_condition_tokens=encoded_conditions_without_condition_tokens,
                 noise_dtype=noise_dtype,
                 initial_noise=req.initial_noise,
                 initial_noise_offset=int(req.initial_noise_offset),
                 latent_mask=latent_mask,
+                condition_token_ids=condition_token_ids,
+                condition_token_mask=condition_token_mask,
+                condition_token_scales=condition_token_scales,
+                velocity_field_guidance=req.velocity_field_guidance,
+                trajectory_intervention=req.trajectory_intervention,
             )
             stage_sec = _measure_end(self.model_device, t0)
             stage_timings.append(("sample_rf", stage_sec))
@@ -1912,29 +2318,18 @@ def clear_cached_runtime() -> None:
 
 
 def _load_audio(path: str | Path) -> tuple[torch.Tensor, int]:
-    try:
-        return torchaudio.load(str(path))
-    except RuntimeError:
-        import soundfile as sf
-
-        data, sr = sf.read(str(path), dtype="float32")
-        wav = torch.from_numpy(data)
-        if wav.ndim == 1:
-            wav = wav.unsqueeze(0)
-        else:
-            wav = wav.T
-        return wav, sr
+    # SoundFile の (frame, channel) を推論内部の (channel, frame) へ変換する
+    data, sample_rate = sf.read(str(path), dtype="float32", always_2d=True)
+    waveform = torch.from_numpy(np.ascontiguousarray(data.T))
+    return waveform, int(sample_rate)
 
 
 def save_wav(path: str | Path, audio: torch.Tensor, sample_rate: int) -> Path:
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     audio_cpu = audio.detach().to(device="cpu", dtype=torch.float32)
-    try:
-        torchaudio.save(str(out_path), audio_cpu, sample_rate)
-    except RuntimeError:
-        import soundfile as sf
-
-        audio_np = audio_cpu.squeeze(0).numpy() if audio_cpu.shape[0] == 1 else audio_cpu.T.numpy()
-        sf.write(str(out_path), audio_np, sample_rate)
+    audio_np = audio_cpu.squeeze(0).numpy() if audio_cpu.shape[0] == 1 else audio_cpu.T.numpy()
+    # Torchaudio の既定と揃え、FLAC は PCM24、WAV は libsndfile 既定の PCM16 で保存する
+    output_subtype = "PCM_24" if out_path.suffix.lower() == ".flac" else None
+    sf.write(str(out_path), audio_np, sample_rate, subtype=output_subtype)
     return out_path

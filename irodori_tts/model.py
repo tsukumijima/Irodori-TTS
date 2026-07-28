@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as _torch_checkpoint
 
 from .config import ModelConfig
+from .packed_attention import PackedAttentionPlan, packed_cudnn_attention
 from .speaker_inversion import SPEAKER_INVERSION_UNCOND_MODES, SpeakerInversionEmbedding
 
 DURATION_SPEAKER_FUSIONS = {
@@ -341,6 +342,7 @@ class JointAttention(nn.Module):
         freqs_cis: torch.Tensor,
         self_mask: torch.Tensor | None = None,
         context_kv: tuple[torch.Tensor, ...] | None = None,
+        packed_attention_plan: PackedAttentionPlan | None = None,
     ) -> torch.Tensor:
         bsz, seq_len, _ = x.shape
         q = self.wq(x).reshape(bsz, seq_len, self.heads, self.head_dim)
@@ -423,13 +425,25 @@ class JointAttention(nn.Module):
         attn_mask = torch.cat(context_masks, dim=1)
         attn_mask = attn_mask[:, None, None, :]
 
-        y = F.scaled_dot_product_attention(
-            q.transpose(1, 2),
-            k.transpose(1, 2),
-            v.transpose(1, 2),
-            attn_mask=attn_mask,
-            is_causal=False,
-        ).transpose(1, 2)
+        q_heads = q.transpose(1, 2)
+        k_heads = k.transpose(1, 2)
+        v_heads = v.transpose(1, 2)
+        if packed_attention_plan is not None:
+            # RF 外で作った添字を全層で共有し、層内では K/V の詰め替えだけを行う
+            y = packed_cudnn_attention(
+                q_heads,
+                k_heads,
+                v_heads,
+                packed_attention_plan,
+            ).transpose(1, 2)
+        else:
+            y = F.scaled_dot_product_attention(
+                q_heads,
+                k_heads,
+                v_heads,
+                attn_mask=attn_mask,
+                is_causal=False,
+            ).transpose(1, 2)
         y = y.reshape(bsz, seq_len, self.dim)
         y = y * torch.sigmoid(self.gate(x))
         return self.wo(y)
@@ -774,6 +788,7 @@ class DiffusionBlock(nn.Module):
         freqs_cis: torch.Tensor,
         self_mask: torch.Tensor | None = None,
         context_kv: tuple[torch.Tensor, ...] | None = None,
+        packed_attention_plan: PackedAttentionPlan | None = None,
     ) -> torch.Tensor:
         h, attention_gate = self.attention_adaln(x, cond_embed)
         x = x + self.dropout(
@@ -789,6 +804,7 @@ class DiffusionBlock(nn.Module):
                 freqs_cis=freqs_cis,
                 self_mask=self_mask,
                 context_kv=context_kv,
+                packed_attention_plan=packed_attention_plan,
             )
         )
 
@@ -1302,6 +1318,16 @@ class TextToLatentRFDiT(nn.Module):
         self.speaker_norm = None
         if cfg.use_speaker_condition_resolved:
             self.speaker_norm = RMSNorm(cfg.speaker_dim, eps=cfg.norm_eps)
+        self.speaker_condition_embedding = None
+        if int(cfg.speaker_condition_vocab_size) > 0:
+            if not cfg.use_speaker_condition_resolved:
+                raise ValueError(
+                    "speaker_condition_vocab_size requires speaker conditioning to be enabled."
+                )
+            self.speaker_condition_embedding = nn.Embedding(
+                int(cfg.speaker_condition_vocab_size),
+                int(cfg.speaker_dim),
+            )
         self.duration_predictor = None
         if cfg.use_duration_predictor:
             duration_speaker_dim = None
@@ -1453,6 +1479,7 @@ class TextToLatentRFDiT(nn.Module):
         uncond_state: torch.Tensor | None,
         uncond_mask: torch.Tensor | None,
         uncond_mode: str,
+        num_trailing_condition_tokens: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if dropout_mask is None:
             return speaker_state, speaker_mask
@@ -1462,6 +1489,15 @@ class TextToLatentRFDiT(nn.Module):
                 "speaker_condition_dropout must have shape (B,), "
                 f"got {tuple(dropout_mask.shape)} for speaker_state={tuple(speaker_state.shape)}"
             )
+        num_trailing_condition_tokens = int(num_trailing_condition_tokens)
+        if num_trailing_condition_tokens < 0 or num_trailing_condition_tokens > int(
+            speaker_state.shape[1]
+        ):
+            raise ValueError(
+                "num_trailing_condition_tokens must be between 0 and speaker sequence length: "
+                f"tokens={num_trailing_condition_tokens} speaker_state={tuple(speaker_state.shape)}"
+            )
+        dropout_token_count = int(speaker_state.shape[1]) - num_trailing_condition_tokens
         mode = str(uncond_mode).strip().lower()
         if mode not in SPEAKER_INVERSION_UNCOND_MODES:
             raise ValueError(
@@ -1482,12 +1518,92 @@ class TextToLatentRFDiT(nn.Module):
             )
             uncond_state = uncond_state.to(device=speaker_state.device, dtype=speaker_state.dtype)
             uncond_mask = uncond_mask.to(device=speaker_state.device, dtype=torch.bool)
-            speaker_state = torch.where(dropout_mask[:, None, None], uncond_state, speaker_state)
-            speaker_mask = torch.where(dropout_mask[:, None], uncond_mask, speaker_mask)
+            if num_trailing_condition_tokens > 0:
+                # 条件 token は speaker dropout の置換対象から外し、token embedding 由来の信号を残す
+                ## `uncond_state` は speaker_state と同じ列数へ展開されるため、reference 側の列だけを置換する
+                speaker_state = speaker_state.clone()
+                speaker_mask = speaker_mask.clone()
+                speaker_state[:, :dropout_token_count] = torch.where(
+                    dropout_mask[:, None, None],
+                    uncond_state[:, :dropout_token_count],
+                    speaker_state[:, :dropout_token_count],
+                )
+                speaker_mask[:, :dropout_token_count] = torch.where(
+                    dropout_mask[:, None],
+                    uncond_mask[:, :dropout_token_count],
+                    speaker_mask[:, :dropout_token_count],
+                )
+            else:
+                speaker_state = torch.where(
+                    dropout_mask[:, None, None], uncond_state, speaker_state
+                )
+                speaker_mask = torch.where(dropout_mask[:, None], uncond_mask, speaker_mask)
             return speaker_state, speaker_mask
 
         speaker_mask = speaker_mask.clone()
-        speaker_mask[dropout_mask] = False
+        speaker_mask[dropout_mask, :dropout_token_count] = False
+        return speaker_state, speaker_mask
+
+    def _append_speaker_condition_tokens(
+        self,
+        *,
+        speaker_state: torch.Tensor,
+        speaker_mask: torch.Tensor,
+        token_ids: torch.Tensor | None,
+        token_mask: torch.Tensor | None,
+        token_dropout_mask: torch.Tensor | None,
+        token_scales: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if token_ids is None:
+            return speaker_state, speaker_mask
+        if self.speaker_condition_embedding is None:
+            raise ValueError(
+                "condition_token_ids were provided, but speaker_condition_embedding is disabled."
+            )
+        if token_ids.ndim != 2:
+            raise ValueError(
+                f"condition_token_ids must have shape (B,C), got {tuple(token_ids.shape)}"
+            )
+        if int(token_ids.shape[0]) != int(speaker_state.shape[0]):
+            raise ValueError(
+                "condition_token_ids batch mismatch: "
+                f"speaker_state={tuple(speaker_state.shape)} token_ids={tuple(token_ids.shape)}"
+            )
+        if token_mask is None:
+            token_mask = torch.ones_like(token_ids, dtype=torch.bool)
+        elif token_mask.shape != token_ids.shape:
+            raise ValueError(
+                "condition_token_mask must match condition_token_ids shape: "
+                f"mask={tuple(token_mask.shape)} ids={tuple(token_ids.shape)}"
+            )
+        token_ids = token_ids.to(device=speaker_state.device, dtype=torch.long)
+        token_mask = token_mask.to(device=speaker_state.device, dtype=torch.bool)
+        if token_dropout_mask is not None:
+            if token_dropout_mask.shape != token_ids.shape:
+                raise ValueError(
+                    "condition_token_dropout_mask must match condition_token_ids shape: "
+                    f"dropout={tuple(token_dropout_mask.shape)} ids={tuple(token_ids.shape)}"
+                )
+            token_mask = token_mask & ~token_dropout_mask.to(
+                device=speaker_state.device,
+                dtype=torch.bool,
+            )
+
+        # 条件 token は mean token の後ろへ足し、reference 音声から作った平均座標を汚さない
+        condition_state = self.speaker_condition_embedding(token_ids).to(dtype=speaker_state.dtype)
+        if token_scales is not None:
+            if token_scales.shape != token_ids.shape:
+                raise ValueError(
+                    "condition_token_scales must match condition_token_ids shape: "
+                    f"scales={tuple(token_scales.shape)} ids={tuple(token_ids.shape)}"
+                )
+            # 推論時の連続制御は、学習済み token embedding の向きは保ったまま強度だけを変える
+            condition_state = condition_state * token_scales.to(
+                device=speaker_state.device,
+                dtype=speaker_state.dtype,
+            ).unsqueeze(-1)
+        speaker_state = torch.cat([speaker_state, condition_state], dim=1)
+        speaker_mask = torch.cat([speaker_mask, token_mask], dim=1)
         return speaker_state, speaker_mask
 
     def encode_conditions(
@@ -1505,6 +1621,10 @@ class TextToLatentRFDiT(nn.Module):
         speaker_uncond_mode: str = "mask",
         text_condition_dropout: torch.Tensor | None = None,
         speaker_condition_dropout: torch.Tensor | None = None,
+        condition_token_ids: torch.Tensor | None = None,
+        condition_token_mask: torch.Tensor | None = None,
+        condition_token_scales: torch.Tensor | None = None,
+        condition_token_dropout_mask: torch.Tensor | None = None,
         caption_condition_dropout: torch.Tensor | None = None,
     ) -> EncodedConditions:
         if text_condition_dropout is not None:
@@ -1567,6 +1687,10 @@ class TextToLatentRFDiT(nn.Module):
                 speaker_mask_override=speaker_mask_override,
                 speaker_uncond_mode=speaker_uncond_mode,
                 speaker_condition_dropout=speaker_condition_dropout,
+                condition_token_ids=condition_token_ids,
+                condition_token_mask=condition_token_mask,
+                condition_token_scales=condition_token_scales,
+                condition_token_dropout_mask=condition_token_dropout_mask,
             )
         caption_state = None
         if self.cfg.use_caption_condition:
@@ -1574,7 +1698,9 @@ class TextToLatentRFDiT(nn.Module):
                 caption_state = self.caption_encoder(caption_input_ids, caption_mask)
                 caption_state = self.caption_norm(caption_state)
             else:
-                caption_state = caption_state_override.to(device=text_state.device, dtype=text_state.dtype)
+                caption_state = caption_state_override.to(
+                    device=text_state.device, dtype=text_state.dtype
+                )
         return text_state, text_mask, ref_state, ref_mask, caption_state, caption_mask
 
     def encode_speaker_condition(
@@ -1589,6 +1715,10 @@ class TextToLatentRFDiT(nn.Module):
         speaker_mask_override: torch.Tensor | None = None,
         speaker_uncond_mode: str = "mask",
         speaker_condition_dropout: torch.Tensor | None = None,
+        condition_token_ids: torch.Tensor | None = None,
+        condition_token_mask: torch.Tensor | None = None,
+        condition_token_scales: torch.Tensor | None = None,
+        condition_token_dropout_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.cfg.use_speaker_condition_resolved:
             raise ValueError("Speaker conditioning is disabled.")
@@ -1620,13 +1750,25 @@ class TextToLatentRFDiT(nn.Module):
                 ref_state = self.speaker_norm(ref_state)
                 ref_state, ref_mask = self._prepend_masked_mean_token(ref_state, ref_mask)
 
-        return self._apply_speaker_condition_dropout(
+        # speaker dropout は reference 由来の mean token と時系列 token だけに掛ける
+        ## 条件 token を append した後に mask を落とすと、reference なし + token ありの学習経路が消える
+        ## 条件 token 側は condition token dropout だけで落とし、2つの dropout を独立に扱う
+        ref_state, ref_mask = self._apply_speaker_condition_dropout(
             speaker_state=ref_state,
             speaker_mask=ref_mask,
             dropout_mask=speaker_condition_dropout,
             uncond_state=None,
             uncond_mask=None,
             uncond_mode=speaker_uncond_mode,
+        )
+
+        return self._append_speaker_condition_tokens(
+            speaker_state=ref_state,
+            speaker_mask=ref_mask,
+            token_ids=condition_token_ids,
+            token_mask=condition_token_mask,
+            token_dropout_mask=condition_token_dropout_mask,
+            token_scales=condition_token_scales,
         )
 
     def forward_with_encoded_conditions(
@@ -1641,6 +1783,7 @@ class TextToLatentRFDiT(nn.Module):
         caption_mask: torch.Tensor | None = None,
         latent_mask: torch.Tensor | None = None,
         context_kv_cache: list[tuple[torch.Tensor, ...]] | None = None,
+        packed_attention_plan: PackedAttentionPlan | None = None,
     ) -> torch.Tensor:
         t_embed = get_timestep_embedding(t, self.cfg.timestep_embed_dim).to(dtype=x_t.dtype)
         cond_embed = self.cond_module(t_embed)
@@ -1679,6 +1822,7 @@ class TextToLatentRFDiT(nn.Module):
                     freqs_cis=freqs,
                     self_mask=latent_mask,
                     context_kv=context_kv,
+                    packed_attention_plan=packed_attention_plan,
                 )
 
         x = self.out_norm(x)
@@ -1698,6 +1842,10 @@ class TextToLatentRFDiT(nn.Module):
         latent_mask: torch.Tensor | None = None,
         text_condition_dropout: torch.Tensor | None = None,
         speaker_condition_dropout: torch.Tensor | None = None,
+        condition_token_ids: torch.Tensor | None = None,
+        condition_token_mask: torch.Tensor | None = None,
+        condition_token_scales: torch.Tensor | None = None,
+        condition_token_dropout_mask: torch.Tensor | None = None,
         caption_condition_dropout: torch.Tensor | None = None,
         duration_features: torch.Tensor | None = None,
         duration_has_speaker: torch.Tensor | None = None,
@@ -1719,6 +1867,10 @@ class TextToLatentRFDiT(nn.Module):
                 ref_mask=ref_mask,
                 caption_input_ids=caption_input_ids,
                 caption_mask=caption_mask,
+                condition_token_ids=condition_token_ids,
+                condition_token_mask=condition_token_mask,
+                condition_token_scales=condition_token_scales,
+                condition_token_dropout_mask=condition_token_dropout_mask,
             )
             if duration_only:
                 return self.predict_duration_log_frames(
@@ -1747,6 +1899,12 @@ class TextToLatentRFDiT(nn.Module):
                 and speaker_state_dit is not None
                 and speaker_mask_dit is not None
             ):
+                num_condition_tokens = 0
+                if condition_token_ids is not None:
+                    num_condition_tokens = int(condition_token_ids.shape[1])
+                # duration predictor は dropout 前のフル条件を使い、DiT だけ speaker dropout 済みにする
+                ## この二段 dropout では条件 token が末尾に append 済みなので、末尾列を保護しないと
+                ## reference なし + token ありの DiT 入力が消え、条件 token の学習圧がなくなる
                 speaker_state_dit, speaker_mask_dit = self._apply_speaker_condition_dropout(
                     speaker_state=speaker_state_dit,
                     speaker_mask=speaker_mask_dit,
@@ -1754,6 +1912,7 @@ class TextToLatentRFDiT(nn.Module):
                     uncond_state=None,
                     uncond_mask=None,
                     uncond_mode="mask",
+                    num_trailing_condition_tokens=num_condition_tokens,
                 )
             if caption_condition_dropout is not None and caption_mask_dit is not None:
                 caption_mask_dit = caption_mask_dit.clone()
@@ -1804,6 +1963,10 @@ class TextToLatentRFDiT(nn.Module):
             caption_mask=caption_mask,
             text_condition_dropout=text_condition_dropout,
             speaker_condition_dropout=speaker_condition_dropout,
+            condition_token_ids=condition_token_ids,
+            condition_token_mask=condition_token_mask,
+            condition_token_scales=condition_token_scales,
+            condition_token_dropout_mask=condition_token_dropout_mask,
             caption_condition_dropout=caption_condition_dropout,
         )
         return self.forward_with_encoded_conditions(

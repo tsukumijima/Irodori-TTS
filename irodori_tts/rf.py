@@ -1,12 +1,84 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import torch
 
 from .model import EncodedConditions, TextToLatentRFDiT
+from .packed_attention import PackedAttentionPlan, build_packed_attention_plan
 from .speaker_inversion import SPEAKER_INVERSION_UNCOND_MODES
 from .waveex import WaveExBuffer, WaveExConfig
+
+
+@dataclass(frozen=True)
+class VelocityFieldGuidance:
+    """同一潜在上の条件対から速度差を作り、通常の速度へ加算する。
+
+    caption と speaker のどちらか一方の条件対を指定する。未指定側は通常の
+    条件を共有するため、話者を保ったキャプション操作と、キャプションを
+    保った話者テクスチャ移植を同じ計算で扱える。
+
+    Args:
+        alpha (float): `target - opposite` の速度差へ掛ける係数
+        min_t (float): 速度差を加える拡散時刻の下限
+        max_t (float): 速度差を加える拡散時刻の上限
+        target_caption_state (torch.Tensor | None): 目標側の caption state
+        target_caption_mask (torch.Tensor | None): 目標側の caption mask
+        opposite_caption_state (torch.Tensor | None): 反対側の caption state
+        opposite_caption_mask (torch.Tensor | None): 反対側の caption mask
+        target_speaker_state (torch.Tensor | None): 目標側の speaker state
+        target_speaker_mask (torch.Tensor | None): 目標側の speaker mask
+        opposite_speaker_state (torch.Tensor | None): 反対側の speaker state
+        opposite_speaker_mask (torch.Tensor | None): 反対側の speaker mask
+    """
+
+    alpha: float
+    min_t: float = 0.0
+    max_t: float = 1.0
+    target_caption_state: torch.Tensor | None = None
+    target_caption_mask: torch.Tensor | None = None
+    opposite_caption_state: torch.Tensor | None = None
+    opposite_caption_mask: torch.Tensor | None = None
+    target_speaker_state: torch.Tensor | None = None
+    target_speaker_mask: torch.Tensor | None = None
+    opposite_speaker_state: torch.Tensor | None = None
+    opposite_speaker_mask: torch.Tensor | None = None
+
+
+@dataclass(frozen=True)
+class TrajectoryCheckpoint:
+    """途中時刻の完成予測を軌道介入コールバックへ渡す。
+
+    Args:
+        step_index (int): 0 始まりのサンプリングステップ番号
+        t (float): 速度を評価した現在時刻
+        t_next (float): 状態を進める次時刻
+        x0_hat (torch.Tensor): `rf_predict_x0()` で求めた完成潜在予測
+    """
+
+    step_index: int
+    t: float
+    t_next: float
+    x0_hat: torch.Tensor
+
+
+@dataclass(frozen=True)
+class TrajectoryIntervention:
+    """指定ステップで完成潜在予測を観測し、必要なら別ノイズへ分岐する。
+
+    コールバックが `None` を返す場合は通常の Euler 更新を続ける
+    ノイズを返す場合は完成予測とそのノイズから次時刻の状態を再構成する
+
+    Args:
+        step_indices (tuple[int, ...]): コールバックを呼ぶ 0 始まりのステップ番号
+        callback (Callable[[TrajectoryCheckpoint], torch.Tensor | None]):
+            観測のみなら `None`、分岐する場合は完成予測と同じ形の別ノイズを返す処理
+    """
+
+    step_indices: tuple[int, ...]
+    callback: Callable[[TrajectoryCheckpoint], torch.Tensor | None]
 
 
 def _make_rng(seed: int, device: torch.device) -> tuple[torch.Generator, torch.device]:
@@ -133,11 +205,13 @@ def sample_euler_rf_cfg(
     caption_state_override: torch.Tensor | None = None,
     caption_mask_override: torch.Tensor | None = None,
     encoded_conditions: EncodedConditions | None = None,
+    encoded_conditions_without_condition_tokens: EncodedConditions | None = None,
     speaker_uncond_mode: str = "mask",
     num_steps: int = 40,
     cfg_scale_text: float = 3.0,
     cfg_scale_caption: float = 3.0,
     cfg_scale_speaker: float = 5.0,
+    cfg_scale_condition: float = 0.0,
     cfg_guidance_mode: str = "independent",
     cfg_min_t: float = 0.5,
     cfg_max_t: float = 1.0,
@@ -147,6 +221,7 @@ def sample_euler_rf_cfg(
     rescale_k: float | None = None,
     rescale_sigma: float | None = None,
     use_context_kv_cache: bool = True,
+    use_cudnn_packed_attention: bool = False,
     speaker_kv_scale: float | None = None,
     speaker_kv_max_layers: int | None = None,
     speaker_kv_min_t: float | None = None,
@@ -157,6 +232,11 @@ def sample_euler_rf_cfg(
     initial_noise: torch.Tensor | None = None,
     initial_noise_offset: int = 0,
     latent_mask: torch.Tensor | None = None,
+    condition_token_ids: torch.Tensor | None = None,
+    condition_token_mask: torch.Tensor | None = None,
+    condition_token_scales: torch.Tensor | None = None,
+    velocity_field_guidance: VelocityFieldGuidance | None = None,
+    trajectory_intervention: TrajectoryIntervention | None = None,
 ) -> torch.Tensor:
     """
     Euler sampling over RF ODE with text/reference/caption conditioning CFG.
@@ -183,7 +263,9 @@ def sample_euler_rf_cfg(
             x_t = x_t.to(dtype=dtype)
     else:
         if int(initial_noise_offset) < 0:
-            raise ValueError(f"initial_noise_offset must be non-negative, got {initial_noise_offset!r}.")
+            raise ValueError(
+                f"initial_noise_offset must be non-negative, got {initial_noise_offset!r}."
+            )
         if initial_noise.ndim != 3:
             raise ValueError(
                 f"initial_noise must have shape (B, T, C), got {tuple(initial_noise.shape)}."
@@ -259,8 +341,30 @@ def sample_euler_rf_cfg(
             f"Unsupported t_schedule_mode={t_schedule_mode!r}. Expected 'linear' or 'sway'."
         )
     t_schedule = (1.0 - u) * init_scale
-    if not bool(torch.all(t_schedule[:-1] > t_schedule[1:]).item()):
+    # GPU 上の時刻 Tensor は ODE 演算へ残し、分岐用の値だけを要求ごとに1回まとめて CPU へ移す
+    ## 反復中の CUDA スカラー読み出しは各ステップで CPU と GPU を同期させるため避ける
+    t_schedule_values = tuple(float(value) for value in t_schedule.detach().cpu())
+    if not all(
+        current_t > next_t
+        for current_t, next_t in zip(
+            t_schedule_values[:-1],
+            t_schedule_values[1:],
+            strict=True,
+        )
+    ):
         raise ValueError("t_schedule must be strictly decreasing; adjust num_steps or sway_coeff.")
+    trajectory_step_indices: set[int] = set()
+    if trajectory_intervention is not None:
+        trajectory_step_indices = set(trajectory_intervention.step_indices)
+        if len(trajectory_step_indices) != len(trajectory_intervention.step_indices):
+            raise ValueError("trajectory_intervention step_indices must not contain duplicates.")
+        if any(step_index < 0 or step_index >= num_steps for step_index in trajectory_step_indices):
+            raise ValueError(
+                f"trajectory_intervention step_indices must be within [0, {num_steps - 1}]."
+            )
+        # WaveEx の外挿ステップには速度予測がないため、完成予測の定義を混在させない
+        if waveex is not None and waveex.enabled:
+            raise ValueError("trajectory_intervention cannot be combined with WaveEx.")
     use_independent_cfg = cfg_guidance_mode == "independent"
     use_joint_cfg = cfg_guidance_mode == "joint"
     use_alternating_cfg = cfg_guidance_mode == "alternating"
@@ -285,6 +389,9 @@ def sample_euler_rf_cfg(
             caption_state_override=caption_state_override,
             caption_mask_override=caption_mask_override,
             speaker_uncond_mode=speaker_uncond_mode,
+            condition_token_ids=condition_token_ids,
+            condition_token_mask=condition_token_mask,
+            condition_token_scales=condition_token_scales,
         )
     else:
         (
@@ -318,6 +425,74 @@ def sample_euler_rf_cfg(
         else:
             speaker_state_uncond = torch.zeros_like(speaker_state_cond)
             speaker_mask_uncond = torch.zeros_like(speaker_mask_cond)
+    condition_token_mask_cond = None
+    if condition_token_ids is not None:
+        if condition_token_mask is None:
+            condition_token_mask_cond = torch.ones_like(condition_token_ids, dtype=torch.bool)
+        else:
+            condition_token_mask_cond = condition_token_mask.to(device=device, dtype=torch.bool)
+    has_condition_cfg = (
+        model.cfg.use_speaker_condition_resolved
+        and cfg_scale_condition > 0
+        and condition_token_mask_cond is not None
+        and bool(condition_token_mask_cond.any().item())
+    )
+    condition_token_uncond_bundle = None
+    if has_condition_cfg:
+        if encoded_conditions_without_condition_tokens is None:
+            # 条件 CFG では reference speaker は残し、LoRA で学習した条件 token だけを外す
+            encoded_conditions_without_condition_tokens = model.encode_conditions(
+                text_input_ids=text_input_ids,
+                text_mask=text_mask,
+                ref_latent=ref_latent,
+                ref_mask=ref_mask,
+                caption_input_ids=caption_input_ids,
+                caption_mask=caption_mask,
+                speaker_state_override=speaker_state_override,
+                speaker_mask_override=speaker_mask_override,
+                caption_state_override=caption_state_override,
+                caption_mask_override=caption_mask_override,
+                speaker_uncond_mode=speaker_uncond_mode,
+            )
+        condition_token_uncond_bundle = encoded_conditions_without_condition_tokens
+        if condition_token_uncond_bundle[2] is not None and speaker_state_cond is not None:
+            condition_speaker_state = condition_token_uncond_bundle[2]
+            condition_speaker_mask = condition_token_uncond_bundle[3]
+            if condition_speaker_mask is None:
+                raise RuntimeError("Condition-token uncond speaker mask is missing.")
+            cond_tokens = int(speaker_state_cond.shape[1])
+            uncond_tokens = int(condition_speaker_state.shape[1])
+            if uncond_tokens < cond_tokens:
+                # 条件 CFG では token を無効化するだけなので、形合わせ用の末尾 token は mask=False にする
+                pad_tokens = cond_tokens - uncond_tokens
+                state_pad = torch.zeros(
+                    (
+                        condition_speaker_state.shape[0],
+                        pad_tokens,
+                        condition_speaker_state.shape[2],
+                    ),
+                    device=condition_speaker_state.device,
+                    dtype=condition_speaker_state.dtype,
+                )
+                mask_pad = torch.zeros(
+                    (condition_speaker_mask.shape[0], pad_tokens),
+                    device=condition_speaker_mask.device,
+                    dtype=torch.bool,
+                )
+                condition_speaker_state = torch.cat([condition_speaker_state, state_pad], dim=1)
+                condition_speaker_mask = torch.cat([condition_speaker_mask, mask_pad], dim=1)
+                condition_token_uncond_bundle = (
+                    condition_token_uncond_bundle[0],
+                    condition_token_uncond_bundle[1],
+                    condition_speaker_state,
+                    condition_speaker_mask,
+                    condition_token_uncond_bundle[4],
+                    condition_token_uncond_bundle[5],
+                )
+            elif uncond_tokens != cond_tokens:
+                raise RuntimeError(
+                    "Condition-token uncond speaker state is longer than the conditioned state."
+                )
     caption_state_uncond = None
     caption_mask_uncond = None
     if model.cfg.use_caption_condition:
@@ -336,6 +511,79 @@ def sample_euler_rf_cfg(
         and bool(caption_mask_cond.any().item())
     )
     has_speaker_cfg = cfg_scale_speaker > 0
+
+    if velocity_field_guidance is not None:
+        caption_values = (
+            velocity_field_guidance.target_caption_state,
+            velocity_field_guidance.target_caption_mask,
+            velocity_field_guidance.opposite_caption_state,
+            velocity_field_guidance.opposite_caption_mask,
+        )
+        speaker_values = (
+            velocity_field_guidance.target_speaker_state,
+            velocity_field_guidance.target_speaker_mask,
+            velocity_field_guidance.opposite_speaker_state,
+            velocity_field_guidance.opposite_speaker_mask,
+        )
+        has_caption_pair = all(value is not None for value in caption_values)
+        has_speaker_pair = all(value is not None for value in speaker_values)
+        has_partial_caption_pair = (
+            any(value is not None for value in caption_values) and not has_caption_pair
+        )
+        has_partial_speaker_pair = (
+            any(value is not None for value in speaker_values) and not has_speaker_pair
+        )
+
+        # 片側だけ指定された条件対は通常条件への暗黙置換を招くため、入口で明示的に拒否
+        if has_partial_caption_pair or has_partial_speaker_pair:
+            raise ValueError(
+                "velocity_field_guidance requires all four state/mask values for each specified channel."
+            )
+        # 条件チャネルを同時に2つ変えると差分の意味が曖昧になるため1対だけを受け付ける
+        if has_caption_pair == has_speaker_pair:
+            raise ValueError(
+                "velocity_field_guidance requires exactly one complete caption or speaker pair."
+            )
+        if not math.isfinite(float(velocity_field_guidance.alpha)):
+            raise ValueError("velocity_field_guidance alpha must be finite.")
+        if not 0.0 <= velocity_field_guidance.min_t <= velocity_field_guidance.max_t <= 1.0:
+            raise ValueError(
+                "velocity_field_guidance time range must satisfy 0 <= min_t <= max_t <= 1."
+            )
+
+        # 追加 forward が通常条件と同じバッチ契約を使えることを、サンプリング開始前に検証
+        active_values = caption_values if has_caption_pair else speaker_values
+        target_state, target_mask, opposite_state, opposite_mask = active_values
+        assert target_state is not None and target_mask is not None
+        assert opposite_state is not None and opposite_mask is not None
+        channel_name = "caption" if has_caption_pair else "speaker"
+        for side_name, state, mask in (
+            ("target", target_state, target_mask),
+            ("opposite", opposite_state, opposite_mask),
+        ):
+            if state.ndim != 3 or mask.ndim != 2:
+                raise ValueError(
+                    f"velocity_field_guidance {side_name} {channel_name} state/mask must have "
+                    f"shapes (B, T, C) and (B, T), got {tuple(state.shape)} and {tuple(mask.shape)}."
+                )
+            if state.shape[:2] != mask.shape:
+                raise ValueError(
+                    f"velocity_field_guidance {side_name} {channel_name} state/mask shape mismatch."
+                )
+            if state.shape[0] != batch_size:
+                raise ValueError(
+                    f"velocity_field_guidance {side_name} {channel_name} batch size mismatch: "
+                    f"expected {batch_size}, got {state.shape[0]}."
+                )
+            if state.device != device or mask.device != device:
+                raise ValueError(
+                    f"velocity_field_guidance {side_name} {channel_name} tensors must be on {device}."
+                )
+            if state.dtype != dtype or mask.dtype != torch.bool:
+                raise ValueError(
+                    f"velocity_field_guidance {side_name} {channel_name} state/mask must use "
+                    f"{dtype} and torch.bool."
+                )
 
     def _bundle(
         *,
@@ -378,6 +626,9 @@ def sample_euler_rf_cfg(
     if has_speaker_cfg:
         enabled_cfg_names.append("speaker")
         cfg_scales["speaker"] = float(cfg_scale_speaker)
+    if has_condition_cfg:
+        enabled_cfg_names.append("condition")
+        cfg_scales["condition"] = float(cfg_scale_condition)
     if has_caption_cfg:
         enabled_cfg_names.append("caption")
         cfg_scales["caption"] = float(cfg_scale_caption)
@@ -404,6 +655,16 @@ def sample_euler_rf_cfg(
                         caption_mask_uncond if name == "caption" else caption_mask_cond
                     ),
                 )
+            )
+        if has_condition_cfg and condition_token_uncond_bundle is not None:
+            condition_index = independent_names.index("condition")
+            independent_bundles[condition_index] = _bundle(
+                text_state=text_state_cond,
+                text_mask_val=text_mask_cond,
+                speaker_state=condition_token_uncond_bundle[2],
+                speaker_mask_val=condition_token_uncond_bundle[3],
+                caption_state=caption_state_cond,
+                caption_mask_val=caption_mask_cond,
             )
     cfg_batch_mult = len(independent_bundles)
 
@@ -433,6 +694,16 @@ def sample_euler_rf_cfg(
         caption_state=caption_state_uncond,
         caption_mask_val=caption_mask_uncond,
     )
+    if has_condition_cfg and not has_speaker_cfg and condition_token_uncond_bundle is not None:
+        # speaker CFG を使わない joint CFG では、話者参照を残したまま条件 token だけを外す
+        joint_uncond_bundle = _bundle(
+            text_state=text_state_uncond if has_text_cfg else text_state_cond,
+            text_mask_val=text_mask_uncond if has_text_cfg else text_mask_cond,
+            speaker_state=condition_token_uncond_bundle[2],
+            speaker_mask_val=condition_token_uncond_bundle[3],
+            caption_state=caption_state_uncond if has_caption_cfg else caption_state_cond,
+            caption_mask_val=caption_mask_uncond if has_caption_cfg else caption_mask_cond,
+        )
 
     alternating_bundles: dict[
         str,
@@ -471,6 +742,60 @@ def sample_euler_rf_cfg(
             caption_state=caption_state_cond,
             caption_mask_val=caption_mask_cond,
         )
+    if has_condition_cfg and condition_token_uncond_bundle is not None:
+        alternating_bundles["condition"] = _bundle(
+            text_state=text_state_cond,
+            text_mask_val=text_mask_cond,
+            speaker_state=condition_token_uncond_bundle[2],
+            speaker_mask_val=condition_token_uncond_bundle[3],
+            caption_state=caption_state_cond,
+            caption_mask_val=caption_mask_cond,
+        )
+
+    attention_plan_cond: PackedAttentionPlan | None = None
+    attention_plan_cfg: PackedAttentionPlan | None = None
+    attention_plan_joint_uncond: PackedAttentionPlan | None = None
+    attention_plan_alternating: dict[str, PackedAttentionPlan | None] = {}
+    if use_cudnn_packed_attention:
+        # 潜在マスク未指定時も明示的な全有効マスクに直し、RF 反復前に添字を確定する
+        effective_latent_mask = (
+            latent_mask
+            if latent_mask is not None
+            else torch.ones(
+                (batch_size, sequence_length),
+                dtype=torch.bool,
+                device=device,
+            )
+        )
+        attention_plan_cond = build_packed_attention_plan(
+            latent_mask=effective_latent_mask,
+            text_mask=text_mask_cond,
+            speaker_mask=speaker_mask_cond,
+            caption_mask=caption_mask_cond,
+        )
+        if use_independent_cfg and cfg_batch_mult > 1:
+            attention_plan_cfg = build_packed_attention_plan(
+                latent_mask=effective_latent_mask.repeat(cfg_batch_mult, 1),
+                text_mask=independent_text_mask,
+                speaker_mask=independent_speaker_mask,
+                caption_mask=independent_caption_mask,
+            )
+        elif use_joint_cfg and enabled_cfg_names:
+            attention_plan_joint_uncond = build_packed_attention_plan(
+                latent_mask=effective_latent_mask,
+                text_mask=joint_uncond_bundle[1],
+                speaker_mask=joint_uncond_bundle[3],
+                caption_mask=joint_uncond_bundle[5],
+            )
+        elif use_alternating_cfg:
+            for name in enabled_cfg_names:
+                bundle = alternating_bundles[name]
+                attention_plan_alternating[name] = build_packed_attention_plan(
+                    latent_mask=effective_latent_mask,
+                    text_mask=bundle[1],
+                    speaker_mask=bundle[3],
+                    caption_mask=bundle[5],
+                )
 
     # Force-speaker scaling operates on projected speaker K/V, so it requires context KV caches.
     effective_use_context_kv_cache = bool(use_context_kv_cache or (speaker_kv_scale is not None))
@@ -541,9 +866,12 @@ def sample_euler_rf_cfg(
     for i in range(num_steps):
         t = t_schedule[i]
         t_next = t_schedule[i + 1]
-        tt = torch.full((batch_size,), t, device=device, dtype=dtype)
+        t_value = t_schedule_values[i]
+        t_next_value = t_schedule_values[i + 1]
+        # 時刻は既存の GPU Tensor をビューとして拡張し、スカラー値の CPU 経由コピーを発生させない
+        tt = t.expand(batch_size)
 
-        use_cfg = bool(enabled_cfg_names) and (cfg_min_t <= t.item() <= cfg_max_t)
+        use_cfg = bool(enabled_cfg_names) and (cfg_min_t <= t_value <= cfg_max_t)
         is_full_ode_index = waveex_cfg is None or i in waveex_ode_indices
         use_taylor_step = (
             waveex_buffer is not None
@@ -556,8 +884,8 @@ def sample_euler_rf_cfg(
             if (
                 speaker_kv_active
                 and speaker_kv_min_t is not None
-                and (t_next < speaker_kv_min_t)
-                and (t >= speaker_kv_min_t)
+                and t_next_value < speaker_kv_min_t
+                and t_value >= speaker_kv_min_t
             ):
                 inv_scale = 1.0 / float(speaker_kv_scale)
                 scale_speaker_kv_cache(
@@ -595,6 +923,7 @@ def sample_euler_rf_cfg(
                     caption_mask=independent_caption_mask,
                     context_kv_cache=context_kv_cfg,
                     latent_mask=independent_latent_mask,
+                    packed_attention_plan=attention_plan_cfg,
                 )
                 chunks = v_out.chunk(cfg_batch_mult, dim=0)
                 v = chunks[0]
@@ -612,6 +941,7 @@ def sample_euler_rf_cfg(
                     caption_mask=caption_mask_cond,
                     context_kv_cache=context_kv_cond,
                     latent_mask=latent_mask,
+                    packed_attention_plan=attention_plan_cond,
                 )
                 if use_joint_cfg:
                     if len(enabled_cfg_names) > 1:
@@ -633,6 +963,7 @@ def sample_euler_rf_cfg(
                         caption_mask=joint_uncond_bundle[5],
                         context_kv_cache=context_kv_joint_uncond,
                         latent_mask=latent_mask,
+                        packed_attention_plan=attention_plan_joint_uncond,
                     )
                     v = v_cond + joint_scale * (v_cond - v_uncond_joint)
                 elif use_alternating_cfg:
@@ -649,6 +980,7 @@ def sample_euler_rf_cfg(
                         caption_mask=alt_bundle[5],
                         context_kv_cache=context_kv_alternating.get(alt_name),
                         latent_mask=latent_mask,
+                        packed_attention_plan=attention_plan_alternating.get(alt_name),
                     )
                     v = v_cond + cfg_scales[alt_name] * (v_cond - v_uncond_alt)
                 else:
@@ -665,13 +997,86 @@ def sample_euler_rf_cfg(
                 caption_mask=caption_mask_cond,
                 context_kv_cache=context_kv_cond,
                 latent_mask=latent_mask,
+                packed_attention_plan=attention_plan_cond,
             )
+
+        # 通常の CFG 速度へ、同一潜在上で測った条件対の速度差を直接加算
+        if (
+            velocity_field_guidance is not None
+            and velocity_field_guidance.alpha != 0.0
+            and velocity_field_guidance.min_t <= t_value <= velocity_field_guidance.max_t
+        ):
+            target_speaker_state = (
+                velocity_field_guidance.target_speaker_state
+                if velocity_field_guidance.target_speaker_state is not None
+                else speaker_state_cond
+            )
+            target_speaker_mask = (
+                velocity_field_guidance.target_speaker_mask
+                if velocity_field_guidance.target_speaker_mask is not None
+                else speaker_mask_cond
+            )
+            opposite_speaker_state = (
+                velocity_field_guidance.opposite_speaker_state
+                if velocity_field_guidance.opposite_speaker_state is not None
+                else speaker_state_cond
+            )
+            opposite_speaker_mask = (
+                velocity_field_guidance.opposite_speaker_mask
+                if velocity_field_guidance.opposite_speaker_mask is not None
+                else speaker_mask_cond
+            )
+            target_caption_state = (
+                velocity_field_guidance.target_caption_state
+                if velocity_field_guidance.target_caption_state is not None
+                else caption_state_cond
+            )
+            target_caption_mask = (
+                velocity_field_guidance.target_caption_mask
+                if velocity_field_guidance.target_caption_mask is not None
+                else caption_mask_cond
+            )
+            opposite_caption_state = (
+                velocity_field_guidance.opposite_caption_state
+                if velocity_field_guidance.opposite_caption_state is not None
+                else caption_state_cond
+            )
+            opposite_caption_mask = (
+                velocity_field_guidance.opposite_caption_mask
+                if velocity_field_guidance.opposite_caption_mask is not None
+                else caption_mask_cond
+            )
+            target_velocity = model.forward_with_encoded_conditions(
+                x_t=x_t.to(dtype),
+                t=tt,
+                text_state=text_state_cond,
+                text_mask=text_mask_cond,
+                speaker_state=target_speaker_state,
+                speaker_mask=target_speaker_mask,
+                caption_state=target_caption_state,
+                caption_mask=target_caption_mask,
+                context_kv_cache=None,
+                latent_mask=latent_mask,
+            )
+            opposite_velocity = model.forward_with_encoded_conditions(
+                x_t=x_t.to(dtype),
+                t=tt,
+                text_state=text_state_cond,
+                text_mask=text_mask_cond,
+                speaker_state=opposite_speaker_state,
+                speaker_mask=opposite_speaker_mask,
+                caption_state=opposite_caption_state,
+                caption_mask=opposite_caption_mask,
+                context_kv_cache=None,
+                latent_mask=latent_mask,
+            )
+            v = v + velocity_field_guidance.alpha * (target_velocity - opposite_velocity)
 
         if rescale_k is not None and rescale_sigma is not None:
             v = temporal_score_rescale(
                 v_pred=v,
                 x_t=x_t,
-                t=t,
+                t=t_value,
                 rescale_k=float(rescale_k),
                 rescale_sigma=float(rescale_sigma),
             )
@@ -679,8 +1084,8 @@ def sample_euler_rf_cfg(
         if (
             speaker_kv_active
             and speaker_kv_min_t is not None
-            and (t_next < speaker_kv_min_t)
-            and (t >= speaker_kv_min_t)
+            and t_next_value < speaker_kv_min_t
+            and t_value >= speaker_kv_min_t
         ):
             inv_scale = 1.0 / float(speaker_kv_scale)
             scale_speaker_kv_cache(
@@ -702,7 +1107,32 @@ def sample_euler_rf_cfg(
                 )
             speaker_kv_active = False
 
-        x_t = x_t + v * (t_next - t)
+        replacement_noise = None
+        if trajectory_intervention is not None and i in trajectory_step_indices:
+            # CFG と時間方向補正をすべて反映した速度から完成潜在を予測
+            x0_hat = rf_predict_x0(x_t=x_t, v_pred=v, t=tt)
+            replacement_noise = trajectory_intervention.callback(
+                TrajectoryCheckpoint(
+                    step_index=i,
+                    t=t_value,
+                    t_next=t_next_value,
+                    x0_hat=x0_hat,
+                )
+            )
+            if replacement_noise is not None:
+                if replacement_noise.shape != x0_hat.shape:
+                    raise ValueError(
+                        "trajectory_intervention callback noise shape mismatch: "
+                        f"expected {tuple(x0_hat.shape)}, got {tuple(replacement_noise.shape)}."
+                    )
+                replacement_noise = replacement_noise.to(device=device, dtype=dtype)
+
+        # 分岐時は完成予測と別ノイズから次時刻を作り、次ステップで速度を再評価
+        if replacement_noise is None:
+            x_t = x_t + v * (t_next - t)
+        else:
+            tt_next = t_next.expand(batch_size)
+            x_t = rf_interpolate(x0=x0_hat, noise=replacement_noise, t=tt_next)
         if waveex_buffer is not None:
             waveex_buffer.push(x_t)
 

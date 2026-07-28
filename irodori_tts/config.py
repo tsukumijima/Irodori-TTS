@@ -34,6 +34,8 @@ class ModelConfig:
     speaker_layers: int = 14
     speaker_heads: int = 10
     speaker_patch_size: int = 1
+    speaker_condition_vocab_size: int = 0
+    speaker_condition_vocab_hash: str | None = None
     timestep_embed_dim: int = 512
     adaln_rank: int = 256
     norm_eps: float = 1e-5
@@ -161,6 +163,18 @@ class TrainConfig:
     text_condition_dropout: float = 0.1
     caption_condition_dropout: float = 0.1
     speaker_condition_dropout: float = 0.1
+    condition_token_dropout_all: float = 0.0
+    condition_token_dropout_family: float = 0.0
+    condition_token_dropout_style: float = 0.0
+    condition_token_metadata_path: str | None = None
+    manifest_metadata_path: str | None = None
+    manifest_label_filter: str | None = None
+    split_file_path: str | None = None
+    split_column: str = "split"
+    split_train_values: str = "train"
+    split_valid_values: str = "valid"
+    use_weighted_sampler: bool = False
+    sample_weight_key: str = "sample_weight"
     speaker_inversion_enabled: bool = False
     speaker_inversion_tokens: int = 16
     speaker_inversion_init_std: float = 0.02
