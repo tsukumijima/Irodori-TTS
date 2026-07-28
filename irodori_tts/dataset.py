@@ -94,6 +94,7 @@ class LatentTextDataset(Dataset):
         self.enable_speaker_condition = bool(enable_speaker_condition)
         self.caption_key = str(caption_key)
         self._manifest_fp = None
+        self._manifest_fp_pid: int | None = None
         subset_index_set: set[int] | None = None
         if subset_indices is not None:
             subset_index_set = {int(x) for x in subset_indices}
@@ -155,8 +156,15 @@ class LatentTextDataset(Dataset):
         return latent
 
     def _manifest_file(self):
+        current_pid = os.getpid()
+        # DataLoader の fork 後は親プロセスのファイル記述子を共有してしまうため、
+        ## ワーカーごとに読み取り位置が混ざらないよう、プロセス単位で開き直す
+        if self._manifest_fp_pid != current_pid and self._manifest_fp is not None:
+            self._manifest_fp.close()
+            self._manifest_fp = None
         if self._manifest_fp is None or self._manifest_fp.closed:
             self._manifest_fp = self.manifest_path.open("r", encoding="utf-8")
+            self._manifest_fp_pid = current_pid
         return self._manifest_fp
 
     def _read_item(self, index: int) -> dict[str, Any]:
@@ -167,6 +175,10 @@ class LatentTextDataset(Dataset):
         if line == "":
             raise ValueError(
                 f"Unexpected EOF while reading manifest sample_index={sample_index}: {self.manifest_path}"
+            )
+        if not line.strip():
+            raise ValueError(
+                f"Unexpected blank manifest line sample_index={sample_index}: {self.manifest_path}"
             )
         item = json.loads(line)
         if "text" not in item or "latent_path" not in item:
@@ -201,6 +213,21 @@ class LatentTextDataset(Dataset):
         caption = (
             _select_caption(item.get(self.caption_key)) if self.enable_caption_condition else ""
         )
+        condition_token_ids_raw = item.get("condition_token_ids", [])
+        if condition_token_ids_raw is None:
+            condition_token_ids_raw = []
+        if not isinstance(condition_token_ids_raw, list):
+            raise ValueError("condition_token_ids must be a list when present.")
+        condition_token_ids = [int(token_id) for token_id in condition_token_ids_raw]
+
+        condition_token_labels_raw = item.get("condition_token_labels", [])
+        if condition_token_labels_raw is None:
+            condition_token_labels_raw = []
+        if not isinstance(condition_token_labels_raw, list):
+            raise ValueError("condition_token_labels must be a list when present.")
+        condition_token_labels = [str(label) for label in condition_token_labels_raw]
+        if condition_token_labels and len(condition_token_labels) != len(condition_token_ids):
+            raise ValueError("condition_token_labels length must match condition_token_ids length.")
 
         return {
             "text": item["text"],
@@ -210,7 +237,28 @@ class LatentTextDataset(Dataset):
             "num_frames": num_frames,
             "ref_latent": ref_latent,
             "has_speaker": has_speaker,
+            "condition_token_ids": condition_token_ids,
+            "condition_token_labels": condition_token_labels,
+            "sample_weight": float(item.get("sample_weight", 1.0)),
+            "split": item.get("split"),
         }
+
+    def sample_weights(self, *, key: str = "sample_weight") -> list[float]:
+        """
+        WeightedRandomSampler 用の重みを manifest から読み出す
+
+        Args:
+            key (str): manifest の重み列名
+
+        Returns:
+            list[float]: dataset のローカル順に並べたサンプル重み
+        """
+
+        weights: list[float] = []
+        for local_index in range(len(self.sample_indices)):
+            item = self._read_item(local_index)
+            weights.append(float(item.get(key, 1.0)))
+        return weights
 
 
 @dataclass(frozen=True)
@@ -366,6 +414,17 @@ class TTSCollator:
     max_text_len: int = 256
     max_caption_len: int | None = None
 
+    @staticmethod
+    def _condition_family_id(label: str) -> int:
+        # family dropout は属性群ごとに落とし、style/emotion だけは個別 dropout の対象にもする
+        if label.startswith("sex:"):
+            return 1
+        if label.startswith("identity:"):
+            return 2
+        if label.startswith("style:") or label.startswith("emotion:"):
+            return 3
+        return 0
+
     def __call__(self, batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         texts = [x["text"] for x in batch]
         captions = [x["caption"] for x in batch]
@@ -374,6 +433,8 @@ class TTSCollator:
         has_speaker = torch.tensor([bool(x["has_speaker"]) for x in batch], dtype=torch.bool)
         has_caption = torch.tensor([bool(x["has_caption"]) for x in batch], dtype=torch.bool)
         bsz = len(latents)
+        condition_token_lists = [x["condition_token_ids"] for x in batch]
+        condition_label_lists = [x["condition_token_labels"] for x in batch]
 
         text_ids, text_mask = self.tokenizer.batch_encode(texts, max_length=self.max_text_len)
         token_counts = text_mask.sum(dim=1)
@@ -434,6 +495,25 @@ class TTSCollator:
         latent_mask_valid_patched = _patch_mask(latent_mask_valid)
         ref_mask_patched = _patch_mask(ref_mask)
 
+        max_condition_tokens = max((len(tokens) for tokens in condition_token_lists), default=0)
+        condition_token_ids = torch.zeros((bsz, max_condition_tokens), dtype=torch.long)
+        condition_token_mask = torch.zeros((bsz, max_condition_tokens), dtype=torch.bool)
+        condition_token_family_ids = torch.zeros((bsz, max_condition_tokens), dtype=torch.long)
+        for i, token_ids in enumerate(condition_token_lists):
+            if not token_ids:
+                continue
+            token_count = len(token_ids)
+            condition_token_ids[i, :token_count] = torch.tensor(token_ids, dtype=torch.long)
+            condition_token_mask[i, :token_count] = True
+            labels = condition_label_lists[i]
+            if not labels:
+                labels = [""] * token_count
+            family_ids = [self._condition_family_id(label) for label in labels]
+            condition_token_family_ids[i, :token_count] = torch.tensor(
+                family_ids,
+                dtype=torch.long,
+            )
+
         out = {
             "text_ids": text_ids,
             "text_mask": text_mask,
@@ -456,6 +536,13 @@ class TTSCollator:
             "ref_latent_patched": ref_patched,
             "ref_latent_mask_patched": ref_mask_patched,
             "has_speaker": has_speaker,
+            "condition_token_ids": condition_token_ids,
+            "condition_token_mask": condition_token_mask,
+            "condition_token_family_ids": condition_token_family_ids,
+            "sample_weight": torch.tensor(
+                [float(x.get("sample_weight", 1.0)) for x in batch],
+                dtype=torch.float32,
+            ),
         }
         if caption_ids is not None and caption_mask is not None:
             out["caption_ids"] = caption_ids
