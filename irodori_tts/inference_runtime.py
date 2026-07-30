@@ -10,7 +10,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +31,6 @@ from .rf import (
     VelocityFieldGuidance,
     sample_euler_rf_cfg,
 )
-from .seed_failure_detector import SeedRetryPredecodeSelector
 from .speaker_inversion import (
     load_speaker_inversion_payload,
     speaker_inversion_batch_tensors,
@@ -264,7 +263,6 @@ class RuntimeKey:
     compile_dynamic: bool = False
     enable_watermark: bool = False
     attention_backend: str = "auto"
-    seed_retry_predecode_selector: str | None = None
 
 
 @dataclass
@@ -325,8 +323,8 @@ class SamplingRequest:
     ## 参照音声長による SDPA 形状変動を抑え、cuDNN カーネルキャッシュヒット率を上げる
     speaker_ref_fixed_length: int | None = None
     speaker_ref_bucket_sizes: list[int] | None = None
-    # Speaker Inversion の話者条件とは分離し、復号前の候補比較だけに参照音声を使う
-    seed_retry_ref_wav: str | None = None
+    # Speaker Inversion の話者条件とは分離し、生成後の話者豹変判定だけに参照音声を使う
+    speaker_failure_ref_wav: str | None = None
     # 後方互換のため、新規フィールドは既存の位置引数列の末尾へ追加
     velocity_field_guidance: VelocityFieldGuidance | None = None
     trajectory_intervention: TrajectoryIntervention | None = None
@@ -734,27 +732,6 @@ class InferenceRuntime:
             if bool(self.key.enable_watermark)
             else None
         )
-        self.seed_retry_predecode_selector = (
-            SeedRetryPredecodeSelector.from_safetensors(
-                self.key.seed_retry_predecode_selector,
-                device=self.codec_device,
-            )
-            if self.key.seed_retry_predecode_selector is not None
-            else None
-        )
-        if self.seed_retry_predecode_selector is not None:
-            # TensorRT が完全復号用の eager 重みを解放する前に、判定用 block 4までを保持する
-            self.seed_retry_predecode_selector.bind_codec_model(self.codec.model)
-            # 初回要求へ DACVAE block 4と線形判定のカーネル初期化を載せない
-            warmup_latent = torch.zeros(
-                (1, SeedRetryPredecodeSelector.TEMPORAL_POSITIONS, self.model_cfg.latent_dim),
-                dtype=next(self.model.parameters()).dtype,
-                device=self.model_device,
-            )
-            warmup_state = self.seed_retry_predecode_selector.encode_latent(warmup_latent)
-            warmup_score = self.seed_retry_predecode_selector.score(warmup_state, None)
-            self.seed_retry_predecode_selector.should_retry(warmup_score)
-            _sync_device(self.codec_device)
         self._infer_lock = threading.Lock()
         self._model_dtype = next(self.model.parameters()).dtype
         self._lora_adapter_names: dict[str, str] = {}
@@ -1872,8 +1849,6 @@ class InferenceRuntime:
                 batch_size=num_candidates,
                 messages=messages,
             )
-            seed_retry_reference_patched: torch.Tensor | None = None
-            seed_retry_reference_mask: torch.Tensor | None = None
             if speaker_state_override is None:
                 ref_latent, ref_mask = self._load_reference_latent(
                     req=req,
@@ -1882,9 +1857,6 @@ class InferenceRuntime:
                     batch_size=num_candidates,
                     messages=messages,
                 )
-                if self.seed_retry_predecode_selector is not None and req.no_ref is False:
-                    seed_retry_reference_patched = ref_latent
-                    seed_retry_reference_mask = ref_mask
                 (
                     cached_speaker_state,
                     cached_speaker_mask,
@@ -1903,25 +1875,6 @@ class InferenceRuntime:
                     ref_latent, ref_mask = None, None
             else:
                 ref_latent, ref_mask = None, None
-                # 反転埋め込みでも較正時と同じ元話者の音声を候補比較へ使う
-                if (
-                    self.seed_retry_predecode_selector is not None
-                    and req.seed_retry_ref_wav is not None
-                ):
-                    seed_retry_reference_patched, seed_retry_reference_mask = (
-                        self._load_reference_latent(
-                            req=replace(
-                                req,
-                                ref_wav=req.seed_retry_ref_wav,
-                                ref_embed=None,
-                                seed_retry_ref_wav=None,
-                            ),
-                            resolved_condition_tokens=resolved_condition_tokens,
-                            lora_adapter=lora_adapter,
-                            batch_size=num_candidates,
-                            messages=messages,
-                        )
-                    )
             stage_sec = _measure_end(self.model_device, t0, self.codec_device)
             stage_timings.append(("prepare_reference", stage_sec))
             for msg in messages[msg_count_before_ref:]:
@@ -2278,103 +2231,6 @@ class InferenceRuntime:
             z = z[:, :latent_steps]
 
             base_seed = used_seed
-            retry_seed: int | None = None
-            retry_attempts = 1
-            seed_retry_base_score: float | None = None
-            seed_retry_candidate_score: float | None = None
-            is_retry_adopted = False
-            if self.seed_retry_predecode_selector is not None:
-                if num_candidates != 1:
-                    raise ValueError(
-                        "Seed retry predecode selection currently requires num_candidates=1, "
-                        f"got {num_candidates}"
-                    )
-
-                # 参照ありでは同じ block 4表現を一度だけ作り、両候補の比較へ再利用する
-                seed_retry_reference_state: torch.Tensor | None = None
-                if (
-                    seed_retry_reference_patched is not None
-                    and seed_retry_reference_mask is not None
-                ):
-                    t0 = _measure_start(self.codec_device)
-                    reference_patches = int(seed_retry_reference_mask[0].sum().item())
-                    seed_retry_reference = unpatchify_latent(
-                        seed_retry_reference_patched[:, :reference_patches],
-                        patch_size=self.model_cfg.latent_patch_size,
-                        latent_dim=self.model_cfg.latent_dim,
-                    )
-                    seed_retry_reference_state = self.seed_retry_predecode_selector.encode_latent(
-                        seed_retry_reference
-                    )
-                    stage_sec = _measure_end(self.codec_device, t0)
-                    stage_timings.append(("encode_seed_retry_reference", stage_sec))
-                    _log(f"[runtime] encode_seed_retry_reference: {stage_sec * 1000.0:.1f} ms")
-                t0 = _measure_start(self.codec_device)
-                base_predecode_state = self.seed_retry_predecode_selector.encode_latent(z)
-                base_scores = self.seed_retry_predecode_selector.score(
-                    base_predecode_state,
-                    seed_retry_reference_state,
-                )
-                retry_decisions = self.seed_retry_predecode_selector.should_retry(base_scores)
-                stage_sec = _measure_end(self.codec_device, t0)
-                stage_timings.append(("score_seed_retry_base", stage_sec))
-                seed_retry_base_score = float(base_scores[0].item())
-                _log(
-                    "[runtime] score_seed_retry_base: "
-                    f"{stage_sec * 1000.0:.1f} ms score={seed_retry_base_score:.6f}"
-                )
-
-                # 第2試行は第1試行の潜在を引き継がず、独立した初期ノイズから RF 全体を生成する
-                if bool(retry_decisions[0].item()) is True:
-                    retry_seed = self.seed_retry_predecode_selector.derive_retry_seed(
-                        base_seed=base_seed,
-                        chunk_index=int(req.retry_chunk_index),
-                        attempt_index=1,
-                    )
-                    t0 = _measure_start(self.model_device)
-                    z_patched = sample_latent(
-                        seed=retry_seed,
-                        initial_noise=None,
-                        initial_noise_offset=0,
-                    )
-                    stage_sec = _measure_end(self.model_device, t0)
-                    stage_timings.append(("retry_sample_rf", stage_sec))
-                    retry_z = unpatchify_latent(
-                        z_patched,
-                        patch_size=self.model_cfg.latent_patch_size,
-                        latent_dim=self.model_cfg.latent_dim,
-                    )[:, :latent_steps]
-                    retry_attempts = 2
-                    _log(
-                        f"[runtime] retry_sample_rf: {stage_sec * 1000.0:.1f} ms seed={retry_seed}"
-                    )
-                    t0 = _measure_start(self.codec_device)
-                    retry_predecode_state = self.seed_retry_predecode_selector.encode_latent(
-                        retry_z
-                    )
-                    retry_scores = self.seed_retry_predecode_selector.score(
-                        retry_predecode_state,
-                        seed_retry_reference_state,
-                    )
-                    adoption_decisions = self.seed_retry_predecode_selector.should_adopt_retry(
-                        base_score=base_scores,
-                        retry_score=retry_scores,
-                    )
-                    stage_sec = _measure_end(self.codec_device, t0)
-                    stage_timings.append(("score_seed_retry_candidate", stage_sec))
-                    seed_retry_candidate_score = float(retry_scores[0].item())
-                    is_retry_adopted = bool(adoption_decisions[0].item())
-                    _log(
-                        "[runtime] score_seed_retry_candidate: "
-                        f"{stage_sec * 1000.0:.1f} ms "
-                        f"score={seed_retry_candidate_score:.6f} "
-                        f"adopted={is_retry_adopted}"
-                    )
-
-                    # 派生候補が較正済みの差を超えた場合だけ最終復号へ渡す
-                    if is_retry_adopted is True:
-                        z = retry_z
-                        used_seed = retry_seed
 
             t0 = _measure_start(self.model_device, self.codec_device)
             hop_length = int(self.codec.model.hop_length)
@@ -2454,16 +2310,14 @@ class InferenceRuntime:
             max_duration_frames=None if max_frames is None else int(max_frames),
             duration_was_clamped=bool(duration_was_clamped),
             base_seed=base_seed,
-            retry_seed=retry_seed,
-            retry_attempts=retry_attempts,
-            seed_retry_base_score=seed_retry_base_score,
-            seed_retry_candidate_score=seed_retry_candidate_score,
-            is_retry_adopted=is_retry_adopted,
+            retry_seed=None,
+            retry_attempts=1,
+            seed_retry_base_score=None,
+            seed_retry_candidate_score=None,
+            is_retry_adopted=False,
         )
 
     def unload(self) -> None:
-        if self.seed_retry_predecode_selector is not None:
-            del self.seed_retry_predecode_selector
         del self.model
         del self.tokenizer
         del self.codec
