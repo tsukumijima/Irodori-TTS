@@ -10,7 +10,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,7 @@ from .rf import (
     VelocityFieldGuidance,
     sample_euler_rf_cfg,
 )
+from .seed_failure_detector import SeedRetryPredecodeSelector
 from .speaker_inversion import (
     load_speaker_inversion_payload,
     speaker_inversion_batch_tensors,
@@ -263,6 +264,7 @@ class RuntimeKey:
     compile_dynamic: bool = False
     enable_watermark: bool = False
     attention_backend: str = "auto"
+    seed_retry_predecode_selector: str | None = None
 
 
 @dataclass
@@ -318,10 +320,13 @@ class SamplingRequest:
     waveex: WaveExConfig | None = None
     initial_noise: torch.Tensor | None = None
     initial_noise_offset: int = 0
+    retry_chunk_index: int = 0
     # speaker_state のパディング設定
     ## 参照音声長による SDPA 形状変動を抑え、cuDNN カーネルキャッシュヒット率を上げる
     speaker_ref_fixed_length: int | None = None
     speaker_ref_bucket_sizes: list[int] | None = None
+    # Speaker Inversion の話者条件とは分離し、復号前の候補比較だけに参照音声を使う
+    seed_retry_ref_wav: str | None = None
     # 後方互換のため、新規フィールドは既存の位置引数列の末尾へ追加
     velocity_field_guidance: VelocityFieldGuidance | None = None
     trajectory_intervention: TrajectoryIntervention | None = None
@@ -346,6 +351,12 @@ class SamplingResult:
     min_duration_frames: int | None = None
     max_duration_frames: int | None = None
     duration_was_clamped: bool = False
+    base_seed: int | None = None
+    retry_seed: int | None = None
+    retry_attempts: int = 1
+    seed_retry_base_score: float | None = None
+    seed_retry_candidate_score: float | None = None
+    is_retry_adopted: bool = False
 
 
 @dataclass(frozen=True)
@@ -723,6 +734,27 @@ class InferenceRuntime:
             if bool(self.key.enable_watermark)
             else None
         )
+        self.seed_retry_predecode_selector = (
+            SeedRetryPredecodeSelector.from_safetensors(
+                self.key.seed_retry_predecode_selector,
+                device=self.codec_device,
+            )
+            if self.key.seed_retry_predecode_selector is not None
+            else None
+        )
+        if self.seed_retry_predecode_selector is not None:
+            # TensorRT が完全復号用の eager 重みを解放する前に、判定用 block 4までを保持する
+            self.seed_retry_predecode_selector.bind_codec_model(self.codec.model)
+            # 初回要求へ DACVAE block 4と線形判定のカーネル初期化を載せない
+            warmup_latent = torch.zeros(
+                (1, SeedRetryPredecodeSelector.TEMPORAL_POSITIONS, self.model_cfg.latent_dim),
+                dtype=next(self.model.parameters()).dtype,
+                device=self.model_device,
+            )
+            warmup_state = self.seed_retry_predecode_selector.encode_latent(warmup_latent)
+            warmup_score = self.seed_retry_predecode_selector.score(warmup_state, None)
+            self.seed_retry_predecode_selector.should_retry(warmup_score)
+            _sync_device(self.codec_device)
         self._infer_lock = threading.Lock()
         self._model_dtype = next(self.model.parameters()).dtype
         self._lora_adapter_names: dict[str, str] = {}
@@ -1840,6 +1872,8 @@ class InferenceRuntime:
                 batch_size=num_candidates,
                 messages=messages,
             )
+            seed_retry_reference_patched: torch.Tensor | None = None
+            seed_retry_reference_mask: torch.Tensor | None = None
             if speaker_state_override is None:
                 ref_latent, ref_mask = self._load_reference_latent(
                     req=req,
@@ -1848,6 +1882,9 @@ class InferenceRuntime:
                     batch_size=num_candidates,
                     messages=messages,
                 )
+                if self.seed_retry_predecode_selector is not None and req.no_ref is False:
+                    seed_retry_reference_patched = ref_latent
+                    seed_retry_reference_mask = ref_mask
                 (
                     cached_speaker_state,
                     cached_speaker_mask,
@@ -1866,6 +1903,25 @@ class InferenceRuntime:
                     ref_latent, ref_mask = None, None
             else:
                 ref_latent, ref_mask = None, None
+                # 反転埋め込みでも較正時と同じ元話者の音声を候補比較へ使う
+                if (
+                    self.seed_retry_predecode_selector is not None
+                    and req.seed_retry_ref_wav is not None
+                ):
+                    seed_retry_reference_patched, seed_retry_reference_mask = (
+                        self._load_reference_latent(
+                            req=replace(
+                                req,
+                                ref_wav=req.seed_retry_ref_wav,
+                                ref_embed=None,
+                                seed_retry_ref_wav=None,
+                            ),
+                            resolved_condition_tokens=resolved_condition_tokens,
+                            lora_adapter=lora_adapter,
+                            batch_size=num_candidates,
+                            messages=messages,
+                        )
+                    )
             stage_sec = _measure_end(self.model_device, t0, self.codec_device)
             stage_timings.append(("prepare_reference", stage_sec))
             for msg in messages[msg_count_before_ref:]:
@@ -2121,52 +2177,79 @@ class InferenceRuntime:
                     precision=str(req.noise_precision),
                     device=self.model_device,
                 )
-            z_patched = sample_euler_rf_cfg(
-                model=self.model,
-                text_input_ids=text_ids,
-                text_mask=text_mask,
-                ref_latent=ref_latent,
-                ref_mask=ref_mask,
-                sequence_length=sampling_patched_steps,
-                caption_input_ids=caption_ids,
-                caption_mask=caption_mask,
-                speaker_state_override=speaker_state_override,
-                speaker_mask_override=speaker_mask_override,
-                caption_state_override=caption_state_override,
-                caption_mask_override=caption_mask_override,
-                speaker_uncond_mode=req.speaker_uncond_mode,
-                num_steps=int(req.num_steps),
-                cfg_scale_text=cfg_scale_text,
-                cfg_scale_caption=cfg_scale_caption,
-                cfg_scale_speaker=cfg_scale_speaker,
-                cfg_scale_condition=cfg_scale_condition,
-                cfg_guidance_mode=cfg_mode,
-                cfg_min_t=float(req.cfg_min_t),
-                cfg_max_t=float(req.cfg_max_t),
+
+            def sample_latent(
+                *,
+                seed: int,
+                initial_noise: torch.Tensor | None,
+                initial_noise_offset: int,
+            ) -> torch.Tensor:
+                """
+                事前計算済み条件を再利用して1試行分の RF 潜在を生成する。
+
+                Args:
+                    seed (int): 試行に使う乱数種
+                    initial_noise (torch.Tensor | None): 呼び出し側で共有する初期ノイズ
+                    initial_noise_offset (int): 共有初期ノイズ内の開始位置
+
+                Returns:
+                    torch.Tensor: パッチ化された生成潜在
+                """
+
+                return sample_euler_rf_cfg(
+                    model=self.model,
+                    text_input_ids=text_ids,
+                    text_mask=text_mask,
+                    ref_latent=ref_latent,
+                    ref_mask=ref_mask,
+                    sequence_length=sampling_patched_steps,
+                    caption_input_ids=caption_ids,
+                    caption_mask=caption_mask,
+                    speaker_state_override=speaker_state_override,
+                    speaker_mask_override=speaker_mask_override,
+                    caption_state_override=caption_state_override,
+                    caption_mask_override=caption_mask_override,
+                    speaker_uncond_mode=req.speaker_uncond_mode,
+                    num_steps=int(req.num_steps),
+                    cfg_scale_text=cfg_scale_text,
+                    cfg_scale_caption=cfg_scale_caption,
+                    cfg_scale_speaker=cfg_scale_speaker,
+                    cfg_scale_condition=cfg_scale_condition,
+                    cfg_guidance_mode=cfg_mode,
+                    cfg_min_t=float(req.cfg_min_t),
+                    cfg_max_t=float(req.cfg_max_t),
+                    seed=seed,
+                    truncation_factor=truncation_factor,
+                    rescale_k=rescale_k,
+                    rescale_sigma=rescale_sigma,
+                    use_context_kv_cache=bool(req.context_kv_cache),
+                    use_cudnn_packed_attention=bool(req.cudnn_packed_attention),
+                    speaker_kv_scale=speaker_kv_scale,
+                    speaker_kv_max_layers=speaker_kv_max_layers,
+                    speaker_kv_min_t=speaker_kv_min_t,
+                    t_schedule_mode=str(req.t_schedule_mode),
+                    sway_coeff=float(req.sway_coeff),
+                    waveex=req.waveex,
+                    encoded_conditions=encoded_conditions,
+                    encoded_conditions_without_condition_tokens=(
+                        encoded_conditions_without_condition_tokens
+                    ),
+                    noise_dtype=noise_dtype,
+                    initial_noise=initial_noise,
+                    initial_noise_offset=initial_noise_offset,
+                    latent_mask=latent_mask,
+                    condition_token_ids=condition_token_ids,
+                    condition_token_mask=condition_token_mask,
+                    condition_token_scales=condition_token_scales,
+                    velocity_field_guidance=req.velocity_field_guidance,
+                    trajectory_intervention=req.trajectory_intervention,
+                    trajectory_observer=req.trajectory_observer,
+                )
+
+            z_patched = sample_latent(
                 seed=used_seed,
-                truncation_factor=truncation_factor,
-                rescale_k=rescale_k,
-                rescale_sigma=rescale_sigma,
-                use_context_kv_cache=bool(req.context_kv_cache),
-                use_cudnn_packed_attention=bool(req.cudnn_packed_attention),
-                speaker_kv_scale=speaker_kv_scale,
-                speaker_kv_max_layers=speaker_kv_max_layers,
-                speaker_kv_min_t=speaker_kv_min_t,
-                t_schedule_mode=str(req.t_schedule_mode),
-                sway_coeff=float(req.sway_coeff),
-                waveex=req.waveex,
-                encoded_conditions=encoded_conditions,
-                encoded_conditions_without_condition_tokens=encoded_conditions_without_condition_tokens,
-                noise_dtype=noise_dtype,
                 initial_noise=req.initial_noise,
                 initial_noise_offset=int(req.initial_noise_offset),
-                latent_mask=latent_mask,
-                condition_token_ids=condition_token_ids,
-                condition_token_mask=condition_token_mask,
-                condition_token_scales=condition_token_scales,
-                velocity_field_guidance=req.velocity_field_guidance,
-                trajectory_intervention=req.trajectory_intervention,
-                trajectory_observer=req.trajectory_observer,
             )
             stage_sec = _measure_end(self.model_device, t0)
             stage_timings.append(("sample_rf", stage_sec))
@@ -2193,6 +2276,105 @@ class InferenceRuntime:
             stage_timings.append(("unpatchify_latent", stage_sec))
             _log(f"[runtime] unpatchify_latent: {stage_sec * 1000.0:.1f} ms")
             z = z[:, :latent_steps]
+
+            base_seed = used_seed
+            retry_seed: int | None = None
+            retry_attempts = 1
+            seed_retry_base_score: float | None = None
+            seed_retry_candidate_score: float | None = None
+            is_retry_adopted = False
+            if self.seed_retry_predecode_selector is not None:
+                if num_candidates != 1:
+                    raise ValueError(
+                        "Seed retry predecode selection currently requires num_candidates=1, "
+                        f"got {num_candidates}"
+                    )
+
+                # 参照ありでは同じ block 4表現を一度だけ作り、両候補の比較へ再利用する
+                seed_retry_reference_state: torch.Tensor | None = None
+                if (
+                    seed_retry_reference_patched is not None
+                    and seed_retry_reference_mask is not None
+                ):
+                    t0 = _measure_start(self.codec_device)
+                    reference_patches = int(seed_retry_reference_mask[0].sum().item())
+                    seed_retry_reference = unpatchify_latent(
+                        seed_retry_reference_patched[:, :reference_patches],
+                        patch_size=self.model_cfg.latent_patch_size,
+                        latent_dim=self.model_cfg.latent_dim,
+                    )
+                    seed_retry_reference_state = self.seed_retry_predecode_selector.encode_latent(
+                        seed_retry_reference
+                    )
+                    stage_sec = _measure_end(self.codec_device, t0)
+                    stage_timings.append(("encode_seed_retry_reference", stage_sec))
+                    _log(f"[runtime] encode_seed_retry_reference: {stage_sec * 1000.0:.1f} ms")
+                t0 = _measure_start(self.codec_device)
+                base_predecode_state = self.seed_retry_predecode_selector.encode_latent(z)
+                base_scores = self.seed_retry_predecode_selector.score(
+                    base_predecode_state,
+                    seed_retry_reference_state,
+                )
+                retry_decisions = self.seed_retry_predecode_selector.should_retry(base_scores)
+                stage_sec = _measure_end(self.codec_device, t0)
+                stage_timings.append(("score_seed_retry_base", stage_sec))
+                seed_retry_base_score = float(base_scores[0].item())
+                _log(
+                    "[runtime] score_seed_retry_base: "
+                    f"{stage_sec * 1000.0:.1f} ms score={seed_retry_base_score:.6f}"
+                )
+
+                # 第2試行は第1試行の潜在を引き継がず、独立した初期ノイズから RF 全体を生成する
+                if bool(retry_decisions[0].item()) is True:
+                    retry_seed = self.seed_retry_predecode_selector.derive_retry_seed(
+                        base_seed=base_seed,
+                        chunk_index=int(req.retry_chunk_index),
+                        attempt_index=1,
+                    )
+                    t0 = _measure_start(self.model_device)
+                    z_patched = sample_latent(
+                        seed=retry_seed,
+                        initial_noise=None,
+                        initial_noise_offset=0,
+                    )
+                    stage_sec = _measure_end(self.model_device, t0)
+                    stage_timings.append(("retry_sample_rf", stage_sec))
+                    retry_z = unpatchify_latent(
+                        z_patched,
+                        patch_size=self.model_cfg.latent_patch_size,
+                        latent_dim=self.model_cfg.latent_dim,
+                    )[:, :latent_steps]
+                    retry_attempts = 2
+                    _log(
+                        f"[runtime] retry_sample_rf: {stage_sec * 1000.0:.1f} ms seed={retry_seed}"
+                    )
+                    t0 = _measure_start(self.codec_device)
+                    retry_predecode_state = self.seed_retry_predecode_selector.encode_latent(
+                        retry_z
+                    )
+                    retry_scores = self.seed_retry_predecode_selector.score(
+                        retry_predecode_state,
+                        seed_retry_reference_state,
+                    )
+                    adoption_decisions = self.seed_retry_predecode_selector.should_adopt_retry(
+                        base_score=base_scores,
+                        retry_score=retry_scores,
+                    )
+                    stage_sec = _measure_end(self.codec_device, t0)
+                    stage_timings.append(("score_seed_retry_candidate", stage_sec))
+                    seed_retry_candidate_score = float(retry_scores[0].item())
+                    is_retry_adopted = bool(adoption_decisions[0].item())
+                    _log(
+                        "[runtime] score_seed_retry_candidate: "
+                        f"{stage_sec * 1000.0:.1f} ms "
+                        f"score={seed_retry_candidate_score:.6f} "
+                        f"adopted={is_retry_adopted}"
+                    )
+
+                    # 派生候補が較正済みの差を超えた場合だけ最終復号へ渡す
+                    if is_retry_adopted is True:
+                        z = retry_z
+                        used_seed = retry_seed
 
             t0 = _measure_start(self.model_device, self.codec_device)
             hop_length = int(self.codec.model.hop_length)
@@ -2271,9 +2453,17 @@ class InferenceRuntime:
             min_duration_frames=None if min_frames is None else int(min_frames),
             max_duration_frames=None if max_frames is None else int(max_frames),
             duration_was_clamped=bool(duration_was_clamped),
+            base_seed=base_seed,
+            retry_seed=retry_seed,
+            retry_attempts=retry_attempts,
+            seed_retry_base_score=seed_retry_base_score,
+            seed_retry_candidate_score=seed_retry_candidate_score,
+            is_retry_adopted=is_retry_adopted,
         )
 
     def unload(self) -> None:
+        if self.seed_retry_predecode_selector is not None:
+            del self.seed_retry_predecode_selector
         del self.model
         del self.tokenizer
         del self.codec
