@@ -124,8 +124,35 @@ class TrajectoryObserverTest(unittest.TestCase):
         self.assertTrue(torch.equal(baseline, observed))
         self.assertEqual(len(observations), 1)
         self.assertEqual(observations[0].step_index, 0)
+        self.assertIsNone(observations[0].latent_mask)
         expected_x0 = torch.full((1, 2, 1), 0.75025, dtype=torch.float32)
         self.assertTrue(torch.allclose(observations[0].x0_hat, expected_x0))
+
+    def test_observer_receives_latent_mask(self) -> None:
+        observations: list[TrajectoryObservation] = []
+        latent_mask = torch.tensor([[True, False]])
+
+        sample_euler_rf_cfg(
+            model=cast(Any, ConstantVelocityModel()),
+            text_input_ids=torch.ones((1, 1), dtype=torch.long),
+            text_mask=torch.ones((1, 1), dtype=torch.bool),
+            ref_latent=None,
+            ref_mask=None,
+            sequence_length=2,
+            num_steps=2,
+            cfg_scale_text=0.0,
+            cfg_scale_caption=0.0,
+            cfg_scale_speaker=0.0,
+            use_context_kv_cache=False,
+            initial_noise=torch.ones((1, 2, 1), dtype=torch.float32),
+            latent_mask=latent_mask,
+            trajectory_observer=TrajectoryObserver(
+                step_indices=(0,),
+                callback=observations.append,
+            ),
+        )
+
+        self.assertIs(observations[0].latent_mask, latent_mask)
 
     def test_observer_accepts_full_waveex_step(self) -> None:
         observations: list[TrajectoryObservation] = []

@@ -74,12 +74,14 @@ class TrajectoryObservation:
         t (float): 速度を評価した現在時刻。
         t_next (float): 状態を進める次時刻。
         x0_hat (torch.Tensor): 実際の状態更新へ使う速度から求めた完成潜在予測。
+        latent_mask (torch.Tensor | None): パディングを除く有効な潜在位置。
     """
 
     step_index: int
     t: float
     t_next: float
     x0_hat: torch.Tensor
+    latent_mask: torch.Tensor | None
 
 
 @dataclass(frozen=True)
@@ -1139,6 +1141,7 @@ def sample_euler_rf_cfg(
                     t=t_value,
                     t_next=t_next_value,
                     x0_hat=rf_predict_x0(x_t=x_t, v_pred=v, t=tt),
+                    latent_mask=latent_mask,
                 )
             )
 
