@@ -25,7 +25,12 @@ from .config import ModelConfig
 from .duration import build_duration_features
 from .lora import checkpoint_state_uses_lora, is_lora_adapter_dir, load_lora_adapter
 from .model import EncodedConditions, TextToLatentRFDiT
-from .rf import TrajectoryIntervention, VelocityFieldGuidance, sample_euler_rf_cfg
+from .rf import (
+    TrajectoryIntervention,
+    TrajectoryObserver,
+    VelocityFieldGuidance,
+    sample_euler_rf_cfg,
+)
 from .speaker_inversion import (
     load_speaker_inversion_payload,
     speaker_inversion_batch_tensors,
@@ -320,6 +325,7 @@ class SamplingRequest:
     # 後方互換のため、新規フィールドは既存の位置引数列の末尾へ追加
     velocity_field_guidance: VelocityFieldGuidance | None = None
     trajectory_intervention: TrajectoryIntervention | None = None
+    trajectory_observer: TrajectoryObserver | None = None
 
 
 @dataclass
@@ -2160,6 +2166,7 @@ class InferenceRuntime:
                 condition_token_scales=condition_token_scales,
                 velocity_field_guidance=req.velocity_field_guidance,
                 trajectory_intervention=req.trajectory_intervention,
+                trajectory_observer=req.trajectory_observer,
             )
             stage_sec = _measure_end(self.model_device, t0)
             stage_timings.append(("sample_rf", stage_sec))

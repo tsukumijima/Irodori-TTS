@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import torch
 
+from irodori_tts.inference_runtime import SamplingRequest
 from irodori_tts.rf import (
     TrajectoryObservation,
     TrajectoryObserver,
@@ -56,6 +57,19 @@ class ConstantVelocityModel:
 
 
 class TrajectoryObserverTest(unittest.TestCase):
+    def test_sampling_request_exposes_observer(self) -> None:
+        observer = TrajectoryObserver(
+            step_indices=(0,),
+            callback=lambda _observation: None,
+        )
+
+        request = SamplingRequest(
+            text="テスト",
+            trajectory_observer=observer,
+        )
+
+        self.assertIs(request.trajectory_observer, observer)
+
     def _sample(
         self,
         observer: TrajectoryObserver | None,
