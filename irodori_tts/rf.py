@@ -65,6 +65,38 @@ class TrajectoryCheckpoint:
 
 
 @dataclass(frozen=True)
+class TrajectoryObservation:
+    """
+    途中時刻の完成予測を読み取り専用の観測処理へ渡す。
+
+    Args:
+        step_index (int): 0始まりのサンプリングステップ番号。
+        t (float): 速度を評価した現在時刻。
+        t_next (float): 状態を進める次時刻。
+        x0_hat (torch.Tensor): 実際の状態更新へ使う速度から求めた完成潜在予測。
+    """
+
+    step_index: int
+    t: float
+    t_next: float
+    x0_hat: torch.Tensor
+
+
+@dataclass(frozen=True)
+class TrajectoryObserver:
+    """
+    指定した完全 ODE ステップの完成潜在予測を読み取り専用で観測する。
+
+    Args:
+        step_indices (tuple[int, ...]): コールバックを呼ぶ0始まりのステップ番号。
+        callback (Callable[[TrajectoryObservation], None]): 観測値を受け取る処理。
+    """
+
+    step_indices: tuple[int, ...]
+    callback: Callable[[TrajectoryObservation], None]
+
+
+@dataclass(frozen=True)
 class TrajectoryIntervention:
     """指定ステップで完成潜在予測を観測し、必要なら別ノイズへ分岐する。
 
@@ -237,6 +269,7 @@ def sample_euler_rf_cfg(
     condition_token_scales: torch.Tensor | None = None,
     velocity_field_guidance: VelocityFieldGuidance | None = None,
     trajectory_intervention: TrajectoryIntervention | None = None,
+    trajectory_observer: TrajectoryObserver | None = None,
 ) -> torch.Tensor:
     """
     Euler sampling over RF ODE with text/reference/caption conditioning CFG.
@@ -365,6 +398,23 @@ def sample_euler_rf_cfg(
         # WaveEx の外挿ステップには速度予測がないため、完成予測の定義を混在させない
         if waveex is not None and waveex.enabled:
             raise ValueError("trajectory_intervention cannot be combined with WaveEx.")
+    observation_step_indices: set[int] = set()
+    if trajectory_observer is not None:
+        observation_step_indices = set(trajectory_observer.step_indices)
+        if len(observation_step_indices) != len(trajectory_observer.step_indices):
+            raise ValueError("trajectory_observer step_indices must not contain duplicates.")
+        if any(
+            step_index < 0 or step_index >= num_steps for step_index in observation_step_indices
+        ):
+            raise ValueError(
+                f"trajectory_observer step_indices must be within [0, {num_steps - 1}]."
+            )
+        if waveex is not None and waveex.enabled:
+            waveex_observation_indices = waveex.resolve_ode_step_indices(num_steps)
+            if not observation_step_indices.issubset(waveex_observation_indices):
+                raise ValueError(
+                    "trajectory_observer step_indices must select full ODE steps when WaveEx is enabled."
+                )
     use_independent_cfg = cfg_guidance_mode == "independent"
     use_joint_cfg = cfg_guidance_mode == "joint"
     use_alternating_cfg = cfg_guidance_mode == "alternating"
@@ -1079,6 +1129,17 @@ def sample_euler_rf_cfg(
                 t=t_value,
                 rescale_k=float(rescale_k),
                 rescale_sigma=float(rescale_sigma),
+            )
+
+        if trajectory_observer is not None and i in observation_step_indices:
+            # 実際の状態更新へ使う補正後の速度から完成潜在を作り、WaveEx の履歴更新前に観測する
+            trajectory_observer.callback(
+                TrajectoryObservation(
+                    step_index=i,
+                    t=t_value,
+                    t_next=t_next_value,
+                    x0_hat=rf_predict_x0(x_t=x_t, v_pred=v, t=tt),
+                )
             )
 
         if (
