@@ -86,9 +86,18 @@ class PretrainedTextTokenizer:
         texts = list(texts)
         if not texts:
             raise ValueError("texts must contain at least one item.")
+        encoded_batch = None
         if max_length is None:
-            encoded = [self.encode(t) for t in texts]
-            max_length = max(max(x.numel(), 1) for x in encoded)
+            encoded_batch = self.tokenizer(
+                texts,
+                add_special_tokens=False,
+                padding=False,
+                truncation=False,
+                return_attention_mask=True,
+            )
+            max_length = max(max(len(token_ids), 1) for token_ids in encoded_batch["input_ids"])
+            if self.add_bos:
+                max_length += 1
         if max_length <= 0:
             raise ValueError(f"max_length must be > 0, got {max_length}")
 
@@ -108,15 +117,23 @@ class PretrainedTextTokenizer:
         else:
             body_max_length = max_length
 
-        encoded_batch = self.tokenizer(
-            texts,
-            add_special_tokens=False,
-            padding="max_length",
-            truncation=True,
-            max_length=body_max_length,
-            return_tensors="pt",
-            return_attention_mask=True,
-        )
+        if encoded_batch is None:
+            encoded_batch = self.tokenizer(
+                texts,
+                add_special_tokens=False,
+                padding="max_length",
+                truncation=True,
+                max_length=body_max_length,
+                return_tensors="pt",
+                return_attention_mask=True,
+            )
+        else:
+            encoded_batch = self.tokenizer.pad(
+                encoded_batch,
+                padding="max_length",
+                max_length=body_max_length,
+                return_tensors="pt",
+            )
         body_ids = encoded_batch["input_ids"].to(dtype=torch.long)
         body_mask = encoded_batch["attention_mask"].to(dtype=torch.bool)
 

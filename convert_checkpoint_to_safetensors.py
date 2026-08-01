@@ -7,6 +7,7 @@ import json
 import math
 import os
 import shutil
+import tempfile
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -14,8 +15,8 @@ from typing import Any
 import torch
 from safetensors.torch import save_file
 
+from irodori_tts import load_checkpoint_for_inference
 from irodori_tts.config import ModelConfig, merge_dataclass_overrides
-from irodori_tts.inference_runtime import _load_checkpoint_for_inference
 from irodori_tts.lora import (
     LORA_METADATA_NAME,
     LORA_TRAINER_STATE_NAME,
@@ -105,10 +106,16 @@ def _extract_inference_config(payload: dict[str, Any]) -> dict[str, int | float]
     if raw is None:
         return {}
 
+    return _extract_inference_values(raw)
+
+
+def _extract_inference_values(raw: dict[str, Any]) -> dict[str, int | float]:
+    """Extract validated inference-only values from a training config mapping."""
+
     inference_cfg: dict[str, int | float] = {}
     for key in INFERENCE_INT_CONFIG_KEYS:
         value = raw.get(key)
-        if isinstance(value, int):
+        if isinstance(value, int) and not isinstance(value, bool):
             inference_cfg[key] = int(value)
     for key in INFERENCE_FLOAT_CONFIG_KEYS:
         value = raw.get(key)
@@ -117,6 +124,16 @@ def _extract_inference_config(payload: dict[str, Any]) -> dict[str, int | float]
             if math.isfinite(value_float) and value_float > 0.0:
                 inference_cfg[key] = value_float
     return inference_cfg
+
+
+def _model_config_from_flat(flat_config: dict[str, Any]) -> ModelConfig:
+    """Reconstruct a model config while excluding inference-only values."""
+
+    return merge_dataclass_overrides(
+        ModelConfig(),
+        {key: value for key, value in flat_config.items() if key not in INFERENCE_CONFIG_KEYS},
+        section="checkpoint model_config",
+    )
 
 
 def _build_flat_config(payload: dict[str, Any]) -> dict[str, Any]:
@@ -131,12 +148,7 @@ def _build_flat_config(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _load_text_encoder_config(flat_config: dict[str, Any]) -> dict[str, Any] | None:
-    model_config = {k: v for k, v in flat_config.items() if k not in INFERENCE_CONFIG_KEYS}
-    model_cfg = merge_dataclass_overrides(
-        ModelConfig(),
-        model_config,
-        section="checkpoint model_config",
-    )
+    model_cfg = _model_config_from_flat(flat_config)
     if not model_cfg.use_pretrained_text_encoder:
         return None
 
@@ -173,12 +185,7 @@ def _export_tokenizer(
     *,
     source_checkpoint: Path | None = None,
 ) -> Path | None:
-    model_config = {k: v for k, v in flat_config.items() if k not in INFERENCE_CONFIG_KEYS}
-    model_cfg = merge_dataclass_overrides(
-        ModelConfig(),
-        model_config,
-        section="checkpoint model_config",
-    )
+    model_cfg = _model_config_from_flat(flat_config)
     if not model_cfg.use_pretrained_text_encoder:
         return None
 
@@ -464,7 +471,7 @@ def _load_adapter_checkpoint(
 ]:
     model_cfg, train_cfg = _load_saved_config(adapter_dir)
     base_path = _resolve_base_checkpoint(adapter_dir, base_checkpoint)
-    base_state, base_model_cfg, _, base_text_encoder_config = _load_checkpoint_for_inference(
+    base_state, base_model_cfg, _, base_text_encoder_config = load_checkpoint_for_inference(
         base_path
     )
     if is_torchao_quantized_state_dict(base_state):
@@ -529,16 +536,7 @@ def _load_adapter_checkpoint(
 
     flat_config = asdict(resolved_model_cfg)
     if isinstance(train_cfg, dict):
-        for key in INFERENCE_INT_CONFIG_KEYS:
-            value = train_cfg.get(key)
-            if isinstance(value, int):
-                flat_config[key] = int(value)
-        for key in INFERENCE_FLOAT_CONFIG_KEYS:
-            value = train_cfg.get(key)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                value_float = float(value)
-                if math.isfinite(value_float) and value_float > 0.0:
-                    flat_config[key] = value_float
+        flat_config.update(_extract_inference_values(train_cfg))
 
     merged_state: dict[str, torch.Tensor] = {}
     for key, value in merged.state_dict().items():
@@ -625,12 +623,22 @@ def main() -> None:
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    save_file(model_state, str(output_path), metadata=metadata)
-    tokenizer_dir = _export_tokenizer(
-        flat_config,
-        output_path,
-        source_checkpoint=tokenizer_source_checkpoint,
-    )
+    # Tokenizer retrieval must succeed before the checkpoint becomes visible at its final path.
+    with tempfile.TemporaryDirectory(
+        prefix=f".{output_path.stem}.export-",
+        dir=output_path.parent,
+    ) as temporary_dir_name:
+        temporary_output_path = Path(temporary_dir_name) / output_path.name
+        temporary_tokenizer_dir = _export_tokenizer(
+            flat_config,
+            temporary_output_path,
+            source_checkpoint=tokenizer_source_checkpoint,
+        )
+        save_file(model_state, str(output_path), metadata=metadata)
+        tokenizer_dir = None
+        if temporary_tokenizer_dir is not None:
+            tokenizer_dir = output_path.parent / "tokenizer"
+            shutil.copytree(temporary_tokenizer_dir, tokenizer_dir, dirs_exist_ok=True)
 
     total_params = sum(int(t.numel()) for t in model_state.values())
     total_bytes = sum(int(t.numel()) * int(t.element_size()) for t in model_state.values())

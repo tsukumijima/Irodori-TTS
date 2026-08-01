@@ -653,7 +653,9 @@ def _parse_json_mapping(
     return payload
 
 
-def _extract_inference_train_config(raw: dict[str, Any] | None) -> dict[str, int] | None:
+def _extract_inference_train_config(
+    raw: dict[str, Any] | None,
+) -> dict[str, int | float] | None:
     if raw is None:
         return None
 
@@ -759,7 +761,7 @@ def _load_checkpoint_from_safetensors(
     return model_state, model_cfg, inference_cfg, text_encoder_config
 
 
-def _load_checkpoint_for_inference(
+def load_checkpoint_for_inference(
     path: Path,
 ) -> tuple[
     dict[str, torch.Tensor],
@@ -959,8 +961,8 @@ class InferenceRuntime:
         )
 
         checkpoint_path = Path(key.checkpoint)
-        model_state, model_cfg_dict, train_cfg, text_encoder_config = (
-            _load_checkpoint_for_inference(checkpoint_path)
+        model_state, model_cfg_dict, train_cfg, text_encoder_config = load_checkpoint_for_inference(
+            checkpoint_path
         )
         model_cfg = merge_dataclass_overrides(
             ModelConfig(),
@@ -2200,7 +2202,7 @@ class InferenceRuntime:
                     speaker_state_override = cached_speaker_state
                     speaker_mask_override = cached_speaker_mask
                     ref_latent, ref_mask = None, None
-                else:
+                elif self.model_cfg.use_speaker_condition_resolved:
                     # 直前のキャッシュ生成に使った参照 latent をそのまま推論へ渡す
                     if ref_latent is None or ref_mask is None:
                         raise RuntimeError("Reference latent is missing after cache construction.")

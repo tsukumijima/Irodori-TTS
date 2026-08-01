@@ -353,6 +353,7 @@ def main() -> None:
         help=(
             "Comma-separated step indices where the model is evaluated normally. "
             "All other indices are predicted via wavelet-guided extrapolation. "
+            "Step 0 is always added, including for explicit index lists. "
             "Use 'auto' (default) to derive a schedule from the calibrated "
             "default (0,1,2,5,10,20 at 40 NFE) rescaled to --num-steps."
         ),

@@ -86,7 +86,11 @@ def test_encode_speaker_condition_returns_server_cache_value() -> None:
     runtime.model_device = torch.device("cpu")
     runtime._model_dtype = torch.float32
     runtime._infer_lock = threading.Lock()
-    runtime._reference_condition_cache = {"cache-key": object()}
+    unrelated_cache_value = object()
+    runtime._reference_condition_cache = {
+        "cache-key": object(),
+        "unrelated-key": unrelated_cache_value,
+    }
     runtime.model = RecordingSpeakerModel()
     runtime._resolve_lora_adapter_path = lambda _path: None
     runtime._reference_cache_key = lambda _request, lora_adapter: "cache-key"
@@ -102,7 +106,7 @@ def test_encode_speaker_condition_returns_server_cache_value() -> None:
     assert condition.state.shape == (1, 3, 4)
     assert condition.mask.shape == (1, 3)
     assert runtime.model.ref_latent is not None
-    assert runtime._reference_condition_cache == {}
+    assert runtime._reference_condition_cache == {"unrelated-key": unrelated_cache_value}
 
 
 @pytest.mark.parametrize(

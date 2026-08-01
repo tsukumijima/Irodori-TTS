@@ -19,7 +19,8 @@ QUANTIZATION_TYPE_FLOAT8_WEIGHT_ONLY = "float8_weight_only"
 QUANTIZATION_TYPE_FLOAT8_DYNAMIC = "float8_dynamic_activation_float8_weight"
 INT4_GROUP_SIZES = (32, 64, 128, 256)
 DEFAULT_INT4_GROUP_SIZE = 128
-INT4_PACKING_FORMAT = "tile_packed_to_4d"
+INT4_CUDA_PACKING_FORMAT = "tile_packed_to_4d"
+INT4_XPU_PACKING_FORMAT = "plain_int32"
 FLOAT8_DYNAMIC_ACTIVATION_VALUE_LB = 1e-12
 QUANTIZATION_TYPES = (
     QUANTIZATION_TYPE_INT8_WEIGHT_ONLY,
@@ -69,6 +70,7 @@ def quantization_cli_name(value: str) -> str:
 def _build_torchao_config(
     quantization_type: str,
     *,
+    target_device: torch.device,
     int4_group_size: int = DEFAULT_INT4_GROUP_SIZE,
 ) -> tuple[Any, Any]:
     try:
@@ -93,9 +95,12 @@ def _build_torchao_config(
                 f"Unsupported INT4 group size={int4_group_size}. "
                 f"Expected one of: {', '.join(map(str, INT4_GROUP_SIZES))}."
             )
+        packing_format = (
+            INT4_XPU_PACKING_FORMAT if target_device.type == "xpu" else INT4_CUDA_PACKING_FORMAT
+        )
         return quantize_, Int4WeightOnlyConfig(
             group_size=int4_group_size,
-            int4_packing_format=INT4_PACKING_FORMAT,
+            int4_packing_format=packing_format,
             version=2,
         )
     config_classes = {
@@ -163,6 +168,7 @@ def quantize_model(
     quantization_type: str = QUANTIZATION_TYPE_INT8_WEIGHT_ONLY,
     profile: str = "core",
     int4_group_size: int = DEFAULT_INT4_GROUP_SIZE,
+    target_device: torch.device | None = None,
 ) -> list[str]:
     normalized_profile = str(profile).strip().lower()
     if normalized_profile not in QUANTIZATION_PROFILES:
@@ -182,6 +188,7 @@ def quantize_model(
 
     quantize_, quantization_config = _build_torchao_config(
         quantization_type,
+        target_device=next(model.parameters()).device if target_device is None else target_device,
         int4_group_size=int4_group_size,
     )
     quantize_(
@@ -204,18 +211,6 @@ def quantize_model(
     return quantized
 
 
-def quantize_model_int8_weight_only(
-    model: torch.nn.Module,
-    *,
-    profile: str = "core",
-) -> list[str]:
-    return quantize_model(
-        model,
-        quantization_type=QUANTIZATION_TYPE_INT8_WEIGHT_ONLY,
-        profile=profile,
-    )
-
-
 def flatten_quantized_state_dict(
     state_dict: Mapping[str, torch.Tensor],
     *,
@@ -225,6 +220,7 @@ def flatten_quantized_state_dict(
     compute_dtype: torch.dtype,
     quantized_modules: int,
     int4_group_size: int = DEFAULT_INT4_GROUP_SIZE,
+    int4_packing_format: str = INT4_CUDA_PACKING_FORMAT,
 ) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
     if not is_torchao_quantized_state_dict(state_dict):
         raise ValueError("State dictionary does not contain torchao quantized tensors.")
@@ -247,7 +243,7 @@ def flatten_quantized_state_dict(
                 f"Expected one of: {', '.join(map(str, INT4_GROUP_SIZES))}."
             )
         payload["group_size"] = int4_group_size
-        payload["packing_format"] = INT4_PACKING_FORMAT
+        payload["packing_format"] = int4_packing_format
     elif normalized_type == QUANTIZATION_TYPE_FLOAT8_DYNAMIC:
         payload["activation_value_lb"] = FLOAT8_DYNAMIC_ACTIVATION_VALUE_LB
     metadata = dict(base_metadata)

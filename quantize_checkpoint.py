@@ -9,8 +9,8 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from irodori_tts import load_checkpoint_for_inference
 from irodori_tts.config import ModelConfig, merge_dataclass_overrides
-from irodori_tts.inference_runtime import _load_checkpoint_for_inference
 from irodori_tts.model import TextToLatentRFDiT
 from irodori_tts.quantization import (
     DEFAULT_INT4_GROUP_SIZE,
@@ -41,11 +41,14 @@ def _resolve_device(raw: str) -> torch.device:
         except AttributeError:
             pass
         return torch.device("cpu")
+    normalized_type = normalized.split(":", maxsplit=1)[0]
+    if normalized_type not in {"cpu", "cuda", "xpu"}:
+        raise ValueError("Quantization device must be one of: auto, cpu, cuda, xpu.")
     device = torch.device(normalized)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise ValueError("CUDA was requested but torch.cuda.is_available() is False.")
-    if device.type not in {"cpu", "cuda", "xpu"}:
-        raise ValueError("Quantization device must be one of: auto, cpu, cuda, xpu.")
+    if device.type == "xpu" and not torch.xpu.is_available():
+        raise ValueError("XPU was requested but torch.xpu.is_available() is False.")
     return device
 
 
@@ -129,7 +132,7 @@ def main() -> None:
     if parse_quantization_metadata(source_metadata) is not None:
         raise ValueError(f"Input checkpoint is already quantized: {input_path}")
 
-    model_state, model_cfg_dict, _, text_encoder_config = _load_checkpoint_for_inference(input_path)
+    model_state, model_cfg_dict, _, text_encoder_config = load_checkpoint_for_inference(input_path)
     model_cfg = merge_dataclass_overrides(
         ModelConfig(),
         model_cfg_dict,
@@ -152,6 +155,7 @@ def main() -> None:
         quantization_type=quantization_type,
         profile=args.profile,
         int4_group_size=args.int4_group_size,
+        target_device=device,
     )
     model = model.to(device="cpu")
 
@@ -163,6 +167,7 @@ def main() -> None:
         compute_dtype=compute_dtype,
         quantized_modules=len(selected_modules),
         int4_group_size=args.int4_group_size,
+        int4_packing_format=("plain_int32" if device.type == "xpu" else "tile_packed_to_4d"),
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_file(flattened_state, str(output_path), metadata=metadata)

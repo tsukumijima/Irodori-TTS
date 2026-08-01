@@ -143,6 +143,14 @@ class CaptionConditionOverrideTest(unittest.TestCase):
                 ),
                 batch_size=1,
             )
+        with self.assertRaisesRegex(ValueError, "must be specified together"):
+            self._load(
+                SamplingRequest(
+                    text="テスト",
+                    caption_mask_override=torch.ones((1, 2), dtype=torch.bool),
+                ),
+                batch_size=1,
+            )
 
     def test_caption_cache_uses_pretrained_backbone(self) -> None:
         runtime = self._runtime()
@@ -170,14 +178,6 @@ class CaptionConditionOverrideTest(unittest.TestCase):
         self.assertIs(encoder.backbone, backbone)
         self.assertEqual(tuple(state.shape), (1, 2, 1))
         torch.testing.assert_close(mask, torch.tensor([[True, True]]))
-        with self.assertRaisesRegex(ValueError, "must be specified together"):
-            self._load(
-                SamplingRequest(
-                    text="テスト",
-                    caption_mask_override=torch.ones((1, 2), dtype=torch.bool),
-                ),
-                batch_size=1,
-            )
 
     def test_public_caption_encoding_owns_tokenization_and_model_dispatch(self) -> None:
         runtime = self._runtime()
