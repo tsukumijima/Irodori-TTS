@@ -41,7 +41,7 @@ class ConstantVelocityModel:
 
         text_state = torch.zeros((1, 1, 1), dtype=self.dtype)
         text_mask = torch.ones((1, 1), dtype=torch.bool)
-        return text_state, text_mask, None, None, None, None
+        return EncodedConditions(text_state, text_mask, None, None, None, None)
 
     def forward_with_encoded_conditions(self, **kwargs: Any) -> torch.Tensor:
         """
@@ -75,6 +75,7 @@ class TrajectoryObserverTest(unittest.TestCase):
         self,
         observer: TrajectoryObserver | None,
         waveex: WaveExConfig | None = None,
+        num_steps: int = 2,
     ) -> torch.Tensor:
         """
         読み取り専用観測を指定して最小の RF サンプリングを実行する。
@@ -82,6 +83,7 @@ class TrajectoryObserverTest(unittest.TestCase):
         Args:
             observer (TrajectoryObserver | None): 観測設定。
             waveex (WaveExConfig | None): WaveEx 設定。
+            num_steps (int): 積分ステップ数。
 
         Returns:
             torch.Tensor: サンプリング後の潜在。
@@ -94,7 +96,7 @@ class TrajectoryObserverTest(unittest.TestCase):
             ref_latent=None,
             ref_mask=None,
             sequence_length=2,
-            num_steps=2,
+            num_steps=num_steps,
             cfg_scale_text=0.0,
             cfg_scale_caption=0.0,
             cfg_scale_speaker=0.0,
@@ -153,25 +155,26 @@ class TrajectoryObserverTest(unittest.TestCase):
             ),
         )
 
-        self.assertIs(observations[0].latent_mask, latent_mask)
+        torch.testing.assert_close(observations[0].latent_mask, latent_mask)
 
     def test_observer_accepts_full_waveex_step(self) -> None:
         observations: list[TrajectoryObservation] = []
 
         observed = self._sample(
             TrajectoryObserver(
-                step_indices=(0,),
+                step_indices=(1,),
                 callback=observations.append,
             ),
             WaveExConfig(
                 enabled=True,
-                ode_step_indices=(0,),
+                ode_step_indices=(0, 1),
                 history_size=2,
             ),
+            num_steps=3,
         )
 
         self.assertEqual(len(observations), 1)
-        self.assertEqual(observations[0].step_index, 0)
+        self.assertEqual(observations[0].step_index, 1)
         self.assertEqual(tuple(observed.shape), (1, 2, 1))
 
     def test_observer_rejects_waveex_prediction_step(self) -> None:

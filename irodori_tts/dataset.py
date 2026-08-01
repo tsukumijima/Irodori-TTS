@@ -94,6 +94,7 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
         self.enable_caption_condition = bool(enable_caption_condition)
         self.enable_speaker_condition = bool(enable_speaker_condition)
         self.caption_key = str(caption_key)
+        self.sample_weight_key = "sample_weight"
         self._manifest_fp = None
         self._manifest_fp_pid: int | None = None
         subset_index_set: set[int] | None = None
@@ -240,7 +241,7 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
             "has_speaker": has_speaker,
             "condition_token_ids": condition_token_ids,
             "condition_token_labels": condition_token_labels,
-            "sample_weight": float(item.get("sample_weight", 1.0)),
+            "sample_weight": float(item.get(self.sample_weight_key, 1.0)),
             "split": item.get("split"),
         }
 
@@ -255,6 +256,8 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
             list[float]: dataset のローカル順に並べたサンプル重み
         """
 
+        # sampler と collator が同じ manifest 列を参照できるよう、選択した列名を保持する
+        self.sample_weight_key = str(key)
         weights: list[float] = []
         for local_index in range(len(self.sample_indices)):
             item = self._read_item(local_index)

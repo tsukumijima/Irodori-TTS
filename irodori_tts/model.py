@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 import torch.nn as nn
@@ -27,14 +27,15 @@ DURATION_ARCHITECTURES = {
     "token_sum_adarn_zero_no_aux",
     "token_sum_dual_adarn_zero_no_aux",
 }
-EncodedConditions = tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor | None,
-    torch.Tensor | None,
-    torch.Tensor | None,
-    torch.Tensor | None,
-]
+
+
+class EncodedConditions(NamedTuple):
+    text_state: torch.Tensor
+    text_mask: torch.Tensor
+    ref_state: torch.Tensor | None
+    ref_mask: torch.Tensor | None
+    caption_state: torch.Tensor | None
+    caption_mask: torch.Tensor | None
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
@@ -1317,6 +1318,8 @@ class TextToLatentRFDiT(nn.Module):
                 int(cfg.speaker_condition_vocab_size),
                 int(cfg.speaker_dim),
             )
+            # 正規化済み参照状態へ連結するため、条件 token も小さい標準偏差から学習を始める
+            nn.init.normal_(self.speaker_condition_embedding.weight, mean=0.0, std=0.02)
         self.duration_predictor = None
         if cfg.use_duration_predictor:
             duration_speaker_dim = None
@@ -1638,9 +1641,9 @@ class TextToLatentRFDiT(nn.Module):
             raise ValueError(
                 "speaker_state_override was provided but speaker conditioning is disabled."
             )
+        caption_encoder = self.caption_encoder
+        caption_norm = self.caption_norm
         if self.cfg.use_caption_condition:
-            caption_encoder = self.caption_encoder
-            caption_norm = self.caption_norm
             if caption_encoder is None or caption_norm is None:
                 raise RuntimeError(
                     "Caption conditioning is enabled but caption modules are missing."
@@ -1659,6 +1662,11 @@ class TextToLatentRFDiT(nn.Module):
                 raise ValueError(
                     "caption_input_ids and caption_mask are required when caption conditioning is enabled."
                 )
+            # 入力元にかかわらず、後続のエンコーダーと同じデバイス・論理型へ揃える
+            resolved_caption_mask = resolved_caption_mask.to(
+                device=text_input_ids.device,
+                dtype=torch.bool,
+            )
             if caption_condition_dropout is not None:
                 resolved_caption_mask = resolved_caption_mask.clone()
                 resolved_caption_mask[caption_condition_dropout] = False
@@ -1689,8 +1697,6 @@ class TextToLatentRFDiT(nn.Module):
             )
         caption_state = None
         if self.cfg.use_caption_condition:
-            caption_encoder = self.caption_encoder
-            caption_norm = self.caption_norm
             if caption_encoder is None or caption_norm is None:
                 raise RuntimeError(
                     "Caption conditioning is enabled but caption modules are missing."
@@ -1702,7 +1708,14 @@ class TextToLatentRFDiT(nn.Module):
                 caption_state = caption_state_override.to(
                     device=text_state.device, dtype=text_state.dtype
                 )
-        return text_state, text_mask, ref_state, ref_mask, caption_state, caption_mask
+        return EncodedConditions(
+            text_state=text_state,
+            text_mask=text_mask,
+            ref_state=ref_state,
+            ref_mask=ref_mask,
+            caption_state=caption_state,
+            caption_mask=caption_mask,
+        )
 
     def encode_speaker_condition(
         self,
@@ -1875,7 +1888,6 @@ class TextToLatentRFDiT(nn.Module):
                 condition_token_ids=condition_token_ids,
                 condition_token_mask=condition_token_mask,
                 condition_token_scales=condition_token_scales,
-                condition_token_dropout_mask=condition_token_dropout_mask,
             )
             if duration_only:
                 return self.predict_duration_log_frames(
@@ -1919,6 +1931,16 @@ class TextToLatentRFDiT(nn.Module):
                     uncond_mode="mask",
                     num_trailing_condition_tokens=num_condition_tokens,
                 )
+            if condition_token_dropout_mask is not None and speaker_mask_dit is not None:
+                if condition_token_ids is None:
+                    raise ValueError(
+                        "condition_token_ids is required when condition_token_dropout_mask is provided."
+                    )
+                num_condition_tokens = int(condition_token_ids.shape[1])
+                if num_condition_tokens > 0:
+                    # duration predictor のフル条件を保ち、DiT 側の条件 token だけを無効化する
+                    speaker_mask_dit = speaker_mask_dit.clone()
+                    speaker_mask_dit[:, -num_condition_tokens:] &= ~condition_token_dropout_mask
             if caption_condition_dropout is not None and caption_mask_dit is not None:
                 caption_mask_dit = caption_mask_dit.clone()
                 caption_mask_dit[caption_condition_dropout] = False

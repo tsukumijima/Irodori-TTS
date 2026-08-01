@@ -4,7 +4,11 @@ from irodori_tts.codec import DACVAECodec
 
 
 def test_measure_loudness_matches_torchaudio_reference_values() -> None:
-    """Torchaudio 2.9 で事前計測した BS.1770 値との数値差を監視する。"""
+    """Torchaudio 2.9 で事前計測した BS.1770 値との数値差を監視する。
+
+    各サンプルレートで1秒の 440Hz 正弦波と seed 1 の白色雑音を作り、
+    `torchaudio.functional.loudness()` へ渡した値を参照値として固定する。
+    """
 
     # 参照音声で現れる主要なサンプルレートごとに、Torchaudio 2.9 の値を固定する
     for sample_rate, expected_sine, expected_noise in (
@@ -36,6 +40,16 @@ def test_measure_loudness_matches_torchaudio_reference_values() -> None:
             atol=1e-3,
             rtol=0.0,
         )
+
+
+def test_measure_loudness_returns_finite_silence_for_short_and_silent_audio() -> None:
+    for waveform in (
+        torch.zeros(100, dtype=torch.float32),
+        torch.zeros(48000, dtype=torch.float32),
+    ):
+        measured_db = DACVAECodec._measure_loudness(waveform, 48000)
+
+        torch.testing.assert_close(measured_db, torch.tensor(-70.0))
 
 
 def test_normalize_loudness_reaches_target_without_peak_clipping() -> None:

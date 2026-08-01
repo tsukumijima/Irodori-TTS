@@ -7,6 +7,7 @@ from pathlib import Path
 
 from irodori_tts.config import ModelConfig
 from irodori_tts.inference_runtime import InferenceRuntime, SamplingRequest, resolve_cfg_scales
+from irodori_tts.lora import LORA_METADATA_NAME
 
 
 class ConditionTokenRuntimeTest(unittest.TestCase):
@@ -29,7 +30,7 @@ class ConditionTokenRuntimeTest(unittest.TestCase):
             },
             "condition_vocabulary_hash": "vocab-hash",
         }
-        (adapter_dir / "irodori_lora_metadata.json").write_text(
+        (adapter_dir / LORA_METADATA_NAME).write_text(
             json.dumps(metadata, ensure_ascii=False),
             encoding="utf-8",
         )

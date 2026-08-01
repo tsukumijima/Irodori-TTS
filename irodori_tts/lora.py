@@ -194,8 +194,15 @@ def validate_lora_modules_to_save(
 ) -> None:
     if modules_to_save is None:
         return
-    named_modules = dict(model.named_modules())
-    missing_modules = [name for name in modules_to_save if name not in named_modules]
+    named_module_names = tuple(name for name, _module in model.named_modules())
+    missing_modules = [
+        requested_name
+        for requested_name in modules_to_save
+        if not any(
+            module_name == requested_name or module_name.endswith(f".{requested_name}")
+            for module_name in named_module_names
+        )
+    ]
     if missing_modules:
         raise ValueError(
             f"lora_modules_to_save contains modules that do not exist: {missing_modules}"

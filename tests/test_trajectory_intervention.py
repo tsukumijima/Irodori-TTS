@@ -15,6 +15,7 @@ from irodori_tts.rf import (
     TrajectoryIntervention,
     sample_euler_rf_cfg,
 )
+from irodori_tts.waveex import WaveExConfig
 
 
 class ConstantVelocityModel:
@@ -34,7 +35,7 @@ class ConstantVelocityModel:
 
         text_state = torch.zeros((1, 1, 1), dtype=self.dtype)
         text_mask = torch.ones((1, 1), dtype=torch.bool)
-        return text_state, text_mask, None, None, None, None
+        return EncodedConditions(text_state, text_mask, None, None, None, None)
 
     def forward_with_encoded_conditions(self, **kwargs: Any) -> torch.Tensor:
         """全時刻で一定の速度を返す。"""
@@ -43,7 +44,13 @@ class ConstantVelocityModel:
 
 
 class TrajectoryInterventionTest(unittest.TestCase):
-    def _sample(self, intervention: TrajectoryIntervention | None) -> torch.Tensor:
+    def _sample(
+        self,
+        intervention: TrajectoryIntervention | None,
+        *,
+        waveex: WaveExConfig | None = None,
+        num_steps: int = 2,
+    ) -> torch.Tensor:
         return sample_euler_rf_cfg(
             model=cast(Any, ConstantVelocityModel()),
             text_input_ids=torch.ones((1, 1), dtype=torch.long),
@@ -51,13 +58,14 @@ class TrajectoryInterventionTest(unittest.TestCase):
             ref_latent=None,
             ref_mask=None,
             sequence_length=2,
-            num_steps=2,
+            num_steps=num_steps,
             cfg_scale_text=0.0,
             cfg_scale_caption=0.0,
             cfg_scale_speaker=0.0,
             use_context_kv_cache=False,
             initial_noise=torch.ones((1, 2, 1), dtype=torch.float32),
             trajectory_intervention=intervention,
+            waveex=waveex,
         )
 
     def test_sampling_request_keeps_intervention_before_new_positional_fields(self) -> None:
@@ -115,6 +123,28 @@ class TrajectoryInterventionTest(unittest.TestCase):
         intervention = TrajectoryIntervention(step_indices=(2,), callback=observe)
         with self.assertRaisesRegex(ValueError, "within"):
             self._sample(intervention)
+
+    def test_duplicate_steps_are_rejected_before_sampling(self) -> None:
+        intervention = TrajectoryIntervention(
+            step_indices=(0, 0),
+            callback=lambda _checkpoint: None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "duplicates"):
+            self._sample(intervention)
+
+    def test_waveex_combination_is_rejected_before_sampling(self) -> None:
+        intervention = TrajectoryIntervention(
+            step_indices=(0,),
+            callback=lambda _checkpoint: None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            self._sample(intervention, waveex=WaveExConfig(enabled=True))
+
+    def test_non_positive_step_count_is_rejected_before_sampling(self) -> None:
+        with self.assertRaisesRegex(ValueError, "greater than zero"):
+            self._sample(None, num_steps=0)
 
 
 if __name__ == "__main__":

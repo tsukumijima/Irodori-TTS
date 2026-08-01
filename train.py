@@ -243,6 +243,7 @@ def save_checkpoint(
     train_cfg: TrainConfig,
     *,
     base_init: dict[str, Any] | None = None,
+    lora_metadata: dict[str, Any] | None = None,
 ) -> None:
     path = Path(path)
     if train_cfg.speaker_inversion_enabled:
@@ -250,6 +251,8 @@ def save_checkpoint(
         return
 
     if train_config_uses_lora(train_cfg):
+        if lora_metadata is None:
+            raise ValueError("lora_metadata is required when saving a LoRA checkpoint.")
         if path.exists():
             _safe_unlink(path)
         path.mkdir(parents=True, exist_ok=True)
@@ -261,11 +264,7 @@ def save_checkpoint(
         dump_configs(path / "config.json", model_cfg, train_cfg)
         (path / LORA_METADATA_NAME).write_text(
             json.dumps(
-                build_lora_metadata(
-                    model_cfg=model_cfg,
-                    train_cfg=train_cfg,
-                    base_init=base_init,
-                ),
+                lora_metadata,
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -366,6 +365,7 @@ def maybe_save_best_val_loss_checkpoint(
     model_cfg: ModelConfig,
     train_cfg: TrainConfig,
     base_init: dict | None,
+    lora_metadata: dict[str, Any] | None,
 ) -> tuple[list[tuple[float, int, Path]], Path | None]:
     if keep_best_n <= 0:
         return checkpoints, None
@@ -394,6 +394,7 @@ def maybe_save_best_val_loss_checkpoint(
         model_cfg=model_cfg,
         train_cfg=train_cfg,
         base_init=base_init,
+        lora_metadata=lora_metadata,
     )
     checkpoints.append((float(val_loss), int(step), path))
     checkpoints = prune_best_val_loss_checkpoints(checkpoints, keep_best_n)
@@ -1422,10 +1423,15 @@ def load_fixed_split_indices(
             if header_line == "":
                 raise ValueError(f"Split file is empty: {split_path}")
             header = header_line.rstrip("\n").split("\t")
-            for line in handle:
+            for line_number, line in enumerate(handle, start=2):
                 if not line.strip():
                     continue
                 values = line.rstrip("\n").split("\t")
+                if len(values) != len(header):
+                    raise ValueError(
+                        f"Split TSV column count mismatch in {split_path} at line {line_number}: "
+                        f"expected {len(header)}, got {len(values)}."
+                    )
                 rows.append(dict(zip(header, values, strict=False)))
 
     train_indices: list[int] = []
@@ -1452,7 +1458,7 @@ def build_condition_token_dropout_mask(
     condition_token_mask: torch.Tensor | None,
     condition_token_family_ids: torch.Tensor | None,
     train_cfg: TrainConfig,
-) -> tuple[torch.Tensor | None, dict[str, int]]:
+) -> tuple[torch.Tensor | None, dict[str, torch.Tensor]]:
     """
     条件 token 専用の3階層 dropout mask を作る。
 
@@ -1462,17 +1468,11 @@ def build_condition_token_dropout_mask(
         train_cfg (TrainConfig): dropout 確率を含む学習設定
 
     Returns:
-        tuple[torch.Tensor | None, dict[str, int]]: dropout mask と分岐カウンタ
+        tuple[torch.Tensor | None, dict[str, torch.Tensor]]: dropout mask と分岐カウンタ
     """
 
-    counters = {
-        "condition_all_drop": 0,
-        "condition_family_drop": 0,
-        "condition_style_drop": 0,
-        "condition_kept": 0,
-    }
     if condition_token_mask is None or condition_token_mask.numel() == 0:
-        return None, counters
+        return None, {}
     if condition_token_family_ids is None:
         raise ValueError(
             "condition_token_family_ids is required when condition tokens are present."
@@ -1484,13 +1484,13 @@ def build_condition_token_dropout_mask(
 
     all_drop = torch.rand(bsz, device=device) < float(train_cfg.condition_token_dropout_all)
     dropout_mask = dropout_mask | (all_drop[:, None] & condition_token_mask)
-    counters["condition_all_drop"] = int(all_drop.sum().item())
+    condition_all_drop = all_drop.sum(dtype=torch.int64)
 
     family_drop = torch.rand(bsz, device=device) < float(train_cfg.condition_token_dropout_family)
     family_selector = torch.randint(1, 4, (bsz,), device=device)
     family_mask = condition_token_family_ids == family_selector[:, None]
     dropout_mask = dropout_mask | (family_drop[:, None] & family_mask & condition_token_mask)
-    counters["condition_family_drop"] = int(family_drop.sum().item())
+    condition_family_drop = family_drop.sum(dtype=torch.int64)
 
     style_mask = condition_token_family_ids == 3
     style_drop = torch.rand(condition_token_mask.shape, device=device) < float(
@@ -1498,28 +1498,31 @@ def build_condition_token_dropout_mask(
     )
     style_drop = style_drop & style_mask & condition_token_mask
     dropout_mask = dropout_mask | style_drop
-    counters["condition_style_drop"] = int(style_drop.sum().item())
-    counters["condition_kept"] = int((condition_token_mask & ~dropout_mask).sum().item())
-    return dropout_mask, counters
+    return dropout_mask, {
+        "condition_all_drop": condition_all_drop,
+        "condition_family_drop": condition_family_drop,
+        "condition_style_drop": style_drop.sum(dtype=torch.int64),
+        "condition_kept": (condition_token_mask & ~dropout_mask).sum(dtype=torch.int64),
+    }
 
 
 def merge_condition_dropout_counters(
-    left: dict[str, int],
-    right: dict[str, int],
-) -> dict[str, int]:
+    left: dict[str, torch.Tensor],
+    right: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
     """
     gradient accumulation 中の条件 token dropout カウンタを合算する。
 
     Args:
-        left (dict[str, int]): 既存カウンタ
-        right (dict[str, int]): 追加カウンタ
+        left (dict[str, torch.Tensor]): 既存カウンタ
+        right (dict[str, torch.Tensor]): 追加カウンタ
 
     Returns:
-        dict[str, int]: 合算後のカウンタ
+        dict[str, torch.Tensor]: 合算後のカウンタ
     """
 
     for key, value in right.items():
-        left[key] = int(left.get(key, 0)) + int(value)
+        left[key] += value
     return left
 
 
@@ -2965,6 +2968,12 @@ def main() -> None:
             f"modules_to_save={train_cfg.lora_modules_to_save!r} "
             f"trainable={trainable_params:,}/{total_params:,}"
         )
+    # manifest のハッシュと付随 JSON は不変なので、学習開始時に1回だけ読み込む
+    lora_metadata = (
+        build_lora_metadata(model_cfg=model_cfg, train_cfg=train_cfg, base_init=base_init)
+        if train_config_uses_lora(train_cfg)
+        else None
+    )
     if train_cfg.speaker_inversion_enabled:
         init_embedding = None
         if train_cfg.speaker_inversion_init_embedding is not None:
@@ -3130,6 +3139,7 @@ def main() -> None:
                 model_cfg,
                 train_cfg,
                 base_init=base_init,
+                lora_metadata=lora_metadata,
             )
         if scheduler is not None and step == 0:
             # Ensure the very first optimizer step uses warmup-scaled LR.
@@ -3145,11 +3155,14 @@ def main() -> None:
             device=device,
             dtype=torch.float64,
         )
-        accum_condition_dropout_counters: dict[str, int] = {
-            "condition_all_drop": 0,
-            "condition_family_drop": 0,
-            "condition_style_drop": 0,
-            "condition_kept": 0,
+        accum_condition_dropout_counters = {
+            key: torch.zeros((), device=device, dtype=torch.int64)
+            for key in (
+                "condition_all_drop",
+                "condition_family_drop",
+                "condition_style_drop",
+                "condition_kept",
+            )
         }
         epoch = 0
         while step < train_cfg.max_steps:
@@ -3438,20 +3451,27 @@ def main() -> None:
                 step_duration_loss = accum_duration_loss / float(accum_steps)
                 step_duration_mae_frames = accum_duration_mae_frames / float(accum_steps)
                 step_duration_group_totals = accum_duration_group_totals.clone()
-                step_condition_dropout_counters = dict(accum_condition_dropout_counters)
+                should_log_step = (step + 1) % train_cfg.log_every == 0
+                step_condition_dropout_counters: dict[str, int] = {}
+                if should_log_step:
+                    counter_names = tuple(accum_condition_dropout_counters)
+                    counter_values = torch.stack(
+                        [accum_condition_dropout_counters[name] for name in counter_names]
+                    ).tolist()
+                    step_condition_dropout_counters = dict(
+                        zip(counter_names, (int(value) for value in counter_values), strict=True)
+                    )
                 accum_loss.zero_()
                 accum_rf_loss.zero_()
                 accum_duration_loss.zero_()
                 accum_duration_mae_frames.zero_()
                 accum_duration_group_totals.zero_()
-                accum_condition_dropout_counters = {
-                    "condition_all_drop": 0,
-                    "condition_family_drop": 0,
-                    "condition_style_drop": 0,
-                    "condition_kept": 0,
-                }
+                for counter in accum_condition_dropout_counters.values():
+                    counter.zero_()
 
-                condition_grad_norm = condition_embedding_grad_norm(raw_model)
+                condition_grad_norm = (
+                    condition_embedding_grad_norm(raw_model) if should_log_step else 0.0
+                )
                 torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip_norm)
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
@@ -3464,7 +3484,7 @@ def main() -> None:
                     if is_main_process:
                         progress.write("caption warmup complete; all parameters are now updating.")
 
-                if step % train_cfg.log_every == 0:
+                if should_log_step:
                     loss_value = reduce_mean(step_loss, world_size, distributed).item()
                     rf_loss_value = reduce_mean(step_rf_loss, world_size, distributed).item()
                     duration_loss_value = reduce_mean(
@@ -3595,6 +3615,7 @@ def main() -> None:
                         model_cfg,
                         train_cfg,
                         base_init=base_init,
+                        lora_metadata=lora_metadata,
                     )
                     enforce_periodic_checkpoint_limit(
                         output_dir=output_dir,
@@ -3674,6 +3695,7 @@ def main() -> None:
                             model_cfg=model_cfg,
                             train_cfg=train_cfg,
                             base_init=base_init,
+                            lora_metadata=lora_metadata,
                         )
                         if best_path is not None:
                             progress.write(
@@ -3757,6 +3779,7 @@ def main() -> None:
                     model_cfg=model_cfg,
                     train_cfg=train_cfg,
                     base_init=base_init,
+                    lora_metadata=lora_metadata,
                 )
                 if best_path is not None:
                     progress.write(
@@ -3776,6 +3799,7 @@ def main() -> None:
                 model_cfg,
                 train_cfg,
                 base_init=base_init,
+                lora_metadata=lora_metadata,
             )
             if wandb_run is not None:
                 wandb_run.summary["train/final_step"] = step

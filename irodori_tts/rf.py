@@ -360,6 +360,9 @@ def sample_euler_rf_cfg(
             "Expected one of: independent, joint, alternating."
         )
 
+    if num_steps <= 0:
+        raise ValueError(f"num_steps must be greater than zero, got {num_steps}.")
+
     init_scale = 0.999
     t_schedule_mode_norm = str(t_schedule_mode).strip().lower()
     sway_coeff_value = float(sway_coeff)
@@ -502,9 +505,9 @@ def sample_euler_rf_cfg(
                 speaker_uncond_mode=speaker_uncond_mode,
             )
         condition_token_uncond_bundle = encoded_conditions_without_condition_tokens
-        if condition_token_uncond_bundle[2] is not None and speaker_state_cond is not None:
-            condition_speaker_state = condition_token_uncond_bundle[2]
-            condition_speaker_mask = condition_token_uncond_bundle[3]
+        if condition_token_uncond_bundle.ref_state is not None and speaker_state_cond is not None:
+            condition_speaker_state = condition_token_uncond_bundle.ref_state
+            condition_speaker_mask = condition_token_uncond_bundle.ref_mask
             if condition_speaker_mask is None:
                 raise RuntimeError("Condition-token uncond speaker mask is missing.")
             cond_tokens = int(speaker_state_cond.shape[1])
@@ -559,6 +562,14 @@ def sample_euler_rf_cfg(
     )
     has_speaker_cfg = cfg_scale_speaker > 0
 
+    target_speaker_state = speaker_state_cond
+    target_speaker_mask = speaker_mask_cond
+    opposite_speaker_state = speaker_state_cond
+    opposite_speaker_mask = speaker_mask_cond
+    target_caption_state = caption_state_cond
+    target_caption_mask = caption_mask_cond
+    opposite_caption_state = caption_state_cond
+    opposite_caption_mask = caption_mask_cond
     if velocity_field_guidance is not None:
         caption_values = (
             velocity_field_guidance.target_caption_state,
@@ -598,6 +609,18 @@ def sample_euler_rf_cfg(
                 "velocity_field_guidance time range must satisfy 0 <= min_t <= max_t <= 1."
             )
 
+        # 反復中に同じ代替条件を解決し直さないよう、検証済みの条件対をここで確定する
+        if velocity_field_guidance.target_speaker_state is not None:
+            target_speaker_state = velocity_field_guidance.target_speaker_state
+            target_speaker_mask = velocity_field_guidance.target_speaker_mask
+            opposite_speaker_state = velocity_field_guidance.opposite_speaker_state
+            opposite_speaker_mask = velocity_field_guidance.opposite_speaker_mask
+        if velocity_field_guidance.target_caption_state is not None:
+            target_caption_state = velocity_field_guidance.target_caption_state
+            target_caption_mask = velocity_field_guidance.target_caption_mask
+            opposite_caption_state = velocity_field_guidance.opposite_caption_state
+            opposite_caption_mask = velocity_field_guidance.opposite_caption_mask
+
         # 追加 forward が通常条件と同じバッチ契約を使えることを、サンプリング開始前に検証
         active_values = caption_values if has_caption_pair else speaker_values
         target_state, target_mask, opposite_state, opposite_mask = active_values
@@ -622,7 +645,14 @@ def sample_euler_rf_cfg(
                     f"velocity_field_guidance {side_name} {channel_name} batch size mismatch: "
                     f"expected {batch_size}, got {state.shape[0]}."
                 )
-            if state.device != device or mask.device != device:
+            expected_device = torch.device(device)
+            has_state_device_mismatch = state.device.type != expected_device.type or (
+                expected_device.index is not None and state.device.index != expected_device.index
+            )
+            has_mask_device_mismatch = mask.device.type != expected_device.type or (
+                expected_device.index is not None and mask.device.index != expected_device.index
+            )
+            if has_state_device_mismatch or has_mask_device_mismatch:
                 raise ValueError(
                     f"velocity_field_guidance {side_name} {channel_name} tensors must be on {device}."
                 )
@@ -673,7 +703,7 @@ def sample_euler_rf_cfg(
     if has_speaker_cfg:
         enabled_cfg_names.append("speaker")
         cfg_scales["speaker"] = float(cfg_scale_speaker)
-    if has_condition_cfg:
+    if has_condition_cfg and not (use_joint_cfg and has_speaker_cfg):
         enabled_cfg_names.append("condition")
         cfg_scales["condition"] = float(cfg_scale_condition)
     if has_caption_cfg:
@@ -865,6 +895,32 @@ def sample_euler_rf_cfg(
         waveex_ode_indices = waveex_cfg.resolve_ode_step_indices(num_steps)
         waveex_min_history = max(2, int(waveex_cfg.history_size))
 
+    def _restore_speaker_kv_cache_scale() -> None:
+        """
+        話者 KV キャッシュへ適用した倍率を全 CFG 経路で元へ戻す。
+        """
+
+        if speaker_kv_scale is None or context_kv_cond is None:
+            raise RuntimeError("Speaker KV cache is missing while restoring its scale.")
+        inverse_scale = 1.0 / float(speaker_kv_scale)
+        scale_speaker_kv_cache(
+            context_kv_cache=context_kv_cond,
+            scale=inverse_scale,
+            max_layers=speaker_kv_max_layers,
+        )
+        if context_kv_cfg is not None:
+            scale_speaker_kv_cache(
+                context_kv_cache=context_kv_cfg,
+                scale=inverse_scale,
+                max_layers=speaker_kv_max_layers,
+            )
+        for cache in context_kv_alternating.values():
+            scale_speaker_kv_cache(
+                context_kv_cache=cache,
+                scale=inverse_scale,
+                max_layers=speaker_kv_max_layers,
+            )
+
     for i in range(num_steps):
         t = t_schedule[i]
         t_next = t_schedule[i + 1]
@@ -892,24 +948,7 @@ def sample_euler_rf_cfg(
                 and t_next_value < speaker_kv_min_t
                 and t_value >= speaker_kv_min_t
             ):
-                inv_scale = 1.0 / float(speaker_kv_scale)
-                scale_speaker_kv_cache(
-                    context_kv_cache=context_kv_cond,
-                    scale=inv_scale,
-                    max_layers=speaker_kv_max_layers,
-                )
-                if context_kv_cfg is not None:
-                    scale_speaker_kv_cache(
-                        context_kv_cache=context_kv_cfg,
-                        scale=inv_scale,
-                        max_layers=speaker_kv_max_layers,
-                    )
-                for cache in context_kv_alternating.values():
-                    scale_speaker_kv_cache(
-                        context_kv_cache=cache,
-                        scale=inv_scale,
-                        max_layers=speaker_kv_max_layers,
-                    )
+                _restore_speaker_kv_cache_scale()
                 speaker_kv_active = False
             continue
 
@@ -1006,46 +1045,6 @@ def sample_euler_rf_cfg(
             and velocity_field_guidance.alpha != 0.0
             and velocity_field_guidance.min_t <= t_value <= velocity_field_guidance.max_t
         ):
-            target_speaker_state = (
-                velocity_field_guidance.target_speaker_state
-                if velocity_field_guidance.target_speaker_state is not None
-                else speaker_state_cond
-            )
-            target_speaker_mask = (
-                velocity_field_guidance.target_speaker_mask
-                if velocity_field_guidance.target_speaker_mask is not None
-                else speaker_mask_cond
-            )
-            opposite_speaker_state = (
-                velocity_field_guidance.opposite_speaker_state
-                if velocity_field_guidance.opposite_speaker_state is not None
-                else speaker_state_cond
-            )
-            opposite_speaker_mask = (
-                velocity_field_guidance.opposite_speaker_mask
-                if velocity_field_guidance.opposite_speaker_mask is not None
-                else speaker_mask_cond
-            )
-            target_caption_state = (
-                velocity_field_guidance.target_caption_state
-                if velocity_field_guidance.target_caption_state is not None
-                else caption_state_cond
-            )
-            target_caption_mask = (
-                velocity_field_guidance.target_caption_mask
-                if velocity_field_guidance.target_caption_mask is not None
-                else caption_mask_cond
-            )
-            opposite_caption_state = (
-                velocity_field_guidance.opposite_caption_state
-                if velocity_field_guidance.opposite_caption_state is not None
-                else caption_state_cond
-            )
-            opposite_caption_mask = (
-                velocity_field_guidance.opposite_caption_mask
-                if velocity_field_guidance.opposite_caption_mask is not None
-                else caption_mask_cond
-            )
             target_velocity = model.forward_with_encoded_conditions(
                 x_t=x_t.to(dtype),
                 t=tt,
@@ -1099,24 +1098,7 @@ def sample_euler_rf_cfg(
             and t_next_value < speaker_kv_min_t
             and t_value >= speaker_kv_min_t
         ):
-            inv_scale = 1.0 / float(speaker_kv_scale)
-            scale_speaker_kv_cache(
-                context_kv_cache=context_kv_cond,
-                scale=inv_scale,
-                max_layers=speaker_kv_max_layers,
-            )
-            if context_kv_cfg is not None:
-                scale_speaker_kv_cache(
-                    context_kv_cache=context_kv_cfg,
-                    scale=inv_scale,
-                    max_layers=speaker_kv_max_layers,
-                )
-            for cache in context_kv_alternating.values():
-                scale_speaker_kv_cache(
-                    context_kv_cache=cache,
-                    scale=inv_scale,
-                    max_layers=speaker_kv_max_layers,
-                )
+            _restore_speaker_kv_cache_scale()
             speaker_kv_active = False
 
         replacement_noise = None

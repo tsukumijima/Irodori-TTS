@@ -457,6 +457,27 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # WaveEx の履歴差分には少なくとも2状態が必要なため、設定構築前に CLI エラーへ変換する
+    if args.waveex_history_size < 2:
+        parser.error("--waveex-history-size must be at least 2.")
+    if args.condition_token_scale is not None:
+        condition_token_names = set(args.speaker_condition_token or [])
+        scale_token_names = [name for name, _scale in args.condition_token_scale]
+        duplicate_scale_names = sorted(
+            name for name in set(scale_token_names) if scale_token_names.count(name) > 1
+        )
+        if duplicate_scale_names:
+            parser.error(
+                "--condition-token-scale contains duplicate token names: "
+                + ", ".join(duplicate_scale_names)
+            )
+        unknown_scale_names = sorted(set(scale_token_names) - condition_token_names)
+        if unknown_scale_names:
+            parser.error(
+                "--condition-token-scale requires matching --speaker-condition-token values: "
+                + ", ".join(unknown_scale_names)
+            )
+
     checkpoint_path = _resolve_checkpoint_path(args)
 
     runtime = InferenceRuntime.from_key(

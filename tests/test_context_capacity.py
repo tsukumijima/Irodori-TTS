@@ -34,7 +34,7 @@ class EncodedContextCapacityTest(unittest.TestCase):
         caption_state = (
             None if caption_mask is None else torch.zeros((batch_size, caption_mask.shape[1], 1))
         )
-        return (
+        return EncodedConditions(
             text_state,
             text_mask,
             speaker_state,

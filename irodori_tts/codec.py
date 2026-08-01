@@ -232,10 +232,15 @@ class DACVAECodec:
             ],
             dtype=np.float32,
         )
+        # 窓を1つも作れない短音声は、有限な無音値として扱う
+        if energy.size == 0:
+            return torch.tensor(-70.0, dtype=torch.float32)
         # 無音ブロックは規格どおり -inf となるため、NumPy の診断だけを抑えてゲートで除外する
         with np.errstate(divide="ignore", invalid="ignore"):
             block_loudness = np.float32(-0.691) + np.float32(10.0) * np.log10(energy)
             gated_blocks = block_loudness > np.float32(-70.0)
+            if not np.any(gated_blocks):
+                return torch.tensor(-70.0, dtype=torch.float32)
             gated_energy = np.sum(
                 energy[gated_blocks],
                 dtype=np.float32,
@@ -244,6 +249,8 @@ class DACVAECodec:
                 np.float32(-0.691) + np.float32(10.0) * np.log10(gated_energy) - np.float32(10.0)
             )
             gated_blocks = np.logical_and(gated_blocks, block_loudness > relative_gate)
+            if not np.any(gated_blocks):
+                return torch.tensor(-70.0, dtype=torch.float32)
             gated_energy = np.sum(
                 energy[gated_blocks],
                 dtype=np.float32,
@@ -325,19 +332,19 @@ class DACVAECodec:
         if sample_rate != self.sample_rate:
             # Reference audio normally arrives on CPU from SoundFile, and the short
             # per-utterance tensors pay more scheduling cost than useful work in torch resample.
-            resampled_waveforms = []
-            for wav in waveform.squeeze(1):
-                wav_np = wav.detach().to(device="cpu", dtype=torch.float32).numpy()
-                resampled_np = soxr.resample(
-                    wav_np,
-                    float(sample_rate),
-                    float(self.sample_rate),
-                    quality="HQ",
-                )
-                resampled_waveforms.append(
-                    torch.from_numpy(np.asarray(resampled_np, dtype=np.float32))
-                )
-            waveform = torch.stack(resampled_waveforms, dim=0).unsqueeze(1)
+            # soxr のチャンネル次元へバッチを載せ、全波形を1回の呼び出しで変換する
+            waveform_np = (
+                waveform.squeeze(1).detach().to(device="cpu", dtype=torch.float32).numpy().T
+            )
+            resampled_np = soxr.resample(
+                waveform_np,
+                float(sample_rate),
+                float(self.sample_rate),
+                quality="HQ",
+            )
+            waveform = torch.from_numpy(
+                np.ascontiguousarray(np.asarray(resampled_np, dtype=np.float32).T)
+            ).unsqueeze(1)
 
         if normalize_db is _CODEC_DEFAULT:
             effective_normalize_db = self.normalize_db
@@ -345,13 +352,12 @@ class DACVAECodec:
             effective_normalize_db = None
         else:
             effective_normalize_db = float(normalize_db)
-        # audiotools normalization already applies ensure_max_of_audio(), so codec-side
-        # peak scaling is only needed when normalization is disabled.
+        # 音量正規化の有効時は内部でピークも制限するため、無効時だけ追加のピーク制限を使う
         effective_ensure_max = (
             effective_normalize_db is None and bool(ensure_max) if ensure_max is not None else False
         )
 
-        # audiotools accepts CUDA tensors, and codec encode immediately runs on the same device.
+        # 後続の音量処理と codec encode に合わせて、対象デバイス上の float32 へ変換する
         waveform = waveform.to(self.device, dtype=torch.float32)
         if effective_normalize_db is not None or effective_ensure_max:
             # Keep behavior deterministic per utterance by normalizing each waveform independently.

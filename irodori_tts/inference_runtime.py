@@ -2035,6 +2035,8 @@ class InferenceRuntime:
                     messages=messages,
                 )
             if speaker_state_override is None:
+                ref_latent = None
+                ref_mask = None
                 # 起動時または過去の要求で作成済みなら speaker_state を直接再利用する
                 (
                     cached_speaker_state,
@@ -2073,13 +2075,9 @@ class InferenceRuntime:
                     speaker_mask_override = cached_speaker_mask
                     ref_latent, ref_mask = None, None
                 else:
-                    ref_latent, ref_mask = self._load_reference_latent(
-                        req=req,
-                        resolved_condition_tokens=resolved_condition_tokens,
-                        lora_adapter=lora_adapter,
-                        batch_size=num_candidates,
-                        messages=messages,
-                    )
+                    # 直前のキャッシュ生成に使った参照 latent をそのまま推論へ渡す
+                    if ref_latent is None or ref_mask is None:
+                        raise RuntimeError("Reference latent is missing after cache construction.")
             else:
                 ref_latent, ref_mask = None, None
             stage_sec = _measure_end(self.model_device, t0, self.codec_device)
@@ -2160,29 +2158,30 @@ class InferenceRuntime:
                     max_text_len=text_max_len,
                     has_speaker=has_speaker_duration,
                 ).to(self.model_device)
-                encoded_conditions = (
-                    duration_text_state,
-                    duration_text_mask,
-                    duration_speaker_state,
-                    _duration_speaker_mask,
-                    _duration_caption_state,
-                    _duration_caption_mask,
-                ) = self.model.encode_conditions(
+                encoded_conditions = self.model.encode_conditions(
                     text_input_ids=text_ids,
                     text_mask=text_mask,
                     ref_latent=ref_latent,
                     ref_mask=ref_mask,
                     caption_input_ids=caption_ids,
                     caption_mask=caption_mask,
+                    condition_token_ids=condition_token_ids,
+                    condition_token_mask=condition_token_mask,
+                    condition_token_scales=condition_token_scales,
                     speaker_state_override=speaker_state_override,
                     speaker_mask_override=speaker_mask_override,
                     caption_state_override=caption_state_override,
                     caption_mask_override=caption_mask_override,
                     speaker_uncond_mode=req.speaker_uncond_mode,
-                    condition_token_ids=condition_token_ids,
-                    condition_token_mask=condition_token_mask,
-                    condition_token_scales=condition_token_scales,
                 )
+                (
+                    duration_text_state,
+                    duration_text_mask,
+                    duration_speaker_state,
+                    _duration_speaker_mask,
+                    _duration_caption_state,
+                    _duration_caption_mask,
+                ) = encoded_conditions
                 if condition_token_ids is not None and cfg_scale_condition > 0.0:
                     encoded_conditions_without_condition_tokens = self.model.encode_conditions(
                         text_input_ids=text_ids,
@@ -2615,6 +2614,6 @@ def save_wav(path: str | Path, audio: torch.Tensor, sample_rate: int) -> Path:
     audio_cpu = audio.detach().to(device="cpu", dtype=torch.float32)
     audio_np = audio_cpu.squeeze(0).numpy() if audio_cpu.shape[0] == 1 else audio_cpu.T.numpy()
     # Torchaudio の既定と揃え、FLAC は PCM24、WAV は libsndfile 既定の PCM16 で保存する
-    output_subtype = "PCM_24" if out_path.suffix.lower() == ".flac" else None
+    output_subtype = "PCM_24" if out_path.suffix.lower() == ".flac" else "PCM_16"
     sf.write(str(out_path), audio_np, sample_rate, subtype=output_subtype)
     return out_path

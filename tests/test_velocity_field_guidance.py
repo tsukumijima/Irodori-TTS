@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import unittest
-from dataclasses import fields
+from dataclasses import fields, replace
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -33,7 +33,7 @@ class FakeVelocityModel:
         caption_mask = cast(torch.Tensor, kwargs["caption_mask_override"])
         text_state = torch.zeros((1, 1, 1), dtype=self.dtype)
         text_mask = torch.ones((1, 1), dtype=torch.bool)
-        return text_state, text_mask, None, None, caption_state, caption_mask
+        return EncodedConditions(text_state, text_mask, None, None, caption_state, caption_mask)
 
     def forward_with_encoded_conditions(self, **kwargs: Any) -> torch.Tensor:
         """キャプション状態の平均を速度として返し、追加 forward の発火も記録する。"""
@@ -131,6 +131,30 @@ class VelocityFieldGuidanceTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "all four state/mask values"):
             self._sample(partial)
+
+    def test_both_condition_pairs_are_rejected(self) -> None:
+        state = torch.ones((1, 2, 1), dtype=torch.float32)
+        mask = torch.ones((1, 2), dtype=torch.bool)
+        guidance = replace(
+            self._caption_guidance(),
+            target_speaker_state=state,
+            target_speaker_mask=mask,
+            opposite_speaker_state=state.clone(),
+            opposite_speaker_mask=mask.clone(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "exactly one complete"):
+            self._sample(guidance)
+
+    def test_missing_condition_pairs_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "exactly one complete"):
+            self._sample(VelocityFieldGuidance(alpha=1.0))
+
+    def test_invalid_time_ranges_are_rejected(self) -> None:
+        for min_t, max_t in ((-0.1, 0.5), (0.5, 1.1), (0.8, 0.2)):
+            with self.subTest(min_t=min_t, max_t=max_t):
+                with self.assertRaisesRegex(ValueError, "0 <= min_t <= max_t <= 1"):
+                    self._sample(self._caption_guidance(min_t=min_t, max_t=max_t))
 
     def test_non_finite_alpha_is_rejected(self) -> None:
         for alpha in (math.nan, math.inf, -math.inf):
