@@ -85,7 +85,7 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
         manifest_path: str | Path,
         latent_dim: int,
         max_latent_steps: int | None = None,
-        subset_indices: list[int] | None = None,
+        subset_indices: list[int] | torch.Tensor | None = None,
         enable_caption_condition: bool = False,
         enable_speaker_condition: bool = True,
         caption_key: str = "caption",
@@ -102,7 +102,6 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
         self.enable_caption_condition = bool(enable_caption_condition)
         self.enable_speaker_condition = bool(enable_speaker_condition)
         self.caption_key = str(caption_key)
-        self.sample_weight_key = "sample_weight"
         if ref_min_frames is not None and ref_max_frames is not None:
             if int(ref_min_frames) <= 0 or int(ref_max_frames) <= 0:
                 raise ValueError(
@@ -362,28 +361,7 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
             "num_frames": num_frames,
             "ref_latent": ref_latent,
             "has_speaker": has_speaker,
-            "sample_weight": float(item.get(self.sample_weight_key, 1.0)),
-            "split": item.get("split"),
         }
-
-    def sample_weights(self, *, key: str = "sample_weight") -> list[float]:
-        """
-        WeightedRandomSampler 用の重みを manifest から読み出す。
-
-        Args:
-            key (str): manifest の重み列名
-
-        Returns:
-            list[float]: dataset のローカル順に並べたサンプル重み
-        """
-
-        # sampler と collator が同じ manifest 列を参照できるよう、選択した列名を保持する
-        self.sample_weight_key = str(key)
-        weights: list[float] = []
-        for local_index in range(len(self.sample_indices)):
-            item = self._read_item(local_index)
-            weights.append(float(item.get(key, 1.0)))
-        return weights
 
 
 @dataclass(frozen=True)
@@ -500,8 +478,6 @@ class _ManifestIndex:
         if cached is not None:
             if show_progress:
                 print(f"Loaded manifest index cache: {cls._cache_path(manifest_path, caption_key)}")
-            if cached.cache_version != _MANIFEST_INDEX_CACHE_VERSION:
-                cached._save_cache(manifest_path)
             return cached
 
         offsets: list[int] = []

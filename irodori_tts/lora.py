@@ -143,11 +143,13 @@ def _require_peft():
     return LoraConfig, PeftModel, get_peft_model
 
 
-def _lookup_config_value(raw: TrainConfig | Mapping[str, Any] | None, field: str) -> Any:
+def _lookup_config_value(raw: object | None, field: str) -> Any:
     if raw is None:
         return getattr(TrainConfig(), field)
     if isinstance(raw, TrainConfig):
         return getattr(raw, field)
+    if not isinstance(raw, Mapping):
+        raise TypeError(f"LoRA config must be TrainConfig or Mapping, got {type(raw).__name__}.")
     if field in raw:
         return raw[field]
     return getattr(TrainConfig(), field)
@@ -266,16 +268,21 @@ def apply_lora(
     if not train_config_uses_lora(raw):
         return model
 
+    lora_config_kwargs = build_lora_config_kwargs(
+        raw,
+        use_duration_predictor=bool(model.cfg.use_duration_predictor),
+    )
+    validate_lora_modules_to_save(
+        lora_config_kwargs.get("modules_to_save"),
+        model=model,
+    )
     lora_config_cls, _, get_peft_model = _require_peft()
     peft_model = get_peft_model(
         model,
         lora_config_cls(
             task_type=None,
             inference_mode=False,
-            **build_lora_config_kwargs(
-                raw,
-                use_duration_predictor=bool(model.cfg.use_duration_predictor),
-            ),
+            **lora_config_kwargs,
         ),
     )
     return peft_model

@@ -13,6 +13,7 @@ from scipy.signal import lfilter
 
 
 _CODEC_DEFAULT = object()
+DACVAE_LATENT_FRAMES_PER_SECOND = 25
 
 
 def patchify_latent(latent: torch.Tensor, patch_size: int) -> torch.Tensor:

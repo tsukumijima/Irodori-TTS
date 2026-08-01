@@ -547,8 +547,13 @@ def sample_euler_rf_cfg(
         # 追加 forward が通常条件と同じバッチ契約を使えることを、サンプリング開始前に検証
         active_values = caption_values if has_caption_pair else speaker_values
         target_state, target_mask, opposite_state, opposite_mask = active_values
-        assert target_state is not None and target_mask is not None
-        assert opposite_state is not None and opposite_mask is not None
+        if (
+            target_state is None
+            or target_mask is None
+            or opposite_state is None
+            or opposite_mask is None
+        ):
+            raise ValueError("velocity_field_guidance requires one complete condition pair.")
         channel_name = "caption" if has_caption_pair else "speaker"
         for side_name, state, mask in (
             ("target", target_state, target_mask),

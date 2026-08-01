@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 
@@ -152,16 +152,16 @@ def _partition_adamw_params(
     return decay, no_decay, pretrained_decay, pretrained_no_decay
 
 
-def _partition_muon_params(
-    model: torch.nn.Module,
-) -> tuple[
-    list[torch.nn.Parameter],
-    list[torch.nn.Parameter],
-    list[torch.nn.Parameter],
-    list[torch.nn.Parameter],
-    list[torch.nn.Parameter],
-    list[torch.nn.Parameter],
-]:
+class _MuonParameterPartitions(NamedTuple):
+    muon_decay: list[torch.nn.Parameter]
+    muon_no_decay: list[torch.nn.Parameter]
+    auxiliary_decay: list[torch.nn.Parameter]
+    auxiliary_no_decay: list[torch.nn.Parameter]
+    pretrained_decay: list[torch.nn.Parameter]
+    pretrained_no_decay: list[torch.nn.Parameter]
+
+
+def _partition_muon_params(model: torch.nn.Module) -> _MuonParameterPartitions:
     """
     Split parameters into Muon-compatible tensors and aux-Adam tensors,
     each with decay/no-decay partitions.
@@ -199,13 +199,13 @@ def _partition_muon_params(
                 aux_decay.append(p)
             else:
                 aux_no_decay.append(p)
-    return (
-        muon_decay,
-        muon_no_decay,
-        aux_decay,
-        aux_no_decay,
-        pretrained_decay,
-        pretrained_no_decay,
+    return _MuonParameterPartitions(
+        muon_decay=muon_decay,
+        muon_no_decay=muon_no_decay,
+        auxiliary_decay=aux_decay,
+        auxiliary_no_decay=aux_no_decay,
+        pretrained_decay=pretrained_decay,
+        pretrained_no_decay=pretrained_no_decay,
     )
 
 
@@ -280,25 +280,18 @@ def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
                 f"got {adjust_lr_fn!r}"
             )
 
-        (
-            muon_decay,
-            muon_no_decay,
-            aux_decay,
-            aux_no_decay,
-            pretrained_decay,
-            pretrained_no_decay,
-        ) = _partition_muon_params(model)
+        partitions = _partition_muon_params(model)
         muon_param_groups: list[dict[str, Any]] = []
         _append_param_group(
             muon_param_groups,
-            muon_decay,
+            partitions.muon_decay,
             weight_decay=cfg.weight_decay,
             learning_rate=cfg.learning_rate,
             group_name="main_muon_decay",
         )
         _append_param_group(
             muon_param_groups,
-            muon_no_decay,
+            partitions.muon_no_decay,
             weight_decay=0.0,
             learning_rate=cfg.learning_rate,
             group_name="main_muon_no_decay",
@@ -317,28 +310,28 @@ def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
         aux_param_groups: list[dict[str, Any]] = []
         _append_param_group(
             aux_param_groups,
-            aux_decay,
+            partitions.auxiliary_decay,
             weight_decay=cfg.weight_decay,
             learning_rate=cfg.learning_rate,
             group_name="main_aux_decay",
         )
         _append_param_group(
             aux_param_groups,
-            aux_no_decay,
+            partitions.auxiliary_no_decay,
             weight_decay=0.0,
             learning_rate=cfg.learning_rate,
             group_name="main_aux_no_decay",
         )
         _append_param_group(
             aux_param_groups,
-            pretrained_decay,
+            partitions.pretrained_decay,
             weight_decay=cfg.weight_decay,
             learning_rate=cfg.pretrained_text_encoder_learning_rate,
             group_name="pretrained_text_encoder_decay",
         )
         _append_param_group(
             aux_param_groups,
-            pretrained_no_decay,
+            partitions.pretrained_no_decay,
             weight_decay=0.0,
             learning_rate=cfg.pretrained_text_encoder_learning_rate,
             group_name="pretrained_text_encoder_no_decay",

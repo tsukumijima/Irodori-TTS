@@ -178,12 +178,6 @@ class TrainConfig:
     speaker_condition_dropout: float = 0.1
     manifest_metadata_path: str | None = None
     manifest_label_filter: str | None = None
-    split_file_path: str | None = None
-    split_column: str = "split"
-    split_train_values: str = "train"
-    split_valid_values: str = "valid"
-    use_weighted_sampler: bool = False
-    sample_weight_key: str = "sample_weight"
     speaker_inversion_enabled: bool = False
     speaker_inversion_tokens: int = 16
     speaker_inversion_init_std: float = 0.02
@@ -274,12 +268,16 @@ def load_config_yaml(path: str | Path) -> dict[str, Any]:
     return payload
 
 
-def merge_dataclass_overrides(base: T, overrides: dict[str, Any] | None, section: str) -> T:
+def merge_dataclass_overrides(base: T, overrides: object | None, section: str) -> T:
     """
     Merge mapping overrides into a dataclass instance with key validation.
     """
     if overrides is None:
         return base
+    if not isinstance(overrides, dict):
+        raise ValueError(
+            f"Config section '{section}' must be a mapping, got {type(overrides).__name__}."
+        )
 
     allowed = {f.name for f in fields(base)}
     unknown = sorted(set(overrides) - allowed)

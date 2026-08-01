@@ -9,6 +9,7 @@ import random
 import re
 import shutil
 import sys
+import warnings
 from contextlib import nullcontext
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -23,6 +24,7 @@ from torch.utils.data import DistributedSampler, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torchdata.stateful_dataloader.sampler import StatefulDistributedSampler
 
+from irodori_tts.codec import DACVAE_LATENT_FRAMES_PER_SECOND
 from irodori_tts.config import (
     ModelConfig,
     TrainConfig,
@@ -83,9 +85,6 @@ CHECKPOINT_BEST_VAL_LOSS_RE = re.compile(
 )
 DATALOADER_STATE_KEY = "dataloader_state"
 RUNTIME_STATE_KEY = "runtime_state"
-# DACVAE latent frame rate (Hz). Used for seconds<->frames conversion for
-# reference audio concat length ranges.
-_CODEC_FRAMES_PER_SECOND = 25
 SAFETENSORS_CONFIG_META_KEY = "config_json"
 SAFETENSORS_TEXT_ENCODER_CONFIG_META_KEY = "text_encoder_config_json"
 SAFETENSORS_INFERENCE_CONFIG_KEYS = {
@@ -372,10 +371,11 @@ def _select_dataloader_state_for_rank(
     saved_world_size = int(state.get("world_size", len(rank_states)))
     expected_world_size = int(world_size) if distributed else 1
     if saved_world_size != expected_world_size or len(rank_states) != expected_world_size:
-        raise ValueError(
-            "Cannot restore dataloader state with a different world_size: "
+        warnings.warn(
+            "Discarding dataloader state because world_size changed: "
             f"checkpoint={saved_world_size} current={expected_world_size}"
         )
+        return None
     state_rank = int(rank) if distributed else 0
     rank_state = rank_states[state_rank]
     if rank_state is not None and not isinstance(rank_state, dict):
@@ -1742,6 +1742,7 @@ class LengthGroupedSampler(Sampler[int]):
         dataset_size = int(self.lengths.numel())
         if dataset_size <= 0:
             return iter(())
+        lengths = self.lengths.tolist()
         generator = torch.Generator()
         generator.manual_seed(self.seed + self.epoch)
 
@@ -1767,7 +1768,7 @@ class LengthGroupedSampler(Sampler[int]):
 
         for window_start in range(0, len(indices), window_size):
             window = indices[window_start : window_start + window_size]
-            window.sort(key=lambda idx: int(self.lengths[idx]), reverse=True)
+            window.sort(key=lambda idx: lengths[idx], reverse=True)
             batches = [
                 window[i : i + global_batch_size]
                 for i in range(0, len(window), global_batch_size)
@@ -1930,85 +1931,6 @@ def split_train_valid_indices(
             f"num_samples={num_samples} valid_ratio={valid_ratio}"
         )
     return train_indices, valid_indices
-
-
-def load_fixed_split_indices(
-    *,
-    split_file_path: str | Path,
-    split_column: str,
-    train_values: str,
-    valid_values: str,
-) -> tuple[list[int], list[int]]:
-    """
-    manifest とは別ファイルで指定された固定 split から行番号を読み出す。
-
-    Args:
-        split_file_path (str | Path): JSONL または TSV の split ファイル
-        split_column (str): split 名が入っている列名
-        train_values (str): train として使う split 値 (カンマ区切り)
-        valid_values (str): valid として使う split 値 (カンマ区切り)
-
-    Returns:
-        tuple[list[int], list[int]]: train と valid の manifest 行番号
-    """
-
-    split_path = Path(split_file_path)
-    train_value_set = {value.strip() for value in train_values.split(",") if value.strip()}
-    valid_value_set = {value.strip() for value in valid_values.split(",") if value.strip()}
-    if not train_value_set:
-        raise ValueError("split_train_values must contain at least one value.")
-    if not valid_value_set:
-        raise ValueError("split_valid_values must contain at least one value.")
-
-    def _row_index(row: dict[str, str], fallback_index: int) -> int:
-        for key in ("lora_row_id", "manifest_index", "index", "row_index"):
-            if key in row and str(row[key]).strip() != "":
-                return int(row[key])
-        return fallback_index
-
-    rows: list[dict[str, str]] = []
-    if split_path.suffix == ".jsonl":
-        with split_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    payload = json.loads(line)
-                    if not isinstance(payload, dict):
-                        raise ValueError(f"Invalid split JSONL row: {line.rstrip()}")
-                    rows.append({str(key): str(value) for key, value in payload.items()})
-    else:
-        with split_path.open("r", encoding="utf-8") as handle:
-            header_line = handle.readline()
-            if header_line == "":
-                raise ValueError(f"Split file is empty: {split_path}")
-            header = header_line.rstrip("\n").split("\t")
-            for line_number, line in enumerate(handle, start=2):
-                if not line.strip():
-                    continue
-                values = line.rstrip("\n").split("\t")
-                if len(values) != len(header):
-                    raise ValueError(
-                        f"Split TSV column count mismatch in {split_path} at line {line_number}: "
-                        f"expected {len(header)}, got {len(values)}."
-                    )
-                rows.append(dict(zip(header, values, strict=False)))
-
-    train_indices: list[int] = []
-    valid_indices: list[int] = []
-    for fallback_index, row in enumerate(rows):
-        if split_column not in row:
-            raise ValueError(f"Split column {split_column!r} is missing in {split_path}")
-        split_value = str(row[split_column]).strip()
-        row_index = _row_index(row, fallback_index)
-        if split_value in train_value_set:
-            train_indices.append(row_index)
-        elif split_value in valid_value_set:
-            valid_indices.append(row_index)
-    if not train_indices or not valid_indices:
-        raise ValueError(
-            "Fixed split must produce non-empty train and valid indices: "
-            f"train={len(train_indices)} valid={len(valid_indices)}"
-        )
-    return sorted(train_indices), sorted(valid_indices)
 
 
 def run_validation(
@@ -2613,7 +2535,7 @@ def main() -> None:
     unknown_root = sorted(set(exp_cfg) - {"model", "train"})
     if unknown_root:
         raise ValueError(f"Unknown top-level config keys: {unknown_root}")
-    if args.config and is_main_process:
+    if is_main_process:
         print(f"Loaded config: {args.config}")
     model_cfg = merge_dataclass_overrides(ModelConfig(), exp_cfg.get("model"), section="model")
     train_cfg = merge_dataclass_overrides(TrainConfig(), exp_cfg.get("train"), section="train")
@@ -3258,11 +3180,12 @@ def main() -> None:
     ref_max_frames_cfg: int | None = None
     if model_cfg.use_speaker_condition_resolved and train_cfg.ref_max_seconds > 0.0:
         ref_min_frames_cfg = max(
-            1, round(float(train_cfg.ref_min_seconds) * _CODEC_FRAMES_PER_SECOND)
+            1,
+            round(float(train_cfg.ref_min_seconds) * DACVAE_LATENT_FRAMES_PER_SECOND),
         )
         ref_max_frames_cfg = max(
             ref_min_frames_cfg,
-            round(float(train_cfg.ref_max_seconds) * _CODEC_FRAMES_PER_SECOND),
+            round(float(train_cfg.ref_max_seconds) * DACVAE_LATENT_FRAMES_PER_SECOND),
         )
         if is_main_process:
             print(
@@ -3270,7 +3193,7 @@ def main() -> None:
                 f"ref_min_seconds={train_cfg.ref_min_seconds} "
                 f"ref_max_seconds={train_cfg.ref_max_seconds} "
                 f"(frames {ref_min_frames_cfg}..{ref_max_frames_cfg} at "
-                f"{_CODEC_FRAMES_PER_SECOND} Hz)."
+                f"{DACVAE_LATENT_FRAMES_PER_SECOND} Hz)."
             )
     valid_dataset = None
     if train_cfg.valid_ratio > 0.0:
@@ -3624,7 +3547,7 @@ def main() -> None:
     # manifest のハッシュと付随 JSON は不変なので、学習開始時に1回だけ読み込む
     lora_metadata = (
         build_lora_metadata(model_cfg=model_cfg, train_cfg=train_cfg, base_init=base_init)
-        if train_config_uses_lora(train_cfg)
+        if train_config_uses_lora(train_cfg) and is_main_process
         else None
     )
     if train_cfg.speaker_inversion_enabled:
