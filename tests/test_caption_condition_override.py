@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import unittest
 from collections import OrderedDict
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from typing import Any, cast
 import torch
 
 from irodori_tts.inference_runtime import InferenceRuntime, SamplingRequest
+from irodori_tts.model import TextToLatentRFDiT
 
 
 class RecordingCaptionEncoder:
@@ -26,17 +28,51 @@ class RecordingCaptionEncoder:
         return input_ids.unsqueeze(-1).to(dtype=torch.float32) * mask.unsqueeze(-1)
 
 
+class RecordingCaptionModel:
+    """公開キャプション API を実モデルと同じ実装で呼ぶテスト用モデル。"""
+
+    def __init__(self) -> None:
+        self.cfg = SimpleNamespace(use_caption_condition=True)
+        self.caption_encoder: object = object()
+        self.caption_norm: object = object()
+        self.pretrained_text_backbone: object | None = None
+
+    def encode_caption_condition(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        return TextToLatentRFDiT.encode_caption_condition(
+            cast(Any, self),
+            input_ids=input_ids,
+            mask=mask,
+        )
+
+
+class RecordingCaptionTokenizer:
+    """入力文と最大長を記録するテスト用トークナイザー。"""
+
+    def __init__(self) -> None:
+        self.captions: list[str] = []
+        self.max_length: int | None = None
+
+    def batch_encode(
+        self,
+        captions: list[str],
+        *,
+        max_length: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        self.captions = captions
+        self.max_length = max_length
+        return torch.tensor([[3, 4]]), torch.tensor([[True, True]])
+
+
 class CaptionConditionOverrideTest(unittest.TestCase):
     def _runtime(self) -> InferenceRuntime:
         runtime = InferenceRuntime.__new__(InferenceRuntime)
         runtime.model_cfg = cast(Any, SimpleNamespace(use_caption_condition=True))
-        runtime.model = cast(
-            Any,
-            SimpleNamespace(
-                caption_encoder=object(),
-                caption_norm=object(),
-            ),
-        )
+        runtime.model = cast(Any, RecordingCaptionModel())
         runtime.model_device = torch.device("cpu")
         return runtime
 
@@ -110,11 +146,12 @@ class CaptionConditionOverrideTest(unittest.TestCase):
 
     def test_caption_cache_uses_pretrained_backbone(self) -> None:
         runtime = self._runtime()
+        model = cast(RecordingCaptionModel, runtime.model)
         encoder = RecordingCaptionEncoder()
         backbone = object()
-        runtime.model.caption_encoder = encoder
-        runtime.model.caption_norm = torch.nn.Identity()
-        runtime.model.pretrained_text_backbone = backbone
+        model.caption_encoder = encoder
+        model.caption_norm = torch.nn.Identity()
+        model.pretrained_text_backbone = backbone
         runtime._model_dtype = torch.float32
         runtime._caption_condition_cache = OrderedDict()
         runtime._caption_condition_cache_max_entries = 4
@@ -141,6 +178,27 @@ class CaptionConditionOverrideTest(unittest.TestCase):
                 ),
                 batch_size=1,
             )
+
+    def test_public_caption_encoding_owns_tokenization_and_model_dispatch(self) -> None:
+        runtime = self._runtime()
+        model = cast(RecordingCaptionModel, runtime.model)
+        encoder = RecordingCaptionEncoder()
+        tokenizer = RecordingCaptionTokenizer()
+        backbone = object()
+        model.caption_encoder = encoder
+        model.caption_norm = torch.nn.Identity()
+        model.pretrained_text_backbone = backbone
+        runtime.caption_tokenizer = cast(Any, tokenizer)
+        runtime.default_caption_max_len = 16
+        runtime._infer_lock = threading.Lock()
+
+        condition = runtime.encode_caption_condition(" 落ち着いた声 ", max_length=8)
+
+        self.assertEqual(tokenizer.captions, ["落ち着いた声"])
+        self.assertEqual(tokenizer.max_length, 8)
+        self.assertIs(encoder.backbone, backbone)
+        self.assertEqual(tuple(condition.state.shape), (1, 2, 1))
+        torch.testing.assert_close(condition.mask, torch.tensor([[True, True]]))
 
 
 if __name__ == "__main__":

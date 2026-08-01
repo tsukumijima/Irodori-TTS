@@ -287,6 +287,19 @@ class SpeakerCondition:
 
 
 @dataclass
+class CaptionCondition:
+    """Caption condition state and its valid token range.
+
+    Attributes:
+        state: Normalized ``(batch, tokens, dim)`` caption condition state.
+        mask: ``(batch, tokens)`` mask selecting valid caption tokens.
+    """
+
+    state: torch.Tensor
+    mask: torch.Tensor
+
+
+@dataclass
 class SamplingRequest:
     text: str
     caption: str | None = None
@@ -415,12 +428,6 @@ class _CaptionCacheKey:
     model_device: str
     model_dtype: str
     lora_adapter: str | None
-
-
-@dataclass(frozen=True)
-class _CaptionCondition:
-    state: torch.Tensor
-    mask: torch.Tensor
 
 
 def _maybe_compile_inference_model(
@@ -870,7 +877,7 @@ class InferenceRuntime:
             OrderedDict()
         )
         self._speaker_condition_cache_max_entries = 32
-        self._caption_condition_cache: OrderedDict[_CaptionCacheKey, _CaptionCondition] = (
+        self._caption_condition_cache: OrderedDict[_CaptionCacheKey, CaptionCondition] = (
             OrderedDict()
         )
         self._caption_condition_cache_max_entries = 64
@@ -1378,6 +1385,50 @@ class InferenceRuntime:
                 log_fn(message)
         return SpeakerCondition(state=state.detach(), mask=mask.detach())
 
+    def encode_caption_condition(
+        self,
+        caption: str,
+        *,
+        max_length: int | None = None,
+    ) -> CaptionCondition:
+        """Encode caption text with the checkpoint's tokenizer and condition encoder.
+
+        Args:
+            caption: Caption text to encode.
+            max_length: Optional tokenizer length limit. The runtime default is used when omitted.
+
+        Returns:
+            Caption condition state and valid token mask for a single item.
+
+        Raises:
+            RuntimeError: If the checkpoint does not support caption conditioning.
+        """
+        if self.model_cfg.use_caption_condition is False:
+            raise RuntimeError("Caption conditioning is disabled for this checkpoint.")
+        if self.caption_tokenizer is None:
+            raise RuntimeError(
+                "Caption conditioning is enabled but caption tokenizer is not loaded."
+            )
+
+        caption_text = str(caption).strip()
+        caption_max_length = self.default_caption_max_len if max_length is None else int(max_length)
+        # Tokenization and model execution share the runtime lock with synthesis
+        # so callers can safely use this API alongside ordinary requests.
+        with self._infer_lock, torch.inference_mode():
+            caption_ids, caption_mask = self.caption_tokenizer.batch_encode(
+                [caption_text],
+                max_length=caption_max_length,
+            )
+            if caption_text == "":
+                caption_mask.zero_()
+            caption_ids = caption_ids.to(self.model_device)
+            caption_mask = caption_mask.to(self.model_device)
+            caption_state = self.model.encode_caption_condition(
+                input_ids=caption_ids,
+                mask=caption_mask,
+            )
+        return CaptionCondition(state=caption_state.detach(), mask=caption_mask.detach())
+
     @staticmethod
     def _expand_speaker_condition(
         condition: _SpeakerCondition,
@@ -1480,7 +1531,7 @@ class InferenceRuntime:
     def _put_cached_caption_condition(
         self,
         key: _CaptionCacheKey,
-        condition: _CaptionCondition,
+        condition: CaptionCondition,
     ) -> None:
         """
         キャプション条件を LRU キャッシュへ保存する。
@@ -1494,7 +1545,7 @@ class InferenceRuntime:
 
     @staticmethod
     def _expand_caption_condition(
-        condition: _CaptionCondition,
+        condition: CaptionCondition,
         *,
         batch_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1568,7 +1619,7 @@ class InferenceRuntime:
                     f"mask: {int(caption_mask_override.shape[1])}."
                 )
             messages.append("info: using request caption conditioning override.")
-            condition = _CaptionCondition(
+            condition = CaptionCondition(
                 state=caption_state_override.detach().to(self.model_device),
                 mask=caption_mask_override.detach().to(self.model_device),
             )
@@ -1591,16 +1642,11 @@ class InferenceRuntime:
         # キャプションはリクエスト内の全チャンクで同一なので、1件分だけエンコードして保存する
         ## 候補数ぶんまとめてエンコードすると、キャッシュにも同じテンソルが重複して残ってしまう
         with torch.inference_mode():
-            if self.model.pretrained_text_backbone is None:
-                caption_state = self.model.caption_encoder(caption_ids[:1], caption_mask[:1])
-            else:
-                caption_state = self.model.caption_encoder(
-                    self.model.pretrained_text_backbone,
-                    caption_ids[:1],
-                    caption_mask[:1],
-                )
-            caption_state = self.model.caption_norm(caption_state)
-        condition = _CaptionCondition(
+            caption_state = self.model.encode_caption_condition(
+                input_ids=caption_ids[:1],
+                mask=caption_mask[:1],
+            )
+        condition = CaptionCondition(
             state=caption_state.detach(),
             mask=caption_mask[:1].detach(),
         )

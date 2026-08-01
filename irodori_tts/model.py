@@ -1840,20 +1840,12 @@ class TextToLatentRFDiT(nn.Module):
             )
         caption_state = None
         if self.cfg.use_caption_condition:
-            if caption_encoder is None or caption_norm is None:
-                raise RuntimeError(
-                    "Caption conditioning is enabled but caption modules are missing."
-                )
             if caption_state_override is None:
-                if self.pretrained_text_backbone is None:
-                    caption_state = caption_encoder(caption_input_ids, caption_mask)
-                else:
-                    caption_state = caption_encoder(
-                        self.pretrained_text_backbone,
-                        caption_input_ids,
-                        caption_mask,
-                    )
-                caption_state = caption_norm(caption_state)
+                assert caption_input_ids is not None and caption_mask is not None
+                caption_state = self.encode_caption_condition(
+                    input_ids=caption_input_ids,
+                    mask=caption_mask,
+                )
             else:
                 caption_state = caption_state_override.to(
                     device=text_state.device, dtype=text_state.dtype
@@ -1866,6 +1858,40 @@ class TextToLatentRFDiT(nn.Module):
             caption_state=caption_state,
             caption_mask=caption_mask,
         )
+
+    def encode_caption_condition(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Encode tokenized caption text into the model's condition space.
+
+        Args:
+            input_ids: Token IDs produced by the checkpoint's caption tokenizer.
+            mask: Boolean mask selecting valid caption tokens.
+
+        Returns:
+            Normalized caption condition state.
+
+        Raises:
+            RuntimeError: If caption conditioning or its modules are unavailable.
+        """
+        if not self.cfg.use_caption_condition:
+            raise RuntimeError("Caption conditioning is disabled.")
+        caption_encoder = self.caption_encoder
+        caption_norm = self.caption_norm
+        if caption_encoder is None or caption_norm is None:
+            raise RuntimeError("Caption conditioning is enabled but caption modules are missing.")
+
+        # The encoder signature differs between scratch and pretrained backbones.
+        # Keep that checkpoint-specific dispatch inside the model API so callers
+        # do not need to inspect model internals.
+        if self.pretrained_text_backbone is None:
+            caption_state = caption_encoder(input_ids, mask)
+        else:
+            caption_state = caption_encoder(self.pretrained_text_backbone, input_ids, mask)
+        return caption_norm(caption_state)
 
     def encode_speaker_condition(
         self,
