@@ -8,7 +8,6 @@ from itertools import pairwise
 import torch
 
 from .model import EncodedConditions, TextToLatentRFDiT
-from .packed_attention import PackedAttentionPlan, build_packed_attention_plan
 from .speaker_inversion import SPEAKER_INVERSION_UNCOND_MODES
 from .waveex import WaveExBuffer, WaveExConfig
 
@@ -256,7 +255,6 @@ def sample_euler_rf_cfg(
     rescale_k: float | None = None,
     rescale_sigma: float | None = None,
     use_context_kv_cache: bool = True,
-    use_cudnn_packed_attention: bool = False,
     speaker_kv_scale: float | None = None,
     speaker_kv_max_layers: int | None = None,
     speaker_kv_min_t: float | None = None,
@@ -798,51 +796,6 @@ def sample_euler_rf_cfg(
             caption_mask_val=caption_mask_cond,
         )
 
-    attention_plan_cond: PackedAttentionPlan | None = None
-    attention_plan_cfg: PackedAttentionPlan | None = None
-    attention_plan_joint_uncond: PackedAttentionPlan | None = None
-    attention_plan_alternating: dict[str, PackedAttentionPlan | None] = {}
-    if use_cudnn_packed_attention:
-        # 潜在マスク未指定時も明示的な全有効マスクに直し、RF 反復前に添字を確定する
-        effective_latent_mask = (
-            latent_mask
-            if latent_mask is not None
-            else torch.ones(
-                (batch_size, sequence_length),
-                dtype=torch.bool,
-                device=device,
-            )
-        )
-        attention_plan_cond = build_packed_attention_plan(
-            latent_mask=effective_latent_mask,
-            text_mask=text_mask_cond,
-            speaker_mask=speaker_mask_cond,
-            caption_mask=caption_mask_cond,
-        )
-        if use_independent_cfg and cfg_batch_mult > 1:
-            attention_plan_cfg = build_packed_attention_plan(
-                latent_mask=effective_latent_mask.repeat(cfg_batch_mult, 1),
-                text_mask=independent_text_mask,
-                speaker_mask=independent_speaker_mask,
-                caption_mask=independent_caption_mask,
-            )
-        elif use_joint_cfg and enabled_cfg_names:
-            attention_plan_joint_uncond = build_packed_attention_plan(
-                latent_mask=effective_latent_mask,
-                text_mask=joint_uncond_bundle[1],
-                speaker_mask=joint_uncond_bundle[3],
-                caption_mask=joint_uncond_bundle[5],
-            )
-        elif use_alternating_cfg:
-            for name in enabled_cfg_names:
-                bundle = alternating_bundles[name]
-                attention_plan_alternating[name] = build_packed_attention_plan(
-                    latent_mask=effective_latent_mask,
-                    text_mask=bundle[1],
-                    speaker_mask=bundle[3],
-                    caption_mask=bundle[5],
-                )
-
     # Force-speaker scaling operates on projected speaker K/V, so it requires context KV caches.
     effective_use_context_kv_cache = bool(use_context_kv_cache or (speaker_kv_scale is not None))
 
@@ -972,7 +925,6 @@ def sample_euler_rf_cfg(
                     caption_mask=independent_caption_mask,
                     context_kv_cache=context_kv_cfg,
                     latent_mask=independent_latent_mask,
-                    packed_attention_plan=attention_plan_cfg,
                 )
                 chunks = v_out.chunk(cfg_batch_mult, dim=0)
                 v = chunks[0]
@@ -990,7 +942,6 @@ def sample_euler_rf_cfg(
                     caption_mask=caption_mask_cond,
                     context_kv_cache=context_kv_cond,
                     latent_mask=latent_mask,
-                    packed_attention_plan=attention_plan_cond,
                 )
                 if use_joint_cfg:
                     if len(enabled_cfg_names) > 1:
@@ -1012,7 +963,6 @@ def sample_euler_rf_cfg(
                         caption_mask=joint_uncond_bundle[5],
                         context_kv_cache=context_kv_joint_uncond,
                         latent_mask=latent_mask,
-                        packed_attention_plan=attention_plan_joint_uncond,
                     )
                     v = v_cond + joint_scale * (v_cond - v_uncond_joint)
                 elif use_alternating_cfg:
@@ -1029,7 +979,6 @@ def sample_euler_rf_cfg(
                         caption_mask=alt_bundle[5],
                         context_kv_cache=context_kv_alternating.get(alt_name),
                         latent_mask=latent_mask,
-                        packed_attention_plan=attention_plan_alternating.get(alt_name),
                     )
                     v = v_cond + cfg_scales[alt_name] * (v_cond - v_uncond_alt)
                 else:
@@ -1046,7 +995,6 @@ def sample_euler_rf_cfg(
                 caption_mask=caption_mask_cond,
                 context_kv_cache=context_kv_cond,
                 latent_mask=latent_mask,
-                packed_attention_plan=attention_plan_cond,
             )
 
         # 通常の CFG 速度へ、同一潜在上で測った条件対の速度差を直接加算

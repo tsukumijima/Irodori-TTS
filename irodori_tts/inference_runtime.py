@@ -312,7 +312,6 @@ class SamplingRequest:
     rescale_k: float | None = None
     rescale_sigma: float | None = None
     context_kv_cache: bool = True
-    cudnn_packed_attention: bool = False
     speaker_kv_scale: float | None = None
     speaker_kv_min_t: float | None = None
     speaker_kv_max_layers: int | None = None
@@ -2376,7 +2375,6 @@ class InferenceRuntime:
                     rescale_k=rescale_k,
                     rescale_sigma=rescale_sigma,
                     use_context_kv_cache=bool(req.context_kv_cache),
-                    use_cudnn_packed_attention=bool(req.cudnn_packed_attention),
                     speaker_kv_scale=speaker_kv_scale,
                     speaker_kv_max_layers=speaker_kv_max_layers,
                     speaker_kv_min_t=speaker_kv_min_t,

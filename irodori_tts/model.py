@@ -10,7 +10,6 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as _torch_checkpoint
 
 from .config import ModelConfig
-from .packed_attention import PackedAttentionPlan, packed_cudnn_attention
 from .speaker_inversion import SPEAKER_INVERSION_UNCOND_MODES, SpeakerInversionEmbedding
 
 
@@ -344,7 +343,6 @@ class JointAttention(nn.Module):
         freqs_cis: torch.Tensor,
         self_mask: torch.Tensor | None = None,
         context_kv: tuple[torch.Tensor, ...] | None = None,
-        packed_attention_plan: PackedAttentionPlan | None = None,
     ) -> torch.Tensor:
         bsz, seq_len, _ = x.shape
         q = self.wq(x).reshape(bsz, seq_len, self.heads, self.head_dim)
@@ -430,22 +428,13 @@ class JointAttention(nn.Module):
         q_heads = q.transpose(1, 2)
         k_heads = k.transpose(1, 2)
         v_heads = v.transpose(1, 2)
-        if packed_attention_plan is not None:
-            # RF 外で作った添字を全層で共有し、層内では K/V の詰め替えだけを行う
-            y = packed_cudnn_attention(
-                q_heads,
-                k_heads,
-                v_heads,
-                packed_attention_plan,
-            ).transpose(1, 2)
-        else:
-            y = F.scaled_dot_product_attention(
-                q_heads,
-                k_heads,
-                v_heads,
-                attn_mask=attn_mask,
-                is_causal=False,
-            ).transpose(1, 2)
+        y = F.scaled_dot_product_attention(
+            q_heads,
+            k_heads,
+            v_heads,
+            attn_mask=attn_mask,
+            is_causal=False,
+        ).transpose(1, 2)
         y = y.reshape(bsz, seq_len, self.dim)
         y = y * torch.sigmoid(self.gate(x))
         return self.wo(y)
@@ -790,7 +779,6 @@ class DiffusionBlock(nn.Module):
         freqs_cis: torch.Tensor,
         self_mask: torch.Tensor | None = None,
         context_kv: tuple[torch.Tensor, ...] | None = None,
-        packed_attention_plan: PackedAttentionPlan | None = None,
     ) -> torch.Tensor:
         h, attention_gate = self.attention_adaln(x, cond_embed)
         x = x + self.dropout(
@@ -806,7 +794,6 @@ class DiffusionBlock(nn.Module):
                 freqs_cis=freqs_cis,
                 self_mask=self_mask,
                 context_kv=context_kv,
-                packed_attention_plan=packed_attention_plan,
             )
         )
 
@@ -1803,7 +1790,6 @@ class TextToLatentRFDiT(nn.Module):
         caption_mask: torch.Tensor | None = None,
         latent_mask: torch.Tensor | None = None,
         context_kv_cache: list[tuple[torch.Tensor, ...]] | None = None,
-        packed_attention_plan: PackedAttentionPlan | None = None,
     ) -> torch.Tensor:
         t_embed = get_timestep_embedding(t, self.cfg.timestep_embed_dim).to(dtype=x_t.dtype)
         cond_embed = self.cond_module(t_embed)
@@ -1842,7 +1828,6 @@ class TextToLatentRFDiT(nn.Module):
                     freqs_cis=freqs,
                     self_mask=latent_mask,
                     context_kv=context_kv,
-                    packed_attention_plan=packed_attention_plan,
                 )
 
         x = self.out_norm(x)
