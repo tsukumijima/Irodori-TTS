@@ -1643,10 +1643,9 @@ class InferenceRuntime:
                 )
             return None, None
         if req.no_ref:
-            # cuDNN SDPA は系列長1の自己注意を扱えない環境がある
-            ## no_ref は全マスク False のダミー参照を speaker_encoder に通すため、
-            ## 話者条件ありの固定長パディングとは別に、cuDNN が選べる最小長を確保する
-            ref_len = max(4, int(self.model_cfg.speaker_patch_size))
+            # Keep four positions after speaker patching because cuDNN SDPA may reject length one.
+            ## The dummy reference is fully masked, so this physical padding does not add context tokens.
+            ref_len = 4 * int(self.model_cfg.speaker_patch_size)
             ref_latent_patched = torch.zeros(
                 (
                     batch_size,

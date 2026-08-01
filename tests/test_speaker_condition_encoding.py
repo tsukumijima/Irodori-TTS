@@ -49,6 +49,35 @@ class RecordingSpeakerModel:
         )
 
 
+@pytest.mark.parametrize("speaker_patch_size", [1, 4])
+def test_no_ref_dummy_preserves_minimum_length_after_speaker_patching(
+    speaker_patch_size: int,
+) -> None:
+    runtime = cast(Any, InferenceRuntime.__new__(InferenceRuntime))
+    runtime.model = torch.nn.Linear(1, 1)
+    runtime.model_cfg = SimpleNamespace(
+        use_speaker_condition_resolved=True,
+        speaker_patch_size=speaker_patch_size,
+        latent_dim=32,
+        latent_patch_size=1,
+    )
+    runtime.model_device = torch.device("cpu")
+    runtime.default_max_ref_seconds = 120.0
+
+    latent, mask = runtime._load_reference_latent(
+        req=SamplingRequest(text="", no_ref=True),
+        lora_adapter=None,
+        batch_size=2,
+        messages=[],
+    )
+
+    assert latent is not None
+    assert mask is not None
+    assert latent.shape == (2, 4 * speaker_patch_size, 32)
+    assert mask.shape == (2, 4 * speaker_patch_size)
+    assert mask.any().item() is False
+
+
 def test_encode_speaker_condition_returns_server_cache_value() -> None:
     """単一参照の変換 API は speaker_state を返し、大きい参照 latent を残さない。"""
 
