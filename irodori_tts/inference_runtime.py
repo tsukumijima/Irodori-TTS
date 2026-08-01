@@ -33,6 +33,7 @@ from .quantization import (
 from .rf import (
     TrajectoryObserver,
     VelocityFieldGuidance,
+    make_initial_noise,
     sample_euler_rf_cfg,
 )
 from .speaker_inversion import (
@@ -889,6 +890,52 @@ class InferenceRuntime:
                 f"max_encoded_context_tokens must be greater than zero when provided: {max_tokens}"
             )
         self._max_encoded_context_tokens = max_tokens
+
+    @property
+    def sample_rate(self) -> int:
+        """Return the waveform sample rate produced by the codec."""
+        return int(self.codec.sample_rate)
+
+    @property
+    def latent_patches_per_second(self) -> float:
+        """Return the number of patched latent positions generated per second."""
+        hop_length = int(self.codec.model.hop_length)
+        return float(self.sample_rate) / float(hop_length * self.model_cfg.latent_patch_size)
+
+    def latent_patches_for_seconds(self, seconds: float) -> int:
+        """Return the patched latent length required for an audio duration."""
+        if seconds <= 0:
+            raise ValueError(f"seconds must be greater than zero, got {seconds}")
+        return math.ceil(float(seconds) * self.latent_patches_per_second)
+
+    def create_initial_noise(
+        self,
+        *,
+        batch_size: int,
+        sequence_length: int,
+        seed: int,
+        precision: str | None = None,
+    ) -> torch.Tensor:
+        """Create deterministic RF initial noise compatible with this runtime."""
+        noise_dtype = None
+        if precision is not None and str(precision).strip().lower() not in {
+            "",
+            "model",
+            "runtime",
+        }:
+            noise_dtype = resolve_runtime_dtype(
+                precision=str(precision),
+                device=self.model_device,
+            )
+        return make_initial_noise(
+            batch_size=batch_size,
+            sequence_length=sequence_length,
+            latent_dim=self.model_cfg.patched_latent_dim,
+            device=self.model_device,
+            dtype=self._model_dtype,
+            seed=seed,
+            noise_dtype=noise_dtype,
+        )
 
     @classmethod
     def from_key(cls, key: RuntimeKey) -> InferenceRuntime:

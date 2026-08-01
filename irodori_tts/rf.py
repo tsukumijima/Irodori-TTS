@@ -90,6 +90,54 @@ def _make_rng(seed: int, device: torch.device) -> tuple[torch.Generator, torch.d
         return torch.Generator(device="cpu").manual_seed(seed), torch.device("cpu")
 
 
+def make_initial_noise(
+    *,
+    batch_size: int,
+    sequence_length: int,
+    latent_dim: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    seed: int,
+    noise_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Create deterministic RF initial noise on the requested runtime device."""
+    rng, rng_device = _make_rng(seed=seed, device=device)
+    return _make_initial_noise_with_rng(
+        batch_size=batch_size,
+        sequence_length=sequence_length,
+        latent_dim=latent_dim,
+        device=device,
+        dtype=dtype,
+        noise_dtype=noise_dtype,
+        rng=rng,
+        rng_device=rng_device,
+    )
+
+
+def _make_initial_noise_with_rng(
+    *,
+    batch_size: int,
+    sequence_length: int,
+    latent_dim: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    noise_dtype: torch.dtype | None,
+    rng: torch.Generator,
+    rng_device: torch.device,
+) -> torch.Tensor:
+    noise = torch.randn(
+        (batch_size, sequence_length, latent_dim),
+        device=rng_device,
+        dtype=dtype if noise_dtype is None else noise_dtype,
+        generator=rng,
+    )
+    if rng_device != device:
+        noise = noise.to(device=device)
+    if noise.dtype != dtype:
+        noise = noise.to(dtype=dtype)
+    return noise
+
+
 def rf_predict_x0(x_t: torch.Tensor, v_pred: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
     # x_t = x0 + t * v から観測用の完成潜在を復元
     return x_t - t[:, None, None] * v_pred
@@ -246,16 +294,16 @@ def sample_euler_rf_cfg(
 
     rng, rng_device = _make_rng(seed=seed, device=device)
     if initial_noise is None:
-        x_t = torch.randn(
-            (batch_size, sequence_length, latent_dim),
-            device=rng_device,
-            dtype=dtype if noise_dtype is None else noise_dtype,
-            generator=rng,
+        x_t = _make_initial_noise_with_rng(
+            batch_size=batch_size,
+            sequence_length=sequence_length,
+            latent_dim=latent_dim,
+            device=device,
+            dtype=dtype,
+            noise_dtype=noise_dtype,
+            rng=rng,
+            rng_device=rng_device,
         )
-        if rng_device != device:
-            x_t = x_t.to(device=device)
-        if x_t.dtype != dtype:
-            x_t = x_t.to(dtype=dtype)
     else:
         if int(initial_noise_offset) < 0:
             raise ValueError(
