@@ -1,3 +1,7 @@
+[build-system]
+requires = ["uv_build>=0.9.21,<0.12.0"]
+build-backend = "uv_build"
+
 [project]
 name = "irodori-tts"
 version = "0.1.0"
@@ -14,65 +18,52 @@ dependencies = [
     "soundfile>=0.12.0",
     "soxr>=1.0.0",
     "sentencepiece>=0.1.99,<0.2",
-    "torch>=2.9.0,<2.10.0",
+    "torch>=2.12.1,<2.13.0",
     "transformers",
 ]
 
-[project.optional-dependencies]
-cpu = [
-    "torch==2.9.0",
-]
-cu128 = [
-    "torch==2.9.0",
-]
+# 単体利用時の依存関係グループ
+[dependency-groups]
 dev = [
-    "ruff>=0.9.0",
-]
-data = [
     "datasets>=3.0.0",
-    "tqdm>=4.67.3",
-]
-gradio = [
     "gradio>=5.0.0",
-]
-optimization = [
-    "nvidia-cudnn-frontend==1.26.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
-]
-lora = [
+    "nvidia-cudnn-frontend==1.26.0; sys_platform == 'linux' or sys_platform == 'win32'",
     "peft>=0.18.0",
-]
-training = [
-    "peft>=0.18.0",
+    "pytest>=8.4.2",
+    "ruff>=0.14.8,<0.15.0",
+    "silentcipher @ git+https://github.com/SesameAILabs/silentcipher.git@d46d7d0893a583d8968ab3a6626e2289faec9152",
     "tqdm>=4.67.3",
     "wandb>=0.17.0",
 ]
-watermark = [
-    "silentcipher @ git+https://github.com/SesameAILabs/silentcipher.git@d46d7d0893a583d8968ab3a6626e2289faec9152",
-]
 
 [tool.uv]
-conflicts = [
-    [
-        { extra = "cpu" },
-        { extra = "cu128" },
-    ],
+default-groups = ["dev"]
+exclude-newer = "1 week"
+
+[tool.uv.build-backend]
+# ルートに irodori_tts パッケージがあるため module-root を空にする
+module-root = ""
+source-include = [
+    "configs/**",
+    "tests/**",
+    "LICENSE",
+    "README.md",
+]
+source-exclude = [
+    ".git",
+    ".gitignore",
 ]
 
 [tool.uv.sources]
-torch = [
-    { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
-    { index = "pytorch-cu128", extra = "cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
-]
 dacvae = { git = "https://github.com/tsukumijima/dacvae", rev = "d165f907b9cf91d9e05a744f2a5adceaa815b039" }
+# Windows x64・Linux x64: CUDA 13.0 版 / macOS・その他: PyPI から CPU 版
+torch = [
+    { index = "pytorch-cu130", marker = "(sys_platform == 'linux' and platform_machine == 'x86_64') or sys_platform == 'win32'" },
+]
 
 [[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.ruff]
@@ -106,6 +97,3 @@ quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
-
-[tool.setuptools]
-packages = ["irodori_tts"]

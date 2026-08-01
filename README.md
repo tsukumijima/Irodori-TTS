@@ -1,5 +1,11 @@
 # Irodori-TTS
 
+> [!NOTE]
+> このフォークでは README の内容を更新しておらず、以下の記述が現行の `pyproject.toml` や実装と一致していることは保証されません。  
+> 依存関係の正本は `pyproject.toml` や `uv.lock` を参照してください。
+
+---
+
 [![Model](https://img.shields.io/badge/Model-HuggingFace-yellow)](https://huggingface.co/Aratako/Irodori-TTS-500M-v3)
 [![VoiceDesign](https://img.shields.io/badge/VoiceDesign-HuggingFace-orange)](https://huggingface.co/Aratako/Irodori-TTS-600M-v3-VoiceDesign)
 [![Demo](https://img.shields.io/badge/Demo-HuggingFace%20Space-blue)](https://huggingface.co/spaces/Aratako/Irodori-TTS-500M-v3-Demo)
