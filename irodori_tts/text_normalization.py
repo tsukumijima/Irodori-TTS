@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import unicodedata
 
+
 SIMPLE_REPLACE_MAP: dict[str, str] = {
     "\t": "",
     "[n]": "",

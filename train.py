@@ -62,6 +62,7 @@ from irodori_tts.speaker_inversion import (
 )
 from irodori_tts.tokenizer import PretrainedTextTokenizer
 
+
 WANDB_MODES = {"online", "offline", "disabled"}
 TRAIN_MODES = {"rf", "duration_only"}
 CHECKPOINT_STEP_RE = re.compile(

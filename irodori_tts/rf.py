@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import pairwise
 
 import torch
 
@@ -379,14 +380,7 @@ def sample_euler_rf_cfg(
     # GPU 上の時刻 Tensor は ODE 演算へ残し、分岐用の値だけを要求ごとに1回まとめて CPU へ移す
     ## 反復中の CUDA スカラー読み出しは各ステップで CPU と GPU を同期させるため避ける
     t_schedule_values = tuple(float(value) for value in t_schedule.detach().cpu())
-    if not all(
-        current_t > next_t
-        for current_t, next_t in zip(
-            t_schedule_values[:-1],
-            t_schedule_values[1:],
-            strict=True,
-        )
-    ):
+    if not all(current_t > next_t for current_t, next_t in pairwise(t_schedule_values)):
         raise ValueError("t_schedule must be strictly decreasing; adjust num_steps or sway_coeff.")
     trajectory_step_indices: set[int] = set()
     if trajectory_intervention is not None:
@@ -931,8 +925,11 @@ def sample_euler_rf_cfg(
             and len(waveex_buffer) >= waveex_min_history
         )
         if use_taylor_step:
-            x_t = waveex_buffer.predict_next()
-            waveex_buffer.push(x_t)
+            buffer = waveex_buffer
+            if buffer is None:
+                raise RuntimeError("WaveEx buffer is missing during Taylor extrapolation.")
+            x_t = buffer.predict_next()
+            buffer.push(x_t)
             if (
                 speaker_kv_active
                 and speaker_kv_min_t is not None
@@ -1172,6 +1169,7 @@ def sample_euler_rf_cfg(
             speaker_kv_active = False
 
         replacement_noise = None
+        x0_hat: torch.Tensor | None = None
         if trajectory_intervention is not None and i in trajectory_step_indices:
             # CFG と時間方向補正をすべて反映した速度から完成潜在を予測
             x0_hat = rf_predict_x0(x_t=x_t, v_pred=v, t=tt)
@@ -1195,6 +1193,8 @@ def sample_euler_rf_cfg(
         if replacement_noise is None:
             x_t = x_t + v * (t_next - t)
         else:
+            if x0_hat is None:
+                raise RuntimeError("Trajectory replacement noise requires x0_hat.")
             tt_next = t_next.expand(batch_size)
             x_t = rf_interpolate(x0=x0_hat, noise=replacement_noise, t=tt_next)
         if waveex_buffer is not None:

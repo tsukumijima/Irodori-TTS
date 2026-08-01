@@ -15,6 +15,7 @@ from .codec import patchify_latent
 from .duration import build_duration_features
 from .tokenizer import PretrainedTextTokenizer
 
+
 _MANIFEST_INDEX_CACHE_VERSION = 2
 
 
@@ -67,7 +68,7 @@ def _coerce_latent_shape(latent: torch.Tensor, latent_dim: int) -> torch.Tensor:
     )
 
 
-class LatentTextDataset(Dataset):
+class LatentTextDataset(Dataset[dict[str, Any]]):
     """
     Manifest format (JSONL), one sample per line:
       {"text": "...", "latent_path": "path/to/latent.pt", "speaker_id": "..."}

@@ -5,6 +5,7 @@ from collections.abc import Iterable
 
 import torch
 
+
 logger = logging.getLogger(__name__)
 
 IRODORI_WATERMARK_PAYLOAD = (73, 82, 68, 84, 83)  # "IRDTS"

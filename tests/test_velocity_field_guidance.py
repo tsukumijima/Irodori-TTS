@@ -9,6 +9,7 @@ from typing import Any, cast
 import torch
 
 from irodori_tts.inference_runtime import SamplingRequest
+from irodori_tts.model import EncodedConditions
 from irodori_tts.rf import VelocityFieldGuidance, sample_euler_rf_cfg
 
 
@@ -25,7 +26,7 @@ class FakeVelocityModel:
         )
         self.caption_sums: list[float] = []
 
-    def encode_conditions(self, **kwargs: Any) -> tuple[torch.Tensor, ...]:
+    def encode_conditions(self, **kwargs: Any) -> EncodedConditions:
         """テスト入力をサンプラーが使う条件タプルへ変換する。"""
 
         caption_state = cast(torch.Tensor, kwargs["caption_state_override"])
@@ -89,17 +90,24 @@ class VelocityFieldGuidanceTest(unittest.TestCase):
         )
         return result, runtime_model
 
-    def _caption_guidance(self, alpha: float = 1.0, **kwargs: float) -> VelocityFieldGuidance:
+    def _caption_guidance(
+        self,
+        alpha: float = 1.0,
+        *,
+        min_t: float = 0.0,
+        max_t: float = 1.0,
+    ) -> VelocityFieldGuidance:
         target_state = torch.full((1, 2, 1), 3.0, dtype=torch.float32)
         opposite_state = torch.full((1, 2, 1), -1.0, dtype=torch.float32)
         mask = torch.ones((1, 2), dtype=torch.bool)
         return VelocityFieldGuidance(
             alpha=alpha,
+            min_t=min_t,
+            max_t=max_t,
             target_caption_state=target_state,
             target_caption_mask=mask,
             opposite_caption_state=opposite_state,
             opposite_caption_mask=mask.clone(),
-            **kwargs,
         )
 
     def test_none_keeps_output_identical(self) -> None:

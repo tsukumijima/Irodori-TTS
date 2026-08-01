@@ -6,6 +6,7 @@ from collections.abc import Iterable, Sequence
 
 import torch
 
+
 ALLOWED_ANNOTATION_EMOJIS: tuple[str, ...] = (
     "⏩",
     "⏱️",

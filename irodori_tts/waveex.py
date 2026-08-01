@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 import torch
 
+
 # ---------------------------------------------------------------------------
 # Wavelet filter bank (orthogonal). Coefficients taken from PyWavelets.
 # ---------------------------------------------------------------------------
@@ -289,7 +290,7 @@ class WaveExConfig:
         scale = num_steps / paper_total
         scaled = {0}
         for idx in paper_default:
-            mapped = int(round(idx * scale))
+            mapped = round(idx * scale)
             if 0 <= mapped < num_steps:
                 scaled.add(mapped)
         return scaled

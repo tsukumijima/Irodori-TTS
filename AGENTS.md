@@ -20,6 +20,9 @@ AI コーディングエージェント向けに、ブランチ運用とコン�
   - 汎用性が低く自分用途に特化した機能追加
   - 一定の副作用やスタイルの好みがあり upstream へ提案するほどではない改善
   - その他、独自に積極的に改良していきたい変更全般
+- pyproject.toml は自環境向けに大幅にカスタムされており、upstream の構成とは大きく異なる
+  - 依存関係の管理は uv に統一しており、requirements.txt は存在しない
+  - master ブランチに変更を加えた後は、必ず `uv run task lint` / `uv run task format` / `uv run task test` を実行し、コード品質をチェックすること
 
 ## upstream への貢献フロー
 

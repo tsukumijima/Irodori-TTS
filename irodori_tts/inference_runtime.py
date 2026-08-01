@@ -599,7 +599,7 @@ def resolve_cfg_scales(
     return text_val, caption_val, speaker_val, condition_val, messages
 
 
-def _load_torch_checkpoint_payload(path: Path) -> dict:
+def _load_torch_checkpoint_payload(path: Path) -> dict[str, Any]:
     payload = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(payload, dict):
         raise ValueError(f"Unsupported checkpoint payload type: {type(payload)!r}")
@@ -616,7 +616,7 @@ _INFERENCE_CONFIG_KEYS = {
 
 def _load_checkpoint_from_pt(
     path: Path,
-) -> tuple[dict[str, torch.Tensor], dict, dict | None]:
+) -> tuple[dict[str, torch.Tensor], dict[str, Any], dict[str, Any] | None]:
     ckpt = _load_torch_checkpoint_payload(path)
     model_state = ckpt.get("model")
     model_cfg = ckpt.get("model_config")
@@ -642,7 +642,7 @@ def _parse_json_mapping(
     field: str,
     path: Path,
     required: bool = False,
-) -> dict | None:
+) -> dict[str, Any] | None:
     if raw is None:
         if required:
             raise ValueError(f"Missing required metadata field '{field}' in checkpoint: {path}")
@@ -656,7 +656,7 @@ def _parse_json_mapping(
     return payload
 
 
-def _extract_inference_train_config(raw: dict | None) -> dict | None:
+def _extract_inference_train_config(raw: dict[str, Any] | None) -> dict[str, int] | None:
     if raw is None:
         return None
 
@@ -672,7 +672,9 @@ def _extract_inference_train_config(raw: dict | None) -> dict | None:
     return inference_cfg or None
 
 
-def _split_flat_checkpoint_config(path: Path, flat_config: dict) -> tuple[dict, dict | None]:
+def _split_flat_checkpoint_config(
+    path: Path, flat_config: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, int] | None]:
     model_cfg: dict[str, object] = {}
     inference_cfg: dict[str, int] = {}
     for key, value in flat_config.items():
@@ -689,9 +691,9 @@ def _split_flat_checkpoint_config(path: Path, flat_config: dict) -> tuple[dict, 
 
 def _load_checkpoint_from_safetensors(
     path: Path,
-) -> tuple[dict[str, torch.Tensor], dict, dict | None]:
+) -> tuple[dict[str, torch.Tensor], dict[str, Any], dict[str, Any] | None]:
     model_state = load_safetensors_file(str(path), device="cpu")
-    if not isinstance(model_state, dict) or not model_state:
+    if not model_state:
         raise ValueError(f"Safetensors checkpoint has no model weights: {path}")
 
     with safe_open(str(path), framework="pt", device="cpu") as handle:
@@ -709,7 +711,7 @@ def _load_checkpoint_from_safetensors(
 
 def _load_checkpoint_for_inference(
     path: Path,
-) -> tuple[dict[str, torch.Tensor], dict, dict | None]:
+) -> tuple[dict[str, torch.Tensor], dict[str, Any], dict[str, Any] | None]:
     if path.suffix.lower() == ".safetensors":
         return _load_checkpoint_from_safetensors(path)
     return _load_checkpoint_from_pt(path)
@@ -721,7 +723,7 @@ class InferenceRuntime:
         *,
         key: RuntimeKey,
         model_cfg: ModelConfig,
-        train_cfg: dict | None,
+        train_cfg: dict[str, Any] | None,
         model: TextToLatentRFDiT,
         tokenizer: PretrainedTextTokenizer,
         caption_tokenizer: PretrainedTextTokenizer | None,
@@ -2210,7 +2212,7 @@ class InferenceRuntime:
                 scaled_frames = pred_frames * duration_scale
                 min_frames = max(1, math.ceil(min_seconds * self.codec.sample_rate / hop_length))
                 max_frames = max(1, math.floor(max_seconds * self.codec.sample_rate / hop_length))
-                rounded_frames = int(round(scaled_frames))
+                rounded_frames = round(scaled_frames)
                 latent_steps = max(min_frames, min(max_frames, rounded_frames))
                 duration_was_clamped = latent_steps != rounded_frames
                 target_samples = int(latent_steps * hop_length)

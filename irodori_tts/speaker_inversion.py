@@ -7,6 +7,7 @@ import torch.nn as nn
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as save_safetensors_file
 
+
 SPEAKER_INVERSION_UNCOND_MODES = {"mask", "noise"}
 SPEAKER_INVERSION_SAFETENSORS_SUFFIX = ".speaker.safetensors"
 SPEAKER_EMBEDDING_KEY = "speaker_embedding"
@@ -98,18 +99,8 @@ class SpeakerInversionEmbedding(nn.Module):
 
 
 def _extract_embedding_payload(raw: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    if not isinstance(raw, dict):
-        raise ValueError(
-            f"Speaker inversion file must contain a tensor dictionary, got {type(raw)!r}."
-        )
-
     if SPEAKER_EMBEDDING_KEY in raw:
         embedding = raw[SPEAKER_EMBEDDING_KEY]
-        if not isinstance(embedding, torch.Tensor):
-            raise ValueError(
-                f"Speaker inversion '{SPEAKER_EMBEDDING_KEY}' must be a tensor, "
-                f"got {type(embedding)!r}."
-            )
         return {SPEAKER_EMBEDDING_KEY: embedding}
 
     raise ValueError(f"Speaker inversion file is missing '{SPEAKER_EMBEDDING_KEY}'.")

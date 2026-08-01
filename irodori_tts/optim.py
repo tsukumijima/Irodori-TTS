@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import torch
 
@@ -31,13 +32,13 @@ class MuonWithAuxAdamW:
         if self.aux_opt is not None:
             self.aux_opt.step()
 
-    def state_dict(self) -> dict:
+    def state_dict(self) -> dict[str, Any]:
         return {
             "muon": self.muon_opt.state_dict(),
             "aux": None if self.aux_opt is None else self.aux_opt.state_dict(),
         }
 
-    def load_state_dict(self, state_dict: dict) -> None:
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         if "muon" not in state_dict:
             raise ValueError(
                 "MuonWithAuxAdamW state_dict must contain 'muon' key (and optional 'aux' key)."
@@ -66,13 +67,13 @@ class ScalarLRScheduler:
         for base_lr, group in zip(self.base_lrs, self.optimizer.param_groups, strict=False):
             group["lr"] = base_lr * scale
 
-    def state_dict(self) -> dict:
+    def state_dict(self) -> dict[str, Any]:
         return {
             "base_lrs": list(self.base_lrs),
             "last_step": int(self.last_step),
         }
 
-    def load_state_dict(self, state_dict: dict) -> None:
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         if "base_lrs" in state_dict:
             loaded_base_lrs = [float(x) for x in state_dict["base_lrs"]]
             if len(loaded_base_lrs) == len(self.optimizer.param_groups):

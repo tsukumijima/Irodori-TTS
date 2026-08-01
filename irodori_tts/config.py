@@ -230,7 +230,7 @@ class SamplingConfig:
     seed: int = 0
 
 
-def save_json(path: str | Path, payload: dict) -> None:
+def save_json(path: str | Path, payload: dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -268,8 +268,6 @@ def merge_dataclass_overrides(base: T, overrides: dict[str, Any] | None, section
     """
     if overrides is None:
         return base
-    if not isinstance(overrides, dict):
-        raise ValueError(f"Config section '{section}' must be a mapping.")
 
     allowed = {f.name for f in fields(base)}
     unknown = sorted(set(overrides) - allowed)

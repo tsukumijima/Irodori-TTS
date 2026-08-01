@@ -9,6 +9,7 @@ from unittest.mock import patch
 import torch
 
 from irodori_tts.inference_runtime import SamplingRequest
+from irodori_tts.model import EncodedConditions
 from irodori_tts.rf import (
     TrajectoryCheckpoint,
     TrajectoryIntervention,
@@ -28,7 +29,7 @@ class ConstantVelocityModel:
             use_speaker_condition_resolved=False,
         )
 
-    def encode_conditions(self, **_kwargs: Any) -> tuple[torch.Tensor, ...]:
+    def encode_conditions(self, **_kwargs: Any) -> EncodedConditions:
         """条件を使わない最小のサンプラー入力を返す。"""
 
         text_state = torch.zeros((1, 1, 1), dtype=self.dtype)

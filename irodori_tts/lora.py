@@ -9,6 +9,7 @@ import torch
 from .config import TrainConfig
 from .model import TextToLatentRFDiT
 
+
 LORA_TRAIN_CONFIG_FIELDS = (
     "lora_enabled",
     "lora_r",
@@ -120,11 +121,9 @@ def _lookup_config_value(raw: TrainConfig | Mapping[str, Any] | None, field: str
         return getattr(TrainConfig(), field)
     if isinstance(raw, TrainConfig):
         return getattr(raw, field)
-    if isinstance(raw, Mapping):
-        if field in raw:
-            return raw[field]
-        return getattr(TrainConfig(), field)
-    raise TypeError(f"Unsupported LoRA config source: {type(raw)!r}")
+    if field in raw:
+        return raw[field]
+    return getattr(TrainConfig(), field)
 
 
 def train_config_uses_lora(raw: TrainConfig | Mapping[str, Any] | None) -> bool:

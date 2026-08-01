@@ -21,6 +21,7 @@ from irodori_tts.inference_runtime import (
 )
 from irodori_tts.speaker_inversion import is_speaker_inversion_safetensors_path
 
+
 MAX_GRADIO_CANDIDATES = 32
 GRADIO_AUDIO_COLS_PER_ROW = 8
 

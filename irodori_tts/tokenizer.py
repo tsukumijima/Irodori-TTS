@@ -96,7 +96,7 @@ class PretrainedTextTokenizer:
 
     @property
     def vocab_size(self) -> int:
-        return int(len(self.tokenizer))
+        return len(self.tokenizer)
 
     @property
     def bos_token_id(self) -> int | None:

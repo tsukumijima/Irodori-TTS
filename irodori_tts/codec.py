@@ -11,6 +11,7 @@ import torch
 from huggingface_hub import hf_hub_download
 from scipy.signal import lfilter
 
+
 _CODEC_DEFAULT = object()
 
 
@@ -126,7 +127,7 @@ class DACVAECodec:
         decoder = getattr(model, "decoder", None)
         wm_model = getattr(decoder, "wm_model", None)
         msg_processor = getattr(wm_model, "msg_processor", None)
-        if msg_processor is None:
+        if wm_model is None or msg_processor is None:
             return
         nbits = int(msg_processor.nbits)
         message_device = torch.device(device)
@@ -214,8 +215,8 @@ class DACVAECodec:
         )
 
         # 400ms窓を75%重複させ、絶対ゲートと相対ゲートを順に適用する
-        gate_samples = int(round(0.4 * sample_rate))
-        step_samples = int(round(gate_samples * 0.25))
+        gate_samples = round(0.4 * sample_rate)
+        step_samples = round(gate_samples * 0.25)
         block_starts = range(0, waveform.shape[-1] - gate_samples + 1, step_samples)
         energy = np.asarray(
             [

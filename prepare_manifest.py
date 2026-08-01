@@ -350,7 +350,7 @@ def _count_rank_items_contiguous(start: int, end: int, rank: int, world_size: in
     if end <= start:
         return 0
     total = end - start
-    per_rank = int(math.ceil(total / world_size))
+    per_rank = math.ceil(total / world_size)
     shard_start = start + (rank * per_rank)
     shard_end = min(end, shard_start + per_rank)
     return max(0, shard_end - shard_start)
@@ -400,7 +400,7 @@ def _iter_rank_examples(
 
         if shard_strategy == "contiguous":
             total = ds_len - start
-            per_rank = int(math.ceil(total / world_size))
+            per_rank = math.ceil(total / world_size)
             shard_start = start + (rank * per_rank)
             shard_end = min(ds_len, shard_start + per_rank)
             return _iter_map(range(shard_start, shard_end))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -11,6 +12,7 @@ from torch.utils.checkpoint import checkpoint as _torch_checkpoint
 from .config import ModelConfig
 from .packed_attention import PackedAttentionPlan, packed_cudnn_attention
 from .speaker_inversion import SPEAKER_INVERSION_UNCOND_MODES, SpeakerInversionEmbedding
+
 
 DURATION_SPEAKER_FUSIONS = {
     "concat",
@@ -1650,7 +1652,9 @@ class TextToLatentRFDiT(nn.Module):
                 "speaker_state_override was provided but speaker conditioning is disabled."
             )
         if self.cfg.use_caption_condition:
-            if self.caption_encoder is None or self.caption_norm is None:
+            caption_encoder = self.caption_encoder
+            caption_norm = self.caption_norm
+            if caption_encoder is None or caption_norm is None:
                 raise RuntimeError(
                     "Caption conditioning is enabled but caption modules are missing."
                 )
@@ -1663,11 +1667,15 @@ class TextToLatentRFDiT(nn.Module):
                 raise ValueError(
                     "caption_mask_override is required when caption_state_override is provided."
                 )
-            if has_direct_caption:
-                caption_mask = caption_mask_override
+            resolved_caption_mask = caption_mask_override if has_direct_caption else caption_mask
+            if resolved_caption_mask is None:
+                raise ValueError(
+                    "caption_input_ids and caption_mask are required when caption conditioning is enabled."
+                )
             if caption_condition_dropout is not None:
-                caption_mask = caption_mask.clone()
-                caption_mask[caption_condition_dropout] = False
+                resolved_caption_mask = resolved_caption_mask.clone()
+                resolved_caption_mask[caption_condition_dropout] = False
+            caption_mask = resolved_caption_mask
         elif caption_state_override is not None:
             raise ValueError(
                 "caption_state_override was provided but caption conditioning is disabled."
@@ -1694,9 +1702,15 @@ class TextToLatentRFDiT(nn.Module):
             )
         caption_state = None
         if self.cfg.use_caption_condition:
+            caption_encoder = self.caption_encoder
+            caption_norm = self.caption_norm
+            if caption_encoder is None or caption_norm is None:
+                raise RuntimeError(
+                    "Caption conditioning is enabled but caption modules are missing."
+                )
             if caption_state_override is None:
-                caption_state = self.caption_encoder(caption_input_ids, caption_mask)
-                caption_state = self.caption_norm(caption_state)
+                caption_state = caption_encoder(caption_input_ids, caption_mask)
+                caption_state = caption_norm(caption_state)
             else:
                 caption_state = caption_state_override.to(
                     device=text_state.device, dtype=text_state.dtype
@@ -1746,8 +1760,14 @@ class TextToLatentRFDiT(nn.Module):
                     mask=ref_mask,
                     patch_size=self.cfg.speaker_patch_size,
                 )
-                ref_state = self.speaker_encoder(ref_latent, ref_mask)
-                ref_state = self.speaker_norm(ref_state)
+                speaker_encoder = self.speaker_encoder
+                speaker_norm = self.speaker_norm
+                if speaker_encoder is None or speaker_norm is None:
+                    raise RuntimeError(
+                        "Speaker conditioning is enabled but speaker modules are missing."
+                    )
+                ref_state = speaker_encoder(ref_latent, ref_mask)
+                ref_state = speaker_norm(ref_state)
                 ref_state, ref_mask = self._prepend_masked_mean_token(ref_state, ref_mask)
 
         # speaker dropout は reference 由来の mean token と時系列 token だけに掛ける
@@ -2051,5 +2071,5 @@ class TextToLatentRFDiT(nn.Module):
     def dtype(self) -> torch.dtype:
         return next(self.parameters()).dtype
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, Any]:
         return asdict(self.cfg)

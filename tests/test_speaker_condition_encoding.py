@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 import torch
@@ -51,7 +52,7 @@ class RecordingSpeakerModel:
 def test_encode_speaker_condition_returns_server_cache_value() -> None:
     """単一参照の変換 API は speaker_state を返し、大きい参照 latent を残さない。"""
 
-    runtime = InferenceRuntime.__new__(InferenceRuntime)
+    runtime = cast(Any, InferenceRuntime.__new__(InferenceRuntime))
     runtime.model_cfg = SimpleNamespace(use_speaker_condition_resolved=True)
     runtime.model_device = torch.device("cpu")
     runtime._model_dtype = torch.float32
@@ -90,7 +91,7 @@ def test_encode_speaker_condition_rejects_missing_source(
 ) -> None:
     """話者条件を持たない要求はモデルへ入る前に拒否する。"""
 
-    runtime = InferenceRuntime.__new__(InferenceRuntime)
+    runtime = cast(Any, InferenceRuntime.__new__(InferenceRuntime))
     runtime.model_cfg = SimpleNamespace(use_speaker_condition_resolved=True)
 
     with pytest.raises(ValueError):

@@ -22,6 +22,7 @@ from irodori_tts.lora import (
 )
 from irodori_tts.model import TextToLatentRFDiT
 
+
 CONFIG_META_KEY = "config_json"
 INFERENCE_CONFIG_KEYS = ("max_text_len", "max_caption_len", "fixed_target_latent_steps")
 
