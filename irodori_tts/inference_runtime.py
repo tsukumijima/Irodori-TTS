@@ -266,6 +266,20 @@ class RuntimeKey:
 
 
 @dataclass
+class SpeakerCondition:
+    """
+    話者条件の状態と有効トークン範囲を保持する。
+
+    Attributes:
+        state (torch.Tensor): Speaker Encoder が返した `(batch, tokens, dim)` の話者状態
+        mask (torch.Tensor): 話者状態の有効トークンを示す `(batch, tokens)` のマスク
+    """
+
+    state: torch.Tensor
+    mask: torch.Tensor
+
+
+@dataclass
 class SamplingRequest:
     text: str
     caption: str | None = None
@@ -329,6 +343,12 @@ class SamplingRequest:
     velocity_field_guidance: VelocityFieldGuidance | None = None
     trajectory_intervention: TrajectoryIntervention | None = None
     trajectory_observer: TrajectoryObserver | None = None
+    # 事前計算したキャプション条件は必ず状態とマスクを組にして渡す
+    caption_state_override: torch.Tensor | None = None
+    caption_mask_override: torch.Tensor | None = None
+    # チャンク間で話者条件を引き継ぐ場合は参照音声の再エンコードを省く
+    speaker_condition_override: SpeakerCondition | None = None
+    capture_generated_speaker_condition: bool = False
 
 
 @dataclass
@@ -355,6 +375,7 @@ class SamplingResult:
     seed_retry_base_score: float | None = None
     seed_retry_candidate_score: float | None = None
     is_retry_adopted: bool = False
+    speaker_condition: SpeakerCondition | None = None
 
 
 @dataclass(frozen=True)
@@ -1217,6 +1238,85 @@ class InferenceRuntime:
         while len(self._speaker_condition_cache) > self._speaker_condition_cache_max_entries:
             self._speaker_condition_cache.popitem(last=False)
 
+    def encode_speaker_condition(
+        self,
+        request: SamplingRequest,
+        *,
+        log_fn: Callable[[str], None] | None = None,
+    ) -> SpeakerCondition:
+        """
+        1件の参照音声、latent、Speaker Inversion 埋め込みを話者状態へ変換する。
+
+        呼び出し側は返された状態を話者 ID と対応付け、通常合成の `speaker_condition_override` へ渡すことで参照音声の再処理を省ける。
+
+        Args:
+            request (SamplingRequest): 変換対象の話者条件を持つ要求
+            log_fn (Callable[[str], None] | None): 処理メッセージの出力先
+
+        Returns:
+            SpeakerCondition: バッチ数1の話者状態と有効トークンマスク
+
+        Raises:
+            ValueError: 話者条件が指定されていない場合
+            RuntimeError: チェックポイントが話者条件に対応していない場合
+        """
+
+        if request.no_ref is True:
+            raise ValueError("Speaker encoding requires a reference or inversion embedding.")
+        if request.ref_wav is None and request.ref_latent is None and request.ref_embed is None:
+            raise ValueError("Speaker encoding requires ref_wav, ref_latent, or ref_embed.")
+        if self.model_cfg.use_speaker_condition_resolved is False:
+            raise RuntimeError("Speaker conditioning is disabled for this checkpoint.")
+
+        lora_adapter = self._resolve_lora_adapter_path(request.lora_adapter)
+        resolved_condition_tokens = self._resolve_condition_tokens(
+            request,
+            lora_adapter=lora_adapter,
+        )
+        messages: list[str] = []
+        # 通常合成と同じロック内で計算し、CUDA のモデル実行と参照読込を直列化する
+        with self._infer_lock, torch.inference_mode():
+            # Speaker Inversion は保存済み状態をモデルの dtype とデバイスへ展開するだけでよい
+            if request.ref_embed is not None:
+                state, mask = self._load_speaker_embedding_condition(
+                    req=request,
+                    batch_size=1,
+                    messages=messages,
+                )
+                if state is None or mask is None:
+                    raise RuntimeError("Failed to load speaker inversion embedding.")
+            else:
+                ref_latent, ref_mask = self._load_reference_latent(
+                    req=request,
+                    resolved_condition_tokens=resolved_condition_tokens,
+                    lora_adapter=lora_adapter,
+                    batch_size=1,
+                    messages=messages,
+                )
+                if ref_latent is None or ref_mask is None:
+                    raise RuntimeError("Failed to load speaker reference.")
+                state, mask = self.model.encode_speaker_condition(
+                    batch_size=1,
+                    dtype=self._model_dtype,
+                    device=self.model_device,
+                    ref_latent=ref_latent,
+                    ref_mask=ref_mask,
+                    speaker_uncond_mode=request.speaker_uncond_mode,
+                )
+                # 呼び出し側が speaker_state を保持するため、大きい参照 latent はランタイムに残さない
+                cache_key = self._reference_cache_key(
+                    request,
+                    resolved_condition_tokens=resolved_condition_tokens,
+                    lora_adapter=lora_adapter,
+                )
+                if cache_key is not None:
+                    self._reference_condition_cache.pop(cache_key, None)
+
+        if log_fn is not None:
+            for message in messages:
+                log_fn(message)
+        return SpeakerCondition(state=state.detach(), mask=mask.detach())
+
     @staticmethod
     def _expand_speaker_condition(
         condition: _SpeakerCondition,
@@ -1242,8 +1342,6 @@ class InferenceRuntime:
             return None, None
         if req.no_ref or req.ref_embed is not None:
             return None, None
-        if ref_latent is None or ref_mask is None:
-            return None, None
 
         cache_key = self._reference_cache_key(
             req,
@@ -1257,6 +1355,8 @@ class InferenceRuntime:
         )
         if cached_state is not None and cached_mask is not None:
             return cached_state, cached_mask
+        if ref_latent is None or ref_mask is None:
+            return None, None
 
         state, mask = self.model.encode_speaker_condition(
             batch_size=1,
@@ -1268,6 +1368,10 @@ class InferenceRuntime:
         )
         condition = _SpeakerCondition(state=state.detach(), mask=mask.detach())
         self._put_cached_speaker_condition(cache_key, condition)
+        # speaker_state の生成後は大きい参照 latent を保持する必要がない
+        ## 次回以降は話者状態を直接返し、GPU メモリと参照音声の再エンコードを両方省く
+        if cache_key is not None:
+            self._reference_condition_cache.pop(cache_key, None)
         messages.append("info: cached speaker conditioning.")
         return self._expand_speaker_condition(condition, batch_size=batch_size)
 
@@ -1386,6 +1490,37 @@ class InferenceRuntime:
             )
         if self.model.caption_encoder is None or self.model.caption_norm is None:
             raise RuntimeError("Caption conditioning is enabled but caption modules are missing.")
+
+        # 外部で事前計算した条件はキャッシュへ混ぜず、リクエスト内だけで使用する
+        caption_state_override = req.caption_state_override
+        caption_mask_override = req.caption_mask_override
+        if (caption_state_override is None) != (caption_mask_override is None):
+            raise ValueError(
+                "caption_state_override and caption_mask_override must be specified together."
+            )
+        if caption_state_override is not None and caption_mask_override is not None:
+            if caption_state_override.ndim != 3 or int(caption_state_override.shape[0]) != 1:
+                raise ValueError(
+                    "caption_state_override must have shape (1, tokens, dim), "
+                    f"got {tuple(caption_state_override.shape)}."
+                )
+            if caption_mask_override.ndim != 2 or int(caption_mask_override.shape[0]) != 1:
+                raise ValueError(
+                    "caption_mask_override must have shape (1, tokens), "
+                    f"got {tuple(caption_mask_override.shape)}."
+                )
+            if int(caption_state_override.shape[1]) != int(caption_mask_override.shape[1]):
+                raise ValueError(
+                    "caption override token length mismatch: "
+                    f"state: {int(caption_state_override.shape[1])}, "
+                    f"mask: {int(caption_mask_override.shape[1])}."
+                )
+            messages.append("info: using request caption conditioning override.")
+            condition = _CaptionCondition(
+                state=caption_state_override.detach().to(self.model_device),
+                mask=caption_mask_override.detach().to(self.model_device),
+            )
+            return self._expand_caption_condition(condition, batch_size=batch_size)
 
         cache_key = self._caption_cache_key(
             req,
@@ -1841,22 +1976,57 @@ class InferenceRuntime:
 
             t0 = _measure_start(self.model_device, self.codec_device)
             msg_count_before_ref = len(messages)
-            (
-                speaker_state_override,
-                speaker_mask_override,
-            ) = self._load_speaker_embedding_condition(
-                req=req,
-                batch_size=num_candidates,
-                messages=messages,
-            )
-            if speaker_state_override is None:
-                ref_latent, ref_mask = self._load_reference_latent(
+            # チャンク間で渡された話者状態は参照ファイルの読み込みやダミー参照生成より優先する
+            if req.speaker_condition_override is not None:
+                speaker_condition_override = req.speaker_condition_override
+                if speaker_condition_override.state.ndim != 3:
+                    raise ValueError(
+                        "speaker condition state must have shape (batch, tokens, dim), "
+                        f"got {tuple(speaker_condition_override.state.shape)}."
+                    )
+                if speaker_condition_override.mask.ndim != 2:
+                    raise ValueError(
+                        "speaker condition mask must have shape (batch, tokens), "
+                        f"got {tuple(speaker_condition_override.mask.shape)}."
+                    )
+                if (
+                    int(speaker_condition_override.state.shape[0]) != 1
+                    or int(speaker_condition_override.mask.shape[0]) != 1
+                ):
+                    raise ValueError("speaker condition override must contain one source item.")
+                if int(speaker_condition_override.state.shape[1]) != int(
+                    speaker_condition_override.mask.shape[1]
+                ):
+                    raise ValueError(
+                        "speaker condition override token length mismatch: "
+                        f"state: {int(speaker_condition_override.state.shape[1])}, "
+                        f"mask: {int(speaker_condition_override.mask.shape[1])}."
+                    )
+                speaker_state_override, speaker_mask_override = self._expand_speaker_condition(
+                    _SpeakerCondition(
+                        state=speaker_condition_override.state.detach().to(
+                            device=self.model_device,
+                            dtype=self._model_dtype,
+                        ),
+                        mask=speaker_condition_override.mask.detach().to(
+                            device=self.model_device,
+                            dtype=torch.bool,
+                        ),
+                    ),
+                    batch_size=num_candidates,
+                )
+                messages.append("info: using request speaker conditioning override.")
+            else:
+                (
+                    speaker_state_override,
+                    speaker_mask_override,
+                ) = self._load_speaker_embedding_condition(
                     req=req,
-                    resolved_condition_tokens=resolved_condition_tokens,
-                    lora_adapter=lora_adapter,
                     batch_size=num_candidates,
                     messages=messages,
                 )
+            if speaker_state_override is None:
+                # 起動時または過去の要求で作成済みなら speaker_state を直接再利用する
                 (
                     cached_speaker_state,
                     cached_speaker_mask,
@@ -1864,15 +2034,43 @@ class InferenceRuntime:
                     req=req,
                     resolved_condition_tokens=resolved_condition_tokens,
                     lora_adapter=lora_adapter,
-                    ref_latent=ref_latent,
-                    ref_mask=ref_mask,
+                    ref_latent=None,
+                    ref_mask=None,
                     batch_size=num_candidates,
                     messages=messages,
                 )
+                if cached_speaker_state is None or cached_speaker_mask is None:
+                    ref_latent, ref_mask = self._load_reference_latent(
+                        req=req,
+                        resolved_condition_tokens=resolved_condition_tokens,
+                        lora_adapter=lora_adapter,
+                        batch_size=num_candidates,
+                        messages=messages,
+                    )
+                    (
+                        cached_speaker_state,
+                        cached_speaker_mask,
+                    ) = self._load_cached_speaker_condition(
+                        req=req,
+                        resolved_condition_tokens=resolved_condition_tokens,
+                        lora_adapter=lora_adapter,
+                        ref_latent=ref_latent,
+                        ref_mask=ref_mask,
+                        batch_size=num_candidates,
+                        messages=messages,
+                    )
                 if cached_speaker_state is not None and cached_speaker_mask is not None:
                     speaker_state_override = cached_speaker_state
                     speaker_mask_override = cached_speaker_mask
                     ref_latent, ref_mask = None, None
+                else:
+                    ref_latent, ref_mask = self._load_reference_latent(
+                        req=req,
+                        resolved_condition_tokens=resolved_condition_tokens,
+                        lora_adapter=lora_adapter,
+                        batch_size=num_candidates,
+                        messages=messages,
+                    )
             else:
                 ref_latent, ref_mask = None, None
             stage_sec = _measure_end(self.model_device, t0, self.codec_device)
@@ -2219,6 +2417,33 @@ class InferenceRuntime:
                 _log(msg)
             _log(f"[runtime] sample_rf: {stage_sec * 1000.0:.1f} ms")
 
+            generated_speaker_condition = None
+            if req.capture_generated_speaker_condition is True:
+                t0 = _measure_start(self.model_device)
+                # RF の実長だけを Speaker Encoder へ渡し、バケットの末尾パディングを話者条件へ混ぜない
+                generated_reference_latent = z_patched[:1, :patched_steps]
+                generated_reference_mask = torch.ones(
+                    generated_reference_latent.shape[:2],
+                    dtype=torch.bool,
+                    device=self.model_device,
+                )
+                generated_speaker_state, generated_speaker_mask = (
+                    self.model.encode_speaker_condition(
+                        batch_size=1,
+                        dtype=generated_reference_latent.dtype,
+                        device=self.model_device,
+                        ref_latent=generated_reference_latent,
+                        ref_mask=generated_reference_mask,
+                    )
+                )
+                generated_speaker_condition = SpeakerCondition(
+                    state=generated_speaker_state.detach(),
+                    mask=generated_speaker_mask.detach(),
+                )
+                stage_sec = _measure_end(self.model_device, t0)
+                stage_timings.append(("capture_speaker_condition", stage_sec))
+                _log(f"[runtime] capture_speaker_condition: {stage_sec * 1000.0:.1f} ms")
+
             t0 = _measure_start(self.model_device)
             z = unpatchify_latent(
                 z_patched,
@@ -2315,6 +2540,7 @@ class InferenceRuntime:
             seed_retry_base_score=None,
             seed_retry_candidate_score=None,
             is_retry_adopted=False,
+            speaker_condition=generated_speaker_condition,
         )
 
     def unload(self) -> None:

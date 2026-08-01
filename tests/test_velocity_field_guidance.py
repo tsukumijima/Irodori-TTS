@@ -45,8 +45,20 @@ class FakeVelocityModel:
 
 
 class VelocityFieldGuidanceTest(unittest.TestCase):
-    def test_sampling_request_keeps_guidance_at_positional_tail(self) -> None:
-        self.assertEqual(fields(SamplingRequest)[-2].name, "velocity_field_guidance")
+    def test_sampling_request_keeps_guidance_before_new_positional_fields(self) -> None:
+        field_names = [field.name for field in fields(SamplingRequest)]
+        self.assertEqual(
+            field_names[-7:],
+            [
+                "velocity_field_guidance",
+                "trajectory_intervention",
+                "trajectory_observer",
+                "caption_state_override",
+                "caption_mask_override",
+                "speaker_condition_override",
+                "capture_generated_speaker_condition",
+            ],
+        )
 
     def _sample(
         self,

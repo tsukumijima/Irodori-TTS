@@ -59,8 +59,20 @@ class TrajectoryInterventionTest(unittest.TestCase):
             trajectory_intervention=intervention,
         )
 
-    def test_sampling_request_keeps_intervention_at_positional_tail(self) -> None:
-        self.assertEqual(fields(SamplingRequest)[-1].name, "trajectory_intervention")
+    def test_sampling_request_keeps_intervention_before_new_positional_fields(self) -> None:
+        field_names = [field.name for field in fields(SamplingRequest)]
+        self.assertEqual(
+            field_names[-7:],
+            [
+                "velocity_field_guidance",
+                "trajectory_intervention",
+                "trajectory_observer",
+                "caption_state_override",
+                "caption_mask_override",
+                "speaker_condition_override",
+                "capture_generated_speaker_condition",
+            ],
+        )
 
     def test_default_sampling_does_not_read_cuda_scalars_per_step(self) -> None:
         # CPU テストでも Tensor.item() の呼び出し自体を禁止し、CUDA 同期の再混入を検出
