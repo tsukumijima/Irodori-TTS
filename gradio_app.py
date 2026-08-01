@@ -8,6 +8,10 @@ from pathlib import Path
 import gradio as gr
 
 from irodori_tts.gradio_emoji_palette import EMOJI_PALETTE_CSS, build_emoji_palette
+from irodori_tts.gradio_reference_files import (
+    coerce_gradio_file_path,
+    resolve_gradio_reference_wavs,
+)
 from irodori_tts.inference_runtime import (
     RuntimeKey,
     SamplingRequest,
@@ -110,38 +114,11 @@ def _format_timings(stage_timings: list[tuple[str, float]], total_to_decode: flo
     return "\n".join(lines)
 
 
-def _coerce_gradio_file_path(value: object) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        text = value.strip()
-        return text or None
-    if isinstance(value, dict):
-        for key in ("path", "name"):
-            candidate = value.get(key)
-            if candidate is not None and str(candidate).strip():
-                return str(candidate)
-        return None
-    candidate = getattr(value, "name", None)
-    if candidate is not None and str(candidate).strip():
-        return str(candidate)
-    text = str(value).strip()
-    return text or None
-
-
-def _resolve_ref_wavs(uploaded_audio: object) -> list[str]:
-    if uploaded_audio is None:
-        return []
-    values = uploaded_audio if isinstance(uploaded_audio, (list, tuple)) else [uploaded_audio]
-    paths = [_coerce_gradio_file_path(value) for value in values]
-    return [path for path in paths if path is not None]
-
-
 def _resolve_speaker_embedding(
     uploaded_embedding: object,
     speaker_embedding_path_raw: str | None,
 ) -> str | None:
-    uploaded_path = _coerce_gradio_file_path(uploaded_embedding)
+    uploaded_path = coerce_gradio_file_path(uploaded_embedding)
     raw_path = None
     if speaker_embedding_path_raw is not None and str(speaker_embedding_path_raw).strip():
         raw_path = str(speaker_embedding_path_raw).strip()
@@ -275,7 +252,7 @@ def _run_generation(
     manual_seconds = _parse_optional_float(seconds_raw, "seconds")
     lora_adapter = _parse_optional_str(lora_adapter_raw)
 
-    ref_wavs = _resolve_ref_wavs(uploaded_audio)
+    ref_wavs = resolve_gradio_reference_wavs(uploaded_audio)
     speaker_embedding = _resolve_speaker_embedding(
         uploaded_embedding=uploaded_speaker_embedding,
         speaker_embedding_path_raw=speaker_embedding_path_raw,

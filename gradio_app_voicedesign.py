@@ -8,6 +8,7 @@ from pathlib import Path
 import gradio as gr
 
 from irodori_tts.gradio_emoji_palette import EMOJI_PALETTE_CSS, build_emoji_palette
+from irodori_tts.gradio_reference_files import resolve_gradio_reference_wavs
 from irodori_tts.inference_runtime import (
     RuntimeKey,
     SamplingRequest,
@@ -115,33 +116,6 @@ def _format_timings(stage_timings: list[tuple[str, float]], total_to_decode: flo
         f"[timing] total_to_decode: {total_to_decode:.3f} s",
     ]
     return "\n".join(lines)
-
-
-def _coerce_gradio_file_path(value: object) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        text = value.strip()
-        return text or None
-    if isinstance(value, dict):
-        for key in ("path", "name"):
-            candidate = value.get(key)
-            if candidate is not None and str(candidate).strip():
-                return str(candidate)
-        return None
-    candidate = getattr(value, "name", None)
-    if candidate is not None and str(candidate).strip():
-        return str(candidate)
-    text = str(value).strip()
-    return text or None
-
-
-def _resolve_ref_wavs(uploaded_audio: object) -> list[str]:
-    if uploaded_audio is None:
-        return []
-    values = uploaded_audio if isinstance(uploaded_audio, (list, tuple)) else [uploaded_audio]
-    paths = [_coerce_gradio_file_path(value) for value in values]
-    return [path for path in paths if path is not None]
 
 
 def _resolve_checkpoint_path(raw_checkpoint: str) -> str:
@@ -295,7 +269,7 @@ def _run_generation(
             "Loaded checkpoint does not enable caption conditioning. "
             "Use gradio_app.py for reference-only inference."
         )
-    ref_wav_paths = _resolve_ref_wavs(ref_wavs)
+    ref_wav_paths = resolve_gradio_reference_wavs(ref_wavs)
     effective_no_ref = not ref_wav_paths or not runtime.model_cfg.use_speaker_condition_resolved
     if effective_no_ref:
         ref_wav_paths = []

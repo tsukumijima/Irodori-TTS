@@ -1022,7 +1022,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "datasets", specifier = ">=3.0.0" },
-    { name = "gradio", specifier = ">=5.0.0" },
+    { name = "gradio", specifier = ">=5.10.0" },
     { name = "llvmlite", specifier = ">=0.40.0" },
     { name = "numba", specifier = ">=0.57.0" },
     { name = "nvidia-cudnn-frontend", marker = "sys_platform == 'linux' or sys_platform == 'win32'", specifier = "==1.26.0" },
