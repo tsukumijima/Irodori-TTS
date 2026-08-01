@@ -337,13 +337,10 @@ class SamplingRequest:
     waveex: WaveExConfig | None = None
     initial_noise: torch.Tensor | None = None
     initial_noise_offset: int = 0
-    retry_chunk_index: int = 0
     # speaker_state のパディング設定
     ## 参照音声長による SDPA 形状変動を抑え、cuDNN カーネルキャッシュヒット率を上げる
     speaker_ref_fixed_length: int | None = None
     speaker_ref_bucket_sizes: list[int] | None = None
-    # Speaker Inversion の話者条件とは分離し、生成後の話者豹変判定だけに参照音声を使う
-    speaker_failure_ref_wav: str | None = None
     # 後方互換のため、新規フィールドは既存の位置引数列の末尾へ追加
     velocity_field_guidance: VelocityFieldGuidance | None = None
     trajectory_observer: TrajectoryObserver | None = None
