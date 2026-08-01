@@ -997,6 +997,7 @@ dev = [
     { name = "ruff" },
     { name = "silentcipher" },
     { name = "taskipy" },
+    { name = "torchao" },
     { name = "torchcodec" },
     { name = "torchdata" },
     { name = "tqdm" },
@@ -1030,6 +1031,7 @@ dev = [
     { name = "ruff", specifier = ">=0.14.8,<0.15.0" },
     { name = "silentcipher", git = "https://github.com/SesameAILabs/silentcipher.git?rev=d46d7d0893a583d8968ab3a6626e2289faec9152" },
     { name = "taskipy", specifier = ">=1.14.0,<2.0.0" },
+    { name = "torchao", specifier = ">=0.16.0,<0.17.0" },
     { name = "torchcodec", specifier = ">=0.10.0,<0.11.0" },
     { name = "torchdata", specifier = ">=0.11.0" },
     { name = "tqdm", specifier = ">=4.67.3" },
@@ -3292,6 +3294,15 @@ wheels = [
     { url = "https://download-r2.pytorch.org/whl/cu130/torch-2.12.1%2Bcu130-cp312-cp312-win_amd64.whl", hash = "sha256:52c5da6a0898d5d3473c02bd304b7a3bc0b72e351c6f3bfa0783e45ef9f4cd61", upload-time = "2026-06-18T02:39:58Z" },
     { url = "https://download-r2.pytorch.org/whl/cu130/torch-2.12.1%2Bcu130-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:d5e1840442d2182957b3d2f778cc325c90fa5cb42aa8b1ac949f029e9bdd7f06", upload-time = "2026-06-18T02:41:44Z" },
     { url = "https://download-r2.pytorch.org/whl/cu130/torch-2.12.1%2Bcu130-cp313-cp313-win_amd64.whl", hash = "sha256:76dd848312a40d29499614b714a4318841734ff309ad922f2365868395b6b054", upload-time = "2026-06-18T02:43:02Z" },
+]
+
+[[package]]
+name = "torchao"
+version = "0.16.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8d/7f/0acda8a429ac9cfabd142d30af624d7958bf828c438be5a54ca87bbe16d7/torchao-0.16.0-cp310-abi3-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:2d6293a0c57c9dd505efb025a7189459d154965fbed000efd638cf299f9362dd", size = 3160415, upload-time = "2026-02-10T22:12:12.32Z" },
+    { url = "https://files.pythonhosted.org/packages/d0/3d/0c5a5833a135a045510e06c06b3d4cf316b06d59415bc21e0b021a000cc8/torchao-0.16.0-py3-none-any.whl", hash = "sha256:d0a8d773351fd17b95fee81dfbcbf98577b567dcdbec47d221b0ee258432101d", size = 1164150, upload-time = "2026-02-10T22:12:15.28Z" },
 ]
 
 [[package]]
