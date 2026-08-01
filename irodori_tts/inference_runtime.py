@@ -97,7 +97,9 @@ def default_runtime_device() -> str:
 
 
 class ContextCapacityExceededError(ValueError):
-    """エンコード済み条件の有効トークン数が推論実装の固定容量を超えたことを表す。"""
+    """
+    エンコード済み条件の有効トークン数が推論実装の固定容量を超えたことを表す。
+    """
 
     def __init__(
         self,
@@ -558,7 +560,9 @@ def resolve_cfg_scales(
     use_speaker_condition: bool = True,
     use_token_condition: bool = False,
 ) -> tuple[float, float, float, float, list[str]]:
-    """Normalize/validate CFG scales for guidance mode."""
+    """
+    Normalize/validate CFG scales for guidance mode.
+    """
     messages: list[str] = []
     text_val = float(cfg_scale_text)
     caption_val = float(cfg_scale_caption)
@@ -1386,7 +1390,7 @@ class InferenceRuntime:
         lora_adapter: str | None,
     ) -> _CaptionCacheKey:
         """
-        キャプション条件キャッシュのキーを作る
+        キャプション条件キャッシュのキーを作る。
 
         Args:
             req (SamplingRequest): 合成リクエスト
@@ -1434,7 +1438,9 @@ class InferenceRuntime:
         key: _CaptionCacheKey,
         condition: _CaptionCondition,
     ) -> None:
-        """キャプション条件を LRU キャッシュへ保存する"""
+        """
+        キャプション条件を LRU キャッシュへ保存する。
+        """
 
         # キャプションは voice ほど種類が固定されないため、上限を超えた古い条件から破棄する
         self._caption_condition_cache[key] = condition
@@ -1448,7 +1454,9 @@ class InferenceRuntime:
         *,
         batch_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """1件分だけ保持したキャプション条件を候補数ぶんに複製する"""
+        """
+        1件分だけ保持したキャプション条件を候補数ぶんに複製する。
+        """
 
         # 候補生成では全候補が同じキャプションを使うため、エンコード済み表現をそのまま複製できる
         if batch_size <= 1:
@@ -1469,7 +1477,7 @@ class InferenceRuntime:
         messages: list[str],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        VoiceDesign キャプションをエンコードし、同一キャプションなら再利用する
+        VoiceDesign キャプションをエンコードし、同一キャプションなら再利用する。
 
         Args:
             req (SamplingRequest): 合成リクエスト

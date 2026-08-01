@@ -12,6 +12,7 @@ import sys
 from contextlib import nullcontext
 from dataclasses import asdict, replace
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -152,7 +153,7 @@ def compute_rf_loss(
 
 def sha256_file(path: str | Path) -> str:
     """
-    ファイル内容の SHA-256 を計算する
+    ファイル内容の SHA-256 を計算する。
 
     Args:
         path (str | Path): ハッシュを計算するファイル
@@ -171,15 +172,15 @@ def sha256_file(path: str | Path) -> str:
     return hasher.hexdigest()
 
 
-def load_optional_json(path: str | Path | None) -> dict:
+def load_optional_json(path: str | Path | None) -> dict[str, Any]:
     """
-    LoRA metadata に埋め込む任意の JSON ファイルを読み込む
+    LoRA metadata に埋め込む任意の JSON ファイルを読み込む。
 
     Args:
         path (str | Path | None): JSON ファイルのパス
 
     Returns:
-        dict: ファイルが未指定なら空 dict
+        dict[str, Any]: ファイルが未指定なら空 dict
     """
 
     if path is None or str(path).strip() == "":
@@ -194,18 +195,18 @@ def build_lora_metadata(
     *,
     model_cfg: ModelConfig,
     train_cfg: TrainConfig,
-    base_init: dict | None,
-) -> dict:
+    base_init: dict[str, Any] | None,
+) -> dict[str, Any]:
     """
-    adapter と一緒に保存する実験条件の metadata を作る
+    adapter と一緒に保存する実験条件の metadata を作る。
 
     Args:
         model_cfg (ModelConfig): 保存対象のモデル設定
         train_cfg (TrainConfig): 保存対象の学習設定
-        base_init (dict | None): base checkpoint の初期化情報
+        base_init (dict[str, Any] | None): base checkpoint の初期化情報
 
     Returns:
-        dict: `irodori_lora_metadata.json` に書き込む内容
+        dict[str, Any]: `irodori_lora_metadata.json` に書き込む内容
     """
 
     condition_metadata = load_optional_json(train_cfg.condition_token_metadata_path)
@@ -241,7 +242,7 @@ def save_checkpoint(
     model_cfg: ModelConfig,
     train_cfg: TrainConfig,
     *,
-    base_init: dict | None = None,
+    base_init: dict[str, Any] | None = None,
 ) -> None:
     path = Path(path)
     if train_cfg.speaker_inversion_enabled:
@@ -1380,7 +1381,7 @@ def load_fixed_split_indices(
     valid_values: str,
 ) -> tuple[list[int], list[int]]:
     """
-    manifest とは別ファイルで指定された固定 split から行番号を読み出す
+    manifest とは別ファイルで指定された固定 split から行番号を読み出す。
 
     Args:
         split_file_path (str | Path): JSONL または TSV の split ファイル
@@ -1453,7 +1454,7 @@ def build_condition_token_dropout_mask(
     train_cfg: TrainConfig,
 ) -> tuple[torch.Tensor | None, dict[str, int]]:
     """
-    条件 token 専用の3階層 dropout mask を作る
+    条件 token 専用の3階層 dropout mask を作る。
 
     Args:
         condition_token_mask (torch.Tensor | None): 有効な条件 token の mask
@@ -1507,7 +1508,7 @@ def merge_condition_dropout_counters(
     right: dict[str, int],
 ) -> dict[str, int]:
     """
-    gradient accumulation 中の条件 token dropout カウンタを合算する
+    gradient accumulation 中の条件 token dropout カウンタを合算する。
 
     Args:
         left (dict[str, int]): 既存カウンタ
@@ -1524,7 +1525,7 @@ def merge_condition_dropout_counters(
 
 def condition_embedding_grad_norm(model: torch.nn.Module) -> float:
     """
-    PEFT wrapper 後の condition embedding 勾配ノルムを名前ベースで集計する
+    PEFT wrapper 後の condition embedding 勾配ノルムを名前ベースで集計する。
 
     Args:
         model (torch.nn.Module): 学習中のモデル

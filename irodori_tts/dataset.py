@@ -246,7 +246,7 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
 
     def sample_weights(self, *, key: str = "sample_weight") -> list[float]:
         """
-        WeightedRandomSampler 用の重みを manifest から読み出す
+        WeightedRandomSampler 用の重みを manifest から読み出す。
 
         Args:
             key (str): manifest の重み列名

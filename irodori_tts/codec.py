@@ -139,7 +139,9 @@ class DACVAECodec:
 
     @staticmethod
     def _measure_loudness(wav: torch.Tensor, sample_rate: int) -> torch.Tensor:
-        """ITU-R BS.1770-4 の統合ラウドネスを CPU で測定する。"""
+        """
+        ITU-R BS.1770-4 の統合ラウドネスを CPU で測定する。
+        """
 
         waveform = wav.detach().to(device="cpu", dtype=torch.float32).numpy()
         if waveform.ndim != 1:
@@ -152,7 +154,9 @@ class DACVAECodec:
             numerator: tuple[np.float32, np.float32, np.float32],
             denominator: tuple[np.float32, np.float32, np.float32],
         ) -> np.ndarray:
-            """Torchaudio と同じゼロ初期状態と段間 clamp で2次 IIR を適用する。"""
+            """
+            Torchaudio と同じゼロ初期状態と段間 clamp で2次 IIR を適用する。
+            """
 
             filtered = lfilter(
                 np.asarray(numerator, dtype=np.float32),

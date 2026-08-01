@@ -38,7 +38,9 @@ def is_speaker_inversion_safetensors_path(path: str | Path) -> bool:
 
 
 class SpeakerInversionEmbedding(nn.Module):
-    """Learned speaker/style tokens that bypass the reference latent speaker encoder."""
+    """
+    Learned speaker/style tokens that bypass the reference latent speaker encoder.
+    """
 
     def __init__(
         self,

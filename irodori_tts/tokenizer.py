@@ -4,7 +4,9 @@ import torch
 
 
 class ByteTokenizer:
-    """Simple byte-level tokenizer for text-to-speech."""
+    """
+    Simple byte-level tokenizer for text-to-speech.
+    """
 
     def __init__(self, bos_token: int = 256) -> None:
         if bos_token < 0:

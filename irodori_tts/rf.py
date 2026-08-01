@@ -14,11 +14,12 @@ from .waveex import WaveExBuffer, WaveExConfig
 
 @dataclass(frozen=True)
 class VelocityFieldGuidance:
-    """同一潜在上の条件対から速度差を作り、通常の速度へ加算する。
+    """
+    同一潜在上の条件対から速度差を作り、通常の速度へ加算する。
 
-    caption と speaker のどちらか一方の条件対を指定する。未指定側は通常の
-    条件を共有するため、話者を保ったキャプション操作と、キャプションを
-    保った話者テクスチャ移植を同じ計算で扱える。
+    caption と speaker のどちらか一方の条件対を指定する。
+    未指定側は通常の条件を共有するため、話者を保ったキャプション操作と、
+    キャプションを保った話者テクスチャ移植を同じ計算で扱える。
 
     Args:
         alpha (float): `target - opposite` の速度差へ掛ける係数
@@ -49,7 +50,8 @@ class VelocityFieldGuidance:
 
 @dataclass(frozen=True)
 class TrajectoryCheckpoint:
-    """途中時刻の完成予測を軌道介入コールバックへ渡す。
+    """
+    途中時刻の完成予測を軌道介入コールバックへ渡す。
 
     Args:
         step_index (int): 0 始まりのサンプリングステップ番号
@@ -100,10 +102,11 @@ class TrajectoryObserver:
 
 @dataclass(frozen=True)
 class TrajectoryIntervention:
-    """指定ステップで完成潜在予測を観測し、必要なら別ノイズへ分岐する。
+    """
+    指定ステップで完成潜在予測を観測し、必要なら別ノイズへ分岐する。
 
-    コールバックが `None` を返す場合は通常の Euler 更新を続ける
-    ノイズを返す場合は完成予測とそのノイズから次時刻の状態を再構成する
+    コールバックが `None` を返す場合は通常の Euler 更新を続ける。
+    ノイズを返す場合は完成予測とそのノイズから次時刻の状態を再構成する。
 
     Args:
         step_indices (tuple[int, ...]): コールバックを呼ぶ 0 始まりのステップ番号
