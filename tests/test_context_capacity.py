@@ -13,10 +13,16 @@ from irodori_tts.model import EncodedConditions
 
 class EncodedContextCapacityTest(unittest.TestCase):
     def _runtime(self, capacity: int | None) -> InferenceRuntime:
-        # モデルロードを伴わない単体試験では、容量検査に必要な製品能力だけを設定する
+        # モデルロードを伴わない単体試験では、容量検査に必要な状態だけを設定する
         runtime = InferenceRuntime.__new__(InferenceRuntime)
-        runtime.max_encoded_context_tokens = capacity
+        runtime.set_max_encoded_context_tokens(capacity)
         return runtime
+
+    def test_capacity_configuration_rejects_non_positive_values(self) -> None:
+        runtime = self._runtime(None)
+
+        with self.assertRaisesRegex(ValueError, "greater than zero"):
+            runtime.set_max_encoded_context_tokens(0)
 
     def _conditions(
         self,

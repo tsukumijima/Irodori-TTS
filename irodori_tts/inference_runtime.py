@@ -851,13 +851,8 @@ class InferenceRuntime:
         self.default_text_max_len = default_text_max_len
         self.default_caption_max_len = default_caption_max_len
         self.default_max_ref_seconds = float(default_max_ref_seconds)
-        if max_encoded_context_tokens is not None and max_encoded_context_tokens <= 0:
-            raise ValueError(
-                "max_encoded_context_tokens must be greater than zero when provided: "
-                f"{max_encoded_context_tokens}"
-            )
-        # 固定長エンジンを接続した製品ランタイムだけが上限を設定し、通常の eager 推論は従来どおり無制限に扱う
-        self.max_encoded_context_tokens = max_encoded_context_tokens
+        self._max_encoded_context_tokens: int | None = None
+        self.set_max_encoded_context_tokens(max_encoded_context_tokens)
         self.watermarker = (
             SilentCipherWatermarker(device=str(self.codec_device))
             if bool(self.key.enable_watermark)
@@ -878,6 +873,22 @@ class InferenceRuntime:
             OrderedDict()
         )
         self._caption_condition_cache_max_entries = 64
+
+    def set_max_encoded_context_tokens(self, max_tokens: int | None) -> None:
+        """Set the context capacity imposed by the active inference backend.
+
+        Args:
+            max_tokens: Maximum number of encoded condition tokens, or ``None``
+                when the backend has no fixed capacity.
+
+        Raises:
+            ValueError: If ``max_tokens`` is not positive.
+        """
+        if max_tokens is not None and max_tokens <= 0:
+            raise ValueError(
+                f"max_encoded_context_tokens must be greater than zero when provided: {max_tokens}"
+            )
+        self._max_encoded_context_tokens = max_tokens
 
     @classmethod
     def from_key(cls, key: RuntimeKey) -> InferenceRuntime:
@@ -1013,7 +1024,7 @@ class InferenceRuntime:
             encoded_conditions (EncodedConditions): 検査するエンコード済み条件
         """
 
-        capacity = self.max_encoded_context_tokens
+        capacity = self._max_encoded_context_tokens
         if capacity is None:
             return
 
@@ -2234,7 +2245,7 @@ class InferenceRuntime:
                 messages.append(msg)
                 _log(msg)
                 # 固定 context 容量を持つ実装では、DurationPredictor の有無にかかわらず RF 前の条件検査が必要
-                if self.max_encoded_context_tokens is not None:
+                if self._max_encoded_context_tokens is not None:
                     encoded_conditions = self.model.encode_conditions(
                         text_input_ids=text_ids,
                         text_mask=text_mask,
