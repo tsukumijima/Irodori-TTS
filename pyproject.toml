@@ -1,7 +1,3 @@
-[build-system]
-requires = ["uv_build>=0.9.21,<0.12.0"]
-build-backend = "uv_build"
-
 [project]
 name = "irodori-tts"
 version = "0.1.0"
@@ -36,6 +32,16 @@ dev = [
     "wandb>=0.17.0",
 ]
 
+[tool.taskipy.tasks]
+lint = "ruff check --fix . ; pyright"
+format = "ruff format ."
+typecheck = "pyright"
+test = "pytest"
+
+[build-system]
+requires = ["uv_build>=0.11.24,<0.12.0"]
+build-backend = "uv_build"
+
 [tool.uv]
 default-groups = ["dev"]
 exclude-newer = "1 week"
@@ -67,33 +73,85 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.ruff]
+# 1行の長さを最大100文字に設定
 line-length = 100
+# インデントの幅を4スペースに設定
+indent-width = 4
+# Python 3.10 を利用する
 target-version = "py310"
 
 [tool.ruff.lint]
-select = [
-    "E",
-    "W",
-    "F",
-    "I",
-    "B",
-    "C4",
-    "UP",
-]
+# flake8, pycodestyle, pyupgrade, isort, Ruff 固有のルールを使う
+select = ["F", "E", "W", "UP", "I", "RUF"]
 ignore = [
-    "E501",
-    "B008",
-    "C901",
+    "E501",    # 1行の長さを超えている場合の警告を抑制
+    "E731",    # Do not assign a `lambda` expression, use a `def` を抑制
+    "RUF001",  # 全角記号など `ambiguous unicode character` も使いたいため
+    "RUF002",  # 全角記号など `ambiguous unicode character` も使いたいため
+    "RUF003",  # 全角記号など `ambiguous unicode character` も使いたいため
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
 
 [tool.ruff.lint.isort]
+# インポートブロックの後に2行空ける
+lines-after-imports = 2
 known-first-party = ["irodori_tts"]
 
 [tool.ruff.format]
+# ダブルクオートを使う
 quote-style = "double"
+# インデントにはスペースを使う
 indent-style = "space"
-skip-magic-trailing-comma = false
-line-ending = "auto"
+
+[tool.pyright]
+# Python バージョンを指定
+pythonVersion = "3.10"
+# Pyright 実行時に .venv/ を確実に参照させる
+# この設定により Codex サンドボックス上から Pyright を実行すると依存関係を解決できない問題を回避できる
+venvPath = "."
+venv = ".venv"
+# TypeCheckingMode を strict に設定（VSCode の設定と同等）
+typeCheckingMode = "strict"
+# プロジェクトルートを指定
+pythonPlatform = "All"
+# インクルードするパッケージパス
+include = [
+    "irodori_tts/",
+    "tests/",
+]
+# 除外するパス
+exclude = [
+    "**/__pycache__",
+    "**/.*",
+    "**/.venv",
+    "**/*output*",
+]
+# 型スタブがない機械学習系ライブラリの実装解析で、ベンチマーク全体の型チェックが極端に遅くなることを防ぐ
+useLibraryCodeForTypes = false
+# VSCode の settings.json の diagnosticSeverityOverrides に対応する設定
+reportConstantRedefinition = "none"
+reportDeprecated = "none"  # 修正コストの観点で抑制
+reportGeneralTypeIssues = "warning"
+# 新しい Pyright で reportGeneralTypeIssues から分離された診断も、研究用スクリプトでは警告として表示する
+reportArgumentType = "warning"
+reportAssignmentType = "warning"
+reportAttributeAccessIssue = "warning"
+reportCallIssue = "warning"
+reportReturnType = "warning"
+reportMissingParameterType = "warning"
+reportMissingImports = "none"  # 実験ごとの任意依存を全てインストールすると重いため抑制
+reportMissingTypeStubs = "none"
+reportPrivateImportUsage = "none"
+reportPrivateUsage = "warning"
+reportUntypedBaseClass = "none"
+reportUnnecessaryComparison = "none"
+reportUnknownArgumentType = "none"
+reportUnknownLambdaType = "none"
+reportUnknownMemberType = "none"
+reportUnknownParameterType = "none"
+reportUnknownVariableType = "none"
+reportUntypedFunctionDecorator = "none"
+reportUnusedFunction = "none"
+reportUnusedVariable = "none"
