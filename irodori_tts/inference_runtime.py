@@ -26,7 +26,6 @@ from .duration import build_duration_features
 from .lora import checkpoint_state_uses_lora, is_lora_adapter_dir, load_lora_adapter
 from .model import EncodedConditions, TextToLatentRFDiT
 from .rf import (
-    TrajectoryIntervention,
     TrajectoryObserver,
     VelocityFieldGuidance,
     sample_euler_rf_cfg,
@@ -342,7 +341,6 @@ class SamplingRequest:
     speaker_failure_ref_wav: str | None = None
     # 後方互換のため、新規フィールドは既存の位置引数列の末尾へ追加
     velocity_field_guidance: VelocityFieldGuidance | None = None
-    trajectory_intervention: TrajectoryIntervention | None = None
     trajectory_observer: TrajectoryObserver | None = None
     # 事前計算したキャプション条件は必ず状態とマスクを組にして渡す
     caption_state_override: torch.Tensor | None = None
@@ -2400,7 +2398,6 @@ class InferenceRuntime:
                     condition_token_mask=condition_token_mask,
                     condition_token_scales=condition_token_scales,
                     velocity_field_guidance=req.velocity_field_guidance,
-                    trajectory_intervention=req.trajectory_intervention,
                     trajectory_observer=req.trajectory_observer,
                 )
 

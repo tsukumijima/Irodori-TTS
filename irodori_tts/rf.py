@@ -49,24 +49,6 @@ class VelocityFieldGuidance:
 
 
 @dataclass(frozen=True)
-class TrajectoryCheckpoint:
-    """
-    途中時刻の完成予測を軌道介入コールバックへ渡す。
-
-    Args:
-        step_index (int): 0 始まりのサンプリングステップ番号
-        t (float): 速度を評価した現在時刻
-        t_next (float): 状態を進める次時刻
-        x0_hat (torch.Tensor): `rf_predict_x0()` で求めた完成潜在予測
-    """
-
-    step_index: int
-    t: float
-    t_next: float
-    x0_hat: torch.Tensor
-
-
-@dataclass(frozen=True)
 class TrajectoryObservation:
     """
     途中時刻の完成予測を読み取り専用の観測処理へ渡す。
@@ -98,24 +80,6 @@ class TrajectoryObserver:
 
     step_indices: tuple[int, ...]
     callback: Callable[[TrajectoryObservation], None]
-
-
-@dataclass(frozen=True)
-class TrajectoryIntervention:
-    """
-    指定ステップで完成潜在予測を観測し、必要なら別ノイズへ分岐する。
-
-    コールバックが `None` を返す場合は通常の Euler 更新を続ける。
-    ノイズを返す場合は完成予測とそのノイズから次時刻の状態を再構成する。
-
-    Args:
-        step_indices (tuple[int, ...]): コールバックを呼ぶ 0 始まりのステップ番号
-        callback (Callable[[TrajectoryCheckpoint], torch.Tensor | None]):
-            観測のみなら `None`、分岐する場合は完成予測と同じ形の別ノイズを返す処理
-    """
-
-    step_indices: tuple[int, ...]
-    callback: Callable[[TrajectoryCheckpoint], torch.Tensor | None]
 
 
 def _make_rng(seed: int, device: torch.device) -> tuple[torch.Generator, torch.device]:
@@ -272,7 +236,6 @@ def sample_euler_rf_cfg(
     condition_token_mask: torch.Tensor | None = None,
     condition_token_scales: torch.Tensor | None = None,
     velocity_field_guidance: VelocityFieldGuidance | None = None,
-    trajectory_intervention: TrajectoryIntervention | None = None,
     trajectory_observer: TrajectoryObserver | None = None,
 ) -> torch.Tensor:
     """
@@ -386,18 +349,6 @@ def sample_euler_rf_cfg(
     t_schedule_values = tuple(float(value) for value in t_schedule.detach().cpu())
     if not all(current_t > next_t for current_t, next_t in pairwise(t_schedule_values)):
         raise ValueError("t_schedule must be strictly decreasing; adjust num_steps or sway_coeff.")
-    trajectory_step_indices: set[int] = set()
-    if trajectory_intervention is not None:
-        trajectory_step_indices = set(trajectory_intervention.step_indices)
-        if len(trajectory_step_indices) != len(trajectory_intervention.step_indices):
-            raise ValueError("trajectory_intervention step_indices must not contain duplicates.")
-        if any(step_index < 0 or step_index >= num_steps for step_index in trajectory_step_indices):
-            raise ValueError(
-                f"trajectory_intervention step_indices must be within [0, {num_steps - 1}]."
-            )
-        # WaveEx の外挿ステップには速度予測がないため、完成予測の定義を混在させない
-        if waveex is not None and waveex.enabled:
-            raise ValueError("trajectory_intervention cannot be combined with WaveEx.")
     observation_step_indices: set[int] = set()
     if trajectory_observer is not None:
         observation_step_indices = set(trajectory_observer.step_indices)
@@ -1101,35 +1052,7 @@ def sample_euler_rf_cfg(
             _restore_speaker_kv_cache_scale()
             speaker_kv_active = False
 
-        replacement_noise = None
-        x0_hat: torch.Tensor | None = None
-        if trajectory_intervention is not None and i in trajectory_step_indices:
-            # CFG と時間方向補正をすべて反映した速度から完成潜在を予測
-            x0_hat = rf_predict_x0(x_t=x_t, v_pred=v, t=tt)
-            replacement_noise = trajectory_intervention.callback(
-                TrajectoryCheckpoint(
-                    step_index=i,
-                    t=t_value,
-                    t_next=t_next_value,
-                    x0_hat=x0_hat,
-                )
-            )
-            if replacement_noise is not None:
-                if replacement_noise.shape != x0_hat.shape:
-                    raise ValueError(
-                        "trajectory_intervention callback noise shape mismatch: "
-                        f"expected {tuple(x0_hat.shape)}, got {tuple(replacement_noise.shape)}."
-                    )
-                replacement_noise = replacement_noise.to(device=device, dtype=dtype)
-
-        # 分岐時は完成予測と別ノイズから次時刻を作り、次ステップで速度を再評価
-        if replacement_noise is None:
-            x_t = x_t + v * (t_next - t)
-        else:
-            if x0_hat is None:
-                raise RuntimeError("Trajectory replacement noise requires x0_hat.")
-            tt_next = t_next.expand(batch_size)
-            x_t = rf_interpolate(x0=x0_hat, noise=replacement_noise, t=tt_next)
+        x_t = x_t + v * (t_next - t)
         if waveex_buffer is not None:
             waveex_buffer.push(x_t)
 

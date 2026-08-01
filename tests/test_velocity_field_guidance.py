@@ -49,10 +49,9 @@ class VelocityFieldGuidanceTest(unittest.TestCase):
     def test_sampling_request_keeps_guidance_before_new_positional_fields(self) -> None:
         field_names = [field.name for field in fields(SamplingRequest)]
         self.assertEqual(
-            field_names[-7:],
+            field_names[-6:],
             [
                 "velocity_field_guidance",
-                "trajectory_intervention",
                 "trajectory_observer",
                 "caption_state_override",
                 "caption_mask_override",
