@@ -60,10 +60,7 @@ def test_encode_speaker_condition_returns_server_cache_value() -> None:
     runtime._reference_condition_cache = {"cache-key": object()}
     runtime.model = RecordingSpeakerModel()
     runtime._resolve_lora_adapter_path = lambda _path: None
-    runtime._resolve_condition_tokens = lambda _request, lora_adapter: None
-    runtime._reference_cache_key = (
-        lambda _request, resolved_condition_tokens, lora_adapter: "cache-key"
-    )
+    runtime._reference_cache_key = lambda _request, lora_adapter: "cache-key"
     runtime._load_reference_latent = lambda **_kwargs: (
         torch.zeros(1, 5, 6),
         torch.ones(1, 5, dtype=torch.bool),

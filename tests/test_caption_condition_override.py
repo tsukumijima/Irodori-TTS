@@ -35,7 +35,6 @@ class CaptionConditionOverrideTest(unittest.TestCase):
         # 上書き経路ではトークン ID と通常キャッシュを使用しない
         state, mask = runtime._load_cached_caption_condition(
             req=request,
-            resolved_condition_tokens=None,
             lora_adapter=None,
             caption_text="テスト",
             caption_ids=torch.ones((batch_size, 2), dtype=torch.long),

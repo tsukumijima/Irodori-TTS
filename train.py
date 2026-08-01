@@ -18,7 +18,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler, WeightedRandomSampler
+from torch.utils.data import DataLoader, DistributedSampler
 
 from irodori_tts.config import (
     ModelConfig,
@@ -209,21 +209,12 @@ def build_lora_metadata(
         dict[str, Any]: `irodori_lora_metadata.json` に書き込む内容
     """
 
-    condition_metadata = load_optional_json(train_cfg.condition_token_metadata_path)
     manifest_metadata = load_optional_json(train_cfg.manifest_metadata_path)
     manifest_hash = None
     if train_cfg.manifest_path:
         manifest_hash = sha256_file(train_cfg.manifest_path)
     return {
         "base_init": base_init,
-        "condition_vocabulary": condition_metadata,
-        "condition_vocabulary_size": int(model_cfg.speaker_condition_vocab_size),
-        "condition_vocabulary_hash": model_cfg.speaker_condition_vocab_hash,
-        "condition_token_dropout": {
-            "all": float(train_cfg.condition_token_dropout_all),
-            "family": float(train_cfg.condition_token_dropout_family),
-            "style": float(train_cfg.condition_token_dropout_style),
-        },
         "manifest": {
             "path": train_cfg.manifest_path,
             "sha256": manifest_hash,
@@ -434,7 +425,7 @@ def _final_checkpoint_path(output_dir: Path, train_cfg: TrainConfig) -> Path:
     return output_dir / "checkpoint_final.pt"
 
 
-def build_condition_tokenizer(
+def build_pretrained_tokenizer(
     *,
     repo_id: str,
     add_bos: bool,
@@ -459,7 +450,7 @@ def build_text_tokenizer(
     *,
     local_files_only: bool = False,
 ) -> PretrainedTextTokenizer:
-    return build_condition_tokenizer(
+    return build_pretrained_tokenizer(
         repo_id=model_cfg.text_tokenizer_repo,
         add_bos=bool(model_cfg.text_add_bos),
         vocab_size=int(model_cfg.text_vocab_size),
@@ -472,7 +463,7 @@ def build_caption_tokenizer(
     *,
     local_files_only: bool = False,
 ) -> PretrainedTextTokenizer:
-    return build_condition_tokenizer(
+    return build_pretrained_tokenizer(
         repo_id=model_cfg.caption_tokenizer_repo_resolved,
         add_bos=model_cfg.caption_add_bos_resolved,
         vocab_size=model_cfg.caption_vocab_size_resolved,
@@ -843,11 +834,6 @@ def is_caption_only_parameter(key: str) -> bool:
     )
 
 
-def is_speaker_condition_embedding_parameter(key: str) -> bool:
-    key = _canonical_parameter_key(key)
-    return key.startswith("speaker_condition_embedding.")
-
-
 def is_speaker_only_parameter(key: str) -> bool:
     key = _canonical_parameter_key(key)
     return (
@@ -911,7 +897,6 @@ def validate_checkpoint_upgrade_partial_load(
     *,
     allow_caption_missing: bool,
     allow_duration_missing: bool,
-    allow_condition_embedding_missing: bool,
     allow_duration_extra: bool,
     allow_speaker_extra: bool,
 ) -> None:
@@ -933,10 +918,8 @@ def validate_checkpoint_upgrade_partial_load(
         )
 
     def _allowed_missing(key: str) -> bool:
-        return (
-            (allow_caption_missing and is_caption_only_parameter(key))
-            or (allow_duration_missing and is_duration_only_parameter(key))
-            or (allow_condition_embedding_missing and is_speaker_condition_embedding_parameter(key))
+        return (allow_caption_missing and is_caption_only_parameter(key)) or (
+            allow_duration_missing and is_duration_only_parameter(key)
         )
 
     unexpected_missing = [key for key in missing_keys if not _allowed_missing(key)]
@@ -1122,8 +1105,7 @@ def _apply_base_initialization(
         initialized_caption_embedding = False
         upgrade_caption = current_has_caption and not checkpoint_has_caption
         upgrade_duration = current_has_duration and not checkpoint_has_duration
-        upgrade_condition_embedding = int(model_cfg.speaker_condition_vocab_size) > 0
-        if upgrade_caption or upgrade_duration or drop_duration or upgrade_condition_embedding:
+        if upgrade_caption or upgrade_duration or drop_duration:
             missing_keys, skipped_shape, skipped_extra = load_model_state_partially(
                 raw_model,
                 init_state,
@@ -1135,7 +1117,6 @@ def _apply_base_initialization(
                 skipped_extra,
                 allow_caption_missing=upgrade_caption,
                 allow_duration_missing=upgrade_duration,
-                allow_condition_embedding_missing=upgrade_condition_embedding,
                 allow_duration_extra=drop_duration,
                 allow_speaker_extra=(
                     upgrade_caption and not model_cfg.use_speaker_condition_resolved
@@ -1453,99 +1434,6 @@ def load_fixed_split_indices(
     return sorted(train_indices), sorted(valid_indices)
 
 
-def build_condition_token_dropout_mask(
-    *,
-    condition_token_mask: torch.Tensor | None,
-    condition_token_family_ids: torch.Tensor | None,
-    train_cfg: TrainConfig,
-) -> tuple[torch.Tensor | None, dict[str, torch.Tensor]]:
-    """
-    条件 token 専用の3階層 dropout mask を作る。
-
-    Args:
-        condition_token_mask (torch.Tensor | None): 有効な条件 token の mask
-        condition_token_family_ids (torch.Tensor | None): sex/identity/style/emotion の family ID
-        train_cfg (TrainConfig): dropout 確率を含む学習設定
-
-    Returns:
-        tuple[torch.Tensor | None, dict[str, torch.Tensor]]: dropout mask と分岐カウンタ
-    """
-
-    if condition_token_mask is None or condition_token_mask.numel() == 0:
-        return None, {}
-    if condition_token_family_ids is None:
-        raise ValueError(
-            "condition_token_family_ids is required when condition tokens are present."
-        )
-
-    device = condition_token_mask.device
-    bsz = condition_token_mask.shape[0]
-    dropout_mask = torch.zeros_like(condition_token_mask, dtype=torch.bool)
-
-    all_drop = torch.rand(bsz, device=device) < float(train_cfg.condition_token_dropout_all)
-    dropout_mask = dropout_mask | (all_drop[:, None] & condition_token_mask)
-    condition_all_drop = all_drop.sum(dtype=torch.int64)
-
-    family_drop = torch.rand(bsz, device=device) < float(train_cfg.condition_token_dropout_family)
-    family_selector = torch.randint(1, 4, (bsz,), device=device)
-    family_mask = condition_token_family_ids == family_selector[:, None]
-    dropout_mask = dropout_mask | (family_drop[:, None] & family_mask & condition_token_mask)
-    condition_family_drop = family_drop.sum(dtype=torch.int64)
-
-    style_mask = condition_token_family_ids == 3
-    style_drop = torch.rand(condition_token_mask.shape, device=device) < float(
-        train_cfg.condition_token_dropout_style
-    )
-    style_drop = style_drop & style_mask & condition_token_mask
-    dropout_mask = dropout_mask | style_drop
-    return dropout_mask, {
-        "condition_all_drop": condition_all_drop,
-        "condition_family_drop": condition_family_drop,
-        "condition_style_drop": style_drop.sum(dtype=torch.int64),
-        "condition_kept": (condition_token_mask & ~dropout_mask).sum(dtype=torch.int64),
-    }
-
-
-def merge_condition_dropout_counters(
-    left: dict[str, torch.Tensor],
-    right: dict[str, torch.Tensor],
-) -> dict[str, torch.Tensor]:
-    """
-    gradient accumulation 中の条件 token dropout カウンタを合算する。
-
-    Args:
-        left (dict[str, torch.Tensor]): 既存カウンタ
-        right (dict[str, torch.Tensor]): 追加カウンタ
-
-    Returns:
-        dict[str, torch.Tensor]: 合算後のカウンタ
-    """
-
-    for key, value in right.items():
-        left[key] += value
-    return left
-
-
-def condition_embedding_grad_norm(model: torch.nn.Module) -> float:
-    """
-    PEFT wrapper 後の condition embedding 勾配ノルムを名前ベースで集計する。
-
-    Args:
-        model (torch.nn.Module): 学習中のモデル
-
-    Returns:
-        float: `speaker_condition_embedding` 配下の勾配ノルム
-    """
-
-    squared_norm = 0.0
-    for name, parameter in model.named_parameters():
-        if "speaker_condition_embedding" not in name or parameter.grad is None:
-            continue
-        grad = parameter.grad.detach().float()
-        squared_norm += float(torch.sum(grad * grad).item())
-    return squared_norm**0.5
-
-
 def run_validation(
     *,
     model,
@@ -1580,19 +1468,10 @@ def run_validation(
             duration_features = batch["duration_features"].to(device, non_blocking=True)
             ref_latent = None
             ref_mask = None
-            condition_token_ids = None
-            condition_token_mask = None
             if model_cfg.use_speaker_condition_resolved:
                 ref_latent = batch["ref_latent_patched"].to(device, non_blocking=True)
                 ref_mask = batch["ref_latent_mask_patched"].to(device, non_blocking=True)
                 has_speaker = batch["has_speaker"].to(device, non_blocking=True)
-                condition_token_ids = batch["condition_token_ids"].to(device, non_blocking=True)
-                condition_token_mask = batch["condition_token_mask"].to(device, non_blocking=True)
-                # An empty padded tensor means that this batch has no condition tokens.
-                # Passing it onward would incorrectly require a condition embedding table.
-                if condition_token_ids.shape[1] == 0:
-                    condition_token_ids = None
-                    condition_token_mask = None
             else:
                 has_speaker = None
 
@@ -1663,8 +1542,6 @@ def run_validation(
                         caption_input_ids=caption_ids,
                         caption_mask=caption_mask,
                         latent_mask=None,
-                        condition_token_ids=condition_token_ids,
-                        condition_token_mask=condition_token_mask,
                         duration_features=duration_features,
                         duration_has_speaker=duration_has_speaker,
                         duration_has_caption=duration_has_caption,
@@ -1683,8 +1560,6 @@ def run_validation(
                         caption_mask=caption_mask,
                         latent_mask=x_mask,
                         speaker_condition_dropout=speaker_condition_dropout,
-                        condition_token_ids=condition_token_ids,
-                        condition_token_mask=condition_token_mask,
                         duration_features=duration_features,
                         duration_has_speaker=duration_has_speaker,
                         duration_has_caption=duration_has_caption,
@@ -1703,8 +1578,6 @@ def run_validation(
                         caption_input_ids=caption_ids,
                         caption_mask=caption_mask,
                         latent_mask=x_mask,
-                        condition_token_ids=condition_token_ids,
-                        condition_token_mask=condition_token_mask,
                     )
                     duration_pred = None
 
@@ -1930,24 +1803,6 @@ def main() -> None:
         default=0.1,
         help="Probability of dropping speaker/reference conditioning during training.",
     )
-    parser.add_argument(
-        "--condition-token-dropout-all",
-        type=float,
-        default=None,
-        help="Probability of dropping all speaker condition tokens for a sample.",
-    )
-    parser.add_argument(
-        "--condition-token-dropout-family",
-        type=float,
-        default=None,
-        help="Probability of dropping one condition token family for a sample.",
-    )
-    parser.add_argument(
-        "--condition-token-dropout-style",
-        type=float,
-        default=None,
-        help="Probability of dropping each style/emotion condition token.",
-    )
     speaker_inversion_group = parser.add_mutually_exclusive_group()
     speaker_inversion_group.add_argument(
         "--speaker-inversion",
@@ -2008,22 +1863,6 @@ def main() -> None:
         default=0,
         help=("Run validation every N training steps. Set <=0 to disable validation."),
     )
-    parser.add_argument(
-        "--split-file-path",
-        default=None,
-        help="Optional JSONL/TSV file with fixed train/valid split assignments.",
-    )
-    parser.add_argument("--split-column", default=None)
-    parser.add_argument("--split-train-values", default=None)
-    parser.add_argument("--split-valid-values", default=None)
-    parser.add_argument(
-        "--weighted-sampler",
-        dest="use_weighted_sampler",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Use manifest sample weights with WeightedRandomSampler.",
-    )
-    parser.add_argument("--sample-weight-key", default=None)
     parser.add_argument(
         "--progress",
         action=argparse.BooleanOptionalAction,
@@ -2219,18 +2058,6 @@ def main() -> None:
         train_cfg = replace(train_cfg, caption_condition_dropout=args.caption_condition_dropout)
     if cli_provided(raw_argv, "--speaker-condition-dropout"):
         train_cfg = replace(train_cfg, speaker_condition_dropout=args.speaker_condition_dropout)
-    if cli_provided(raw_argv, "--condition-token-dropout-all"):
-        train_cfg = replace(train_cfg, condition_token_dropout_all=args.condition_token_dropout_all)
-    if cli_provided(raw_argv, "--condition-token-dropout-family"):
-        train_cfg = replace(
-            train_cfg,
-            condition_token_dropout_family=args.condition_token_dropout_family,
-        )
-    if cli_provided(raw_argv, "--condition-token-dropout-style"):
-        train_cfg = replace(
-            train_cfg,
-            condition_token_dropout_style=args.condition_token_dropout_style,
-        )
     if args.speaker_inversion_enabled is not None:
         train_cfg = replace(
             train_cfg,
@@ -2273,18 +2100,6 @@ def main() -> None:
         train_cfg = replace(train_cfg, valid_ratio=args.valid_ratio)
     if cli_provided(raw_argv, "--valid-every"):
         train_cfg = replace(train_cfg, valid_every=args.valid_every)
-    if cli_provided(raw_argv, "--split-file-path"):
-        train_cfg = replace(train_cfg, split_file_path=args.split_file_path)
-    if cli_provided(raw_argv, "--split-column"):
-        train_cfg = replace(train_cfg, split_column=args.split_column)
-    if cli_provided(raw_argv, "--split-train-values"):
-        train_cfg = replace(train_cfg, split_train_values=args.split_train_values)
-    if cli_provided(raw_argv, "--split-valid-values"):
-        train_cfg = replace(train_cfg, split_valid_values=args.split_valid_values)
-    if args.use_weighted_sampler is not None:
-        train_cfg = replace(train_cfg, use_weighted_sampler=bool(args.use_weighted_sampler))
-    if cli_provided(raw_argv, "--sample-weight-key"):
-        train_cfg = replace(train_cfg, sample_weight_key=args.sample_weight_key)
     if args.progress is not None:
         train_cfg = replace(train_cfg, progress=args.progress)
     if args.progress_all is not None:
@@ -2542,24 +2357,12 @@ def main() -> None:
         )
     if train_cfg.caption_warmup_steps < 0:
         raise ValueError(f"caption_warmup_steps must be >= 0, got {train_cfg.caption_warmup_steps}")
-    for name, value in (
-        ("condition_token_dropout_all", train_cfg.condition_token_dropout_all),
-        ("condition_token_dropout_family", train_cfg.condition_token_dropout_family),
-        ("condition_token_dropout_style", train_cfg.condition_token_dropout_style),
-    ):
-        if not (0.0 <= float(value) <= 1.0):
-            raise ValueError(f"{name} must be in [0, 1], got {value}")
     if train_cfg.dataloader_prefetch_factor <= 0:
         raise ValueError(
             f"dataloader_prefetch_factor must be > 0, got {train_cfg.dataloader_prefetch_factor}"
         )
     if not (0.0 <= train_cfg.valid_ratio < 1.0):
         raise ValueError(f"valid_ratio must be in [0, 1), got {train_cfg.valid_ratio}")
-    if train_cfg.split_file_path is not None and str(train_cfg.split_file_path).strip() != "":
-        if train_cfg.valid_ratio > 0.0:
-            raise ValueError("valid_ratio must be 0 when split_file_path is set.")
-        if train_cfg.valid_every <= 0:
-            raise ValueError("valid_every must be > 0 when split_file_path is set.")
     if train_cfg.valid_every < 0:
         raise ValueError(f"valid_every must be >= 0, got {train_cfg.valid_every}")
     if train_cfg.valid_ratio > 0.0 and train_cfg.valid_every <= 0:
@@ -2693,38 +2496,7 @@ def main() -> None:
     )
     train_dataset = full_dataset
     valid_dataset = None
-    if train_cfg.split_file_path is not None and str(train_cfg.split_file_path).strip() != "":
-        train_indices, valid_indices = load_fixed_split_indices(
-            split_file_path=train_cfg.split_file_path,
-            split_column=train_cfg.split_column,
-            train_values=train_cfg.split_train_values,
-            valid_values=train_cfg.split_valid_values,
-        )
-        train_dataset = LatentTextDataset(
-            manifest_path=train_cfg.manifest_path,
-            latent_dim=model_cfg.latent_dim,
-            max_latent_steps=train_cfg.max_latent_steps,
-            subset_indices=train_indices,
-            enable_caption_condition=model_cfg.use_caption_condition,
-            enable_speaker_condition=model_cfg.use_speaker_condition_resolved,
-            manifest_index=full_dataset.manifest_index,
-        )
-        valid_dataset = LatentTextDataset(
-            manifest_path=train_cfg.manifest_path,
-            latent_dim=model_cfg.latent_dim,
-            max_latent_steps=train_cfg.max_latent_steps,
-            subset_indices=valid_indices,
-            enable_caption_condition=model_cfg.use_caption_condition,
-            enable_speaker_condition=model_cfg.use_speaker_condition_resolved,
-            manifest_index=full_dataset.manifest_index,
-        )
-        if is_main_process:
-            print(
-                "Fixed validation split enabled: "
-                f"train={len(train_dataset)} valid={len(valid_dataset)} "
-                f"split_file={train_cfg.split_file_path}"
-            )
-    elif train_cfg.valid_ratio > 0.0:
+    if train_cfg.valid_ratio > 0.0:
         train_indices, valid_indices = split_train_valid_indices(
             num_samples=len(full_dataset),
             valid_ratio=train_cfg.valid_ratio,
@@ -2795,10 +2567,7 @@ def main() -> None:
     if train_cfg.timestep_stratified and is_main_process:
         print("Using stratified logit-normal timestep sampling.")
     train_sampler = None
-    weighted_sampler = None
     if distributed:
-        if train_cfg.use_weighted_sampler:
-            raise ValueError("use_weighted_sampler is only supported for single-GPU training.")
         train_sampler = DistributedSampler(
             train_dataset,
             num_replicas=world_size,
@@ -2806,23 +2575,6 @@ def main() -> None:
             shuffle=True,
             drop_last=drop_last,
         )
-    elif train_cfg.use_weighted_sampler:
-        sample_weights = torch.tensor(
-            train_dataset.sample_weights(key=train_cfg.sample_weight_key),
-            dtype=torch.double,
-        )
-        if torch.any(sample_weights <= 0):
-            raise ValueError("sample weights must be positive for WeightedRandomSampler.")
-        weighted_sampler = WeightedRandomSampler(
-            weights=sample_weights,
-            num_samples=len(sample_weights),
-            replacement=True,
-        )
-        if is_main_process:
-            print(
-                "WeightedRandomSampler enabled: "
-                f"samples={len(sample_weights)} key={train_cfg.sample_weight_key!r}"
-            )
     dataloader_common_kwargs = {
         "batch_size": train_cfg.batch_size,
         "num_workers": train_cfg.num_workers,
@@ -2838,8 +2590,8 @@ def main() -> None:
         print("warning: dataloader_persistent_workers=True is ignored because num_workers=0.")
     loader = DataLoader(
         dataset=train_dataset,
-        shuffle=(train_sampler is None and weighted_sampler is None),
-        sampler=train_sampler if train_sampler is not None else weighted_sampler,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         drop_last=drop_last,
         **dataloader_common_kwargs,
     )
@@ -3048,9 +2800,6 @@ def main() -> None:
                 train_cfg.text_condition_dropout > 0.0
                 or train_cfg.speaker_condition_dropout > 0.0
                 or (model_cfg.use_caption_condition and train_cfg.caption_condition_dropout > 0.0)
-                or train_cfg.condition_token_dropout_all > 0.0
-                or train_cfg.condition_token_dropout_family > 0.0
-                or train_cfg.condition_token_dropout_style > 0.0
             )
             if (
                 has_partial_or_no_speaker_labels
@@ -3126,21 +2875,6 @@ def main() -> None:
 
     try:
         model.train()
-        # 学習開始前の adapter を checkpoint_0000000 として保存する
-        ## 条件感度 (no-token vs token の出力差) の「初期比」の分母を、測定側の再現初期化でなく
-        ## 学習の実初期値そのもので測れるようにするため。resume 時 (step > 0) は保存しない
-        if step == 0 and is_main_process:
-            save_checkpoint(
-                _periodic_checkpoint_path(output_dir, step, train_cfg),
-                raw_model,
-                optimizer,
-                scheduler,
-                step,
-                model_cfg,
-                train_cfg,
-                base_init=base_init,
-                lora_metadata=lora_metadata,
-            )
         if scheduler is not None and step == 0:
             # Ensure the very first optimizer step uses warmup-scaled LR.
             scheduler.step()
@@ -3155,15 +2889,6 @@ def main() -> None:
             device=device,
             dtype=torch.float64,
         )
-        accum_condition_dropout_counters = {
-            key: torch.zeros((), device=device, dtype=torch.int64)
-            for key in (
-                "condition_all_drop",
-                "condition_family_drop",
-                "condition_style_drop",
-                "condition_kept",
-            )
-        }
         epoch = 0
         while step < train_cfg.max_steps:
             if train_sampler is not None:
@@ -3184,32 +2909,10 @@ def main() -> None:
                 duration_features = batch["duration_features"].to(device, non_blocking=True)
                 ref_latent = None
                 ref_mask = None
-                condition_token_ids = None
-                condition_token_mask = None
-                condition_token_family_ids = None
-                condition_token_dropout_mask = None
                 if raw_model.cfg.use_speaker_condition_resolved:
                     ref_latent = batch["ref_latent_patched"].to(device, non_blocking=True)
                     ref_mask = batch["ref_latent_mask_patched"].to(device, non_blocking=True)
                     has_speaker = batch["has_speaker"].to(device, non_blocking=True)
-                    condition_token_ids = batch["condition_token_ids"].to(
-                        device,
-                        non_blocking=True,
-                    )
-                    condition_token_mask = batch["condition_token_mask"].to(
-                        device,
-                        non_blocking=True,
-                    )
-                    condition_token_family_ids = batch["condition_token_family_ids"].to(
-                        device,
-                        non_blocking=True,
-                    )
-                    # An empty padded tensor means that this batch has no condition tokens.
-                    # Passing it onward would incorrectly require a condition embedding table.
-                    if condition_token_ids.shape[1] == 0:
-                        condition_token_ids = None
-                        condition_token_mask = None
-                        condition_token_family_ids = None
                 else:
                     has_speaker = None
 
@@ -3300,17 +3003,6 @@ def main() -> None:
                     ):
                         ref_mask = ref_mask & use_speaker[:, None]
                         ref_latent = ref_latent * use_speaker[:, None, None].to(ref_latent.dtype)
-                    condition_token_dropout_mask, condition_dropout_counters = (
-                        build_condition_token_dropout_mask(
-                            condition_token_mask=condition_token_mask,
-                            condition_token_family_ids=condition_token_family_ids,
-                            train_cfg=train_cfg,
-                        )
-                    )
-                    accum_condition_dropout_counters = merge_condition_dropout_counters(
-                        accum_condition_dropout_counters,
-                        condition_dropout_counters,
-                    )
 
                 should_step = (accum_micro_steps % accum_steps) == 0
                 sync_context = model.no_sync() if distributed and not should_step else nullcontext()
@@ -3331,9 +3023,6 @@ def main() -> None:
                                 caption_input_ids=caption_ids,
                                 caption_mask=caption_mask,
                                 latent_mask=None,
-                                condition_token_ids=condition_token_ids,
-                                condition_token_mask=condition_token_mask,
-                                condition_token_dropout_mask=condition_token_dropout_mask,
                                 duration_features=duration_features,
                                 duration_has_speaker=duration_has_speaker,
                                 duration_has_caption=duration_has_caption,
@@ -3353,9 +3042,6 @@ def main() -> None:
                                 latent_mask=x_mask,
                                 text_condition_dropout=text_cond_drop,
                                 speaker_condition_dropout=speaker_drop_for_model,
-                                condition_token_ids=condition_token_ids,
-                                condition_token_mask=condition_token_mask,
-                                condition_token_dropout_mask=condition_token_dropout_mask,
                                 caption_condition_dropout=caption_drop_for_model,
                                 duration_features=duration_features,
                                 duration_has_speaker=duration_has_speaker,
@@ -3376,9 +3062,6 @@ def main() -> None:
                                 speaker_condition_dropout=speaker_drop_for_model
                                 if train_cfg.speaker_inversion_enabled
                                 else None,
-                                condition_token_ids=condition_token_ids,
-                                condition_token_mask=condition_token_mask,
-                                condition_token_dropout_mask=condition_token_dropout_mask,
                                 caption_condition_dropout=None,
                             )
                             duration_pred = None
@@ -3446,32 +3129,17 @@ def main() -> None:
                 if not should_step:
                     continue
 
+                should_log_step = (step + 1) % train_cfg.log_every == 0
                 step_loss = accum_loss / float(accum_steps)
                 step_rf_loss = accum_rf_loss / float(accum_steps)
                 step_duration_loss = accum_duration_loss / float(accum_steps)
                 step_duration_mae_frames = accum_duration_mae_frames / float(accum_steps)
                 step_duration_group_totals = accum_duration_group_totals.clone()
-                should_log_step = (step + 1) % train_cfg.log_every == 0
-                step_condition_dropout_counters: dict[str, int] = {}
-                if should_log_step:
-                    counter_names = tuple(accum_condition_dropout_counters)
-                    counter_values = torch.stack(
-                        [accum_condition_dropout_counters[name] for name in counter_names]
-                    ).tolist()
-                    step_condition_dropout_counters = dict(
-                        zip(counter_names, (int(value) for value in counter_values), strict=True)
-                    )
                 accum_loss.zero_()
                 accum_rf_loss.zero_()
                 accum_duration_loss.zero_()
                 accum_duration_mae_frames.zero_()
                 accum_duration_group_totals.zero_()
-                for counter in accum_condition_dropout_counters.values():
-                    counter.zero_()
-
-                condition_grad_norm = (
-                    condition_embedding_grad_norm(raw_model) if should_log_step else 0.0
-                )
                 torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip_norm)
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
@@ -3508,16 +3176,6 @@ def main() -> None:
                         "rf": rf_loss_value,
                         "lr": lr_value,
                     }
-                    progress_metrics["cond_all"] = float(
-                        step_condition_dropout_counters["condition_all_drop"]
-                    )
-                    progress_metrics["cond_family"] = float(
-                        step_condition_dropout_counters["condition_family_drop"]
-                    )
-                    progress_metrics["cond_style"] = float(
-                        step_condition_dropout_counters["condition_style_drop"]
-                    )
-                    progress_metrics["cond_grad"] = condition_grad_norm
                     if raw_model.cfg.use_duration_predictor:
                         progress_metrics["dur"] = duration_loss_value
                         progress_metrics["dur_mae"] = duration_mae_frames_value
@@ -3555,23 +3213,10 @@ def main() -> None:
                                 )
                                 if group_suffix:
                                     message += f" {group_suffix}"
-                            message += (
-                                " "
-                                f"cond_all={step_condition_dropout_counters['condition_all_drop']} "
-                                f"cond_family={step_condition_dropout_counters['condition_family_drop']} "
-                                f"cond_style={step_condition_dropout_counters['condition_style_drop']} "
-                                f"cond_kept={step_condition_dropout_counters['condition_kept']}"
-                                f" cond_grad={condition_grad_norm:.6e}"
-                            )
                             progress.write(f"{message} lr={lr_value:.3e}")
                         else:
                             progress.write(
                                 f"step={step} loss={loss_value:.6f} rf={rf_loss_value:.6f} "
-                                f"cond_all={step_condition_dropout_counters['condition_all_drop']} "
-                                f"cond_family={step_condition_dropout_counters['condition_family_drop']} "
-                                f"cond_style={step_condition_dropout_counters['condition_style_drop']} "
-                                f"cond_kept={step_condition_dropout_counters['condition_kept']} "
-                                f"cond_grad={condition_grad_norm:.6e} "
                                 f"lr={lr_value:.3e}"
                             )
                         if wandb_run is not None:
@@ -3579,19 +3224,6 @@ def main() -> None:
                                 "train/loss": loss_value,
                                 "train/rf_loss": rf_loss_value,
                                 "train/lr": lr_value,
-                                "train/condition_all_drop": step_condition_dropout_counters[
-                                    "condition_all_drop"
-                                ],
-                                "train/condition_family_drop": step_condition_dropout_counters[
-                                    "condition_family_drop"
-                                ],
-                                "train/condition_style_drop": step_condition_dropout_counters[
-                                    "condition_style_drop"
-                                ],
-                                "train/condition_kept": step_condition_dropout_counters[
-                                    "condition_kept"
-                                ],
-                                "train/condition_embedding_grad_norm": condition_grad_norm,
                             }
                             if raw_model.cfg.use_duration_predictor:
                                 metrics["train/duration_loss"] = duration_loss_value
@@ -3803,9 +3435,6 @@ def main() -> None:
             )
             if wandb_run is not None:
                 wandb_run.summary["train/final_step"] = step
-            if device.type == "cuda":
-                max_cuda_memory_mib = torch.cuda.max_memory_allocated(device) / (1024**2)
-                progress.write(f"CUDA max memory allocated: {max_cuda_memory_mib:.1f} MiB")
             progress.write(f"Training finished at step={step}.")
     finally:
         if progress is not None:

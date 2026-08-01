@@ -304,7 +304,6 @@ class SamplingRequest:
     cfg_scale_text: float = 3.0
     cfg_scale_caption: float = 3.0
     cfg_scale_speaker: float = 5.0
-    cfg_scale_condition: float = 0.0
     cfg_guidance_mode: str = "independent"
     cfg_scale: float | None = None
     cfg_min_t: float = 0.5
@@ -327,8 +326,6 @@ class SamplingRequest:
     tail_std_threshold: float = 0.05
     tail_mean_threshold: float = 0.1
     lora_adapter: str | None = None
-    speaker_condition_tokens: list[str] | None = None
-    condition_token_scales: dict[str, float] | None = None
     waveex: WaveExConfig | None = None
     initial_noise: torch.Tensor | None = None
     initial_noise_offset: int = 0
@@ -391,9 +388,6 @@ class _ReferenceCacheKey:
     latent_patch_size: int
     speaker_patch_size: int
     lora_adapter: str | None
-    condition_token_ids: tuple[int, ...] = ()
-    condition_token_scales: tuple[float, ...] = ()
-    condition_vocabulary_hash: str | None = None
     # パディング設定もキャッシュキーに含め、異なるパディング条件でキャッシュ混在を防ぐ
     speaker_ref_fixed_length: int | None = None
     speaker_ref_bucket_sizes: tuple[int, ...] | None = None
@@ -418,29 +412,12 @@ class _CaptionCacheKey:
     model_device: str
     model_dtype: str
     lora_adapter: str | None
-    condition_token_ids: tuple[int, ...] = ()
-    condition_token_scales: tuple[float, ...] = ()
-    condition_vocabulary_hash: str | None = None
 
 
 @dataclass(frozen=True)
 class _CaptionCondition:
     state: torch.Tensor
     mask: torch.Tensor
-
-
-@dataclass(frozen=True)
-class _ConditionVocabulary:
-    token_to_id: dict[str, int]
-    vocabulary_hash: str
-
-
-@dataclass(frozen=True)
-class _ResolvedConditionTokens:
-    token_names: tuple[str, ...]
-    token_ids: tuple[int, ...]
-    token_scales: tuple[float, ...]
-    vocabulary_hash: str
 
 
 def _maybe_compile_inference_model(
@@ -553,11 +530,9 @@ def resolve_cfg_scales(
     cfg_scale_caption: float,
     cfg_scale_speaker: float,
     cfg_scale: float | None,
-    cfg_scale_condition: float = 0.0,
     use_caption_condition: bool = True,
     use_speaker_condition: bool = True,
-    use_token_condition: bool = False,
-) -> tuple[float, float, float, float, list[str]]:
+) -> tuple[float, float, float, list[str]]:
     """
     Normalize/validate CFG scales for guidance mode.
     """
@@ -565,13 +540,11 @@ def resolve_cfg_scales(
     text_val = float(cfg_scale_text)
     caption_val = float(cfg_scale_caption)
     speaker_val = float(cfg_scale_speaker)
-    condition_val = float(cfg_scale_condition)
 
     if cfg_scale is not None:
         text_val = float(cfg_scale)
         caption_val = float(cfg_scale)
         speaker_val = float(cfg_scale)
-        condition_val = float(cfg_scale)
     if not use_speaker_condition:
         if speaker_val > 0.0:
             messages.append(
@@ -579,25 +552,17 @@ def resolve_cfg_scales(
                 "ignoring cfg_scale_speaker."
             )
         speaker_val = 0.0
-    if not use_token_condition:
-        if condition_val > 0.0:
-            messages.append(
-                "info: condition token guidance is disabled for this request; "
-                "ignoring cfg_scale_condition."
-            )
-        condition_val = 0.0
-
     mode = str(cfg_guidance_mode).strip().lower()
-    enabled_vals = [value for value in (text_val, speaker_val, condition_val) if value > 0.0]
+    enabled_vals = [value for value in (text_val, speaker_val) if value > 0.0]
     if use_caption_condition and caption_val > 0.0:
         enabled_vals.append(caption_val)
     if mode == "joint" and enabled_vals and (max(enabled_vals) - min(enabled_vals) > 1e-6):
         raise ValueError(
-            "cfg_guidance_mode='joint' requires equal enabled cfg_scale_text/cfg_scale_caption/cfg_scale_speaker/cfg_scale_condition, "
+            "cfg_guidance_mode='joint' requires equal enabled cfg_scale_text/cfg_scale_caption/cfg_scale_speaker, "
             "or set cfg_scale."
         )
 
-    return text_val, caption_val, speaker_val, condition_val, messages
+    return text_val, caption_val, speaker_val, messages
 
 
 def _load_torch_checkpoint_payload(path: Path) -> dict[str, Any]:
@@ -771,7 +736,6 @@ class InferenceRuntime:
             OrderedDict()
         )
         self._caption_condition_cache_max_entries = 64
-        self._condition_vocabulary_cache: dict[str, _ConditionVocabulary] = {}
 
     @classmethod
     def from_key(cls, key: RuntimeKey) -> InferenceRuntime:
@@ -928,132 +892,6 @@ class InferenceRuntime:
         digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:16]
         return f"runtime_{digest}"
 
-    def _load_condition_vocabulary(self, adapter_path: str) -> _ConditionVocabulary:
-        cached = self._condition_vocabulary_cache.get(adapter_path)
-        if cached is not None:
-            return cached
-
-        metadata_path = Path(adapter_path) / "irodori_lora_metadata.json"
-        if not metadata_path.is_file():
-            raise ValueError(
-                "Condition tokens require irodori_lora_metadata.json in the LoRA adapter directory."
-            )
-        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-        condition_vocabulary = payload.get("condition_vocabulary")
-        if not isinstance(condition_vocabulary, dict):
-            raise ValueError(f"LoRA metadata is missing condition_vocabulary: {metadata_path}")
-        token_to_id_raw = condition_vocabulary.get("token_to_id")
-        if not isinstance(token_to_id_raw, dict):
-            raise ValueError(
-                f"LoRA condition_vocabulary.token_to_id must be an object: {metadata_path}"
-            )
-        token_to_id = {str(token): int(token_id) for token, token_id in token_to_id_raw.items()}
-        raw_hash = payload.get("condition_vocabulary_hash") or condition_vocabulary.get("sha256")
-        if raw_hash is None:
-            # metadata に hash がない古い adapter でも、キャッシュ分離に使える安定 hash を作る
-            encoded = json.dumps(token_to_id, ensure_ascii=False, sort_keys=True).encode("utf-8")
-            vocabulary_hash = hashlib.sha256(encoded).hexdigest()
-        else:
-            vocabulary_hash = str(raw_hash)
-        vocabulary = _ConditionVocabulary(
-            token_to_id=token_to_id,
-            vocabulary_hash=vocabulary_hash,
-        )
-        self._condition_vocabulary_cache[adapter_path] = vocabulary
-        return vocabulary
-
-    def _ensure_condition_embedding_for_adapter(self, adapter_path: str) -> None:
-        if not (Path(adapter_path) / "irodori_lora_metadata.json").is_file():
-            return
-        vocabulary = self._load_condition_vocabulary(adapter_path)
-        vocab_size = len(vocabulary.token_to_id)
-        if vocab_size <= 0:
-            return
-        current_embedding = getattr(self.model, "speaker_condition_embedding", None)
-        if current_embedding is not None:
-            if int(current_embedding.num_embeddings) != int(vocab_size):
-                raise ValueError(
-                    "LoRA condition vocabulary size mismatch: "
-                    f"model={int(current_embedding.num_embeddings)} adapter={vocab_size}"
-                )
-            return
-
-        # base checkpoint は条件 embedding を持たないため、PEFT が modules_to_save を復元する前に器を作る
-        self.model.speaker_condition_embedding = torch.nn.Embedding(
-            int(vocab_size),
-            int(self.model_cfg.speaker_dim),
-        )
-        self.model.cfg.speaker_condition_vocab_size = int(vocab_size)
-        self.model.cfg.speaker_condition_vocab_hash = vocabulary.vocabulary_hash
-        self.model_cfg.speaker_condition_vocab_size = int(vocab_size)
-        self.model_cfg.speaker_condition_vocab_hash = vocabulary.vocabulary_hash
-        self.model = _move_inference_module(
-            self.model,
-            device=self.model_device,
-            dtype=self._model_dtype,
-        )
-
-    def _resolve_condition_tokens(
-        self,
-        req: SamplingRequest,
-        *,
-        lora_adapter: str | None,
-    ) -> _ResolvedConditionTokens | None:
-        raw_tokens = req.speaker_condition_tokens
-        if raw_tokens is None or len(raw_tokens) == 0:
-            if req.condition_token_scales:
-                raise ValueError(
-                    "condition_token_scales cannot be specified without speaker_condition_tokens."
-                )
-            return None
-        if lora_adapter is None:
-            raise ValueError("speaker_condition_tokens require a LoRA adapter.")
-        if self.model_cfg.use_speaker_condition_resolved is False:
-            raise ValueError("speaker_condition_tokens require speaker conditioning support.")
-
-        vocabulary = self._load_condition_vocabulary(lora_adapter)
-        token_names = tuple(str(token).strip() for token in raw_tokens)
-        if any(token == "" for token in token_names):
-            raise ValueError("speaker_condition_tokens must not contain empty token names.")
-
-        token_ids: list[int] = []
-        unknown_tokens: list[str] = []
-        for token_name in token_names:
-            token_id = vocabulary.token_to_id.get(token_name)
-            if token_id is None:
-                unknown_tokens.append(token_name)
-                continue
-            token_ids.append(int(token_id))
-        if unknown_tokens:
-            allowed = ", ".join(sorted(vocabulary.token_to_id))
-            raise ValueError(
-                "Unknown speaker condition token(s): "
-                f"{', '.join(unknown_tokens)}. Allowed tokens: {allowed}"
-            )
-
-        scale_map = req.condition_token_scales or {}
-        unknown_scale_tokens = sorted(
-            str(token) for token in scale_map if str(token) not in token_names
-        )
-        if unknown_scale_tokens:
-            raise ValueError(
-                "condition_token_scales contains token(s) not present in speaker_condition_tokens: "
-                f"{', '.join(unknown_scale_tokens)}"
-            )
-        token_scales: list[float] = []
-        for token_name in token_names:
-            scale = float(scale_map.get(token_name, 1.0))
-            if not math.isfinite(scale):
-                raise ValueError(f"condition token scale must be finite: {token_name}")
-            token_scales.append(scale)
-
-        return _ResolvedConditionTokens(
-            token_names=token_names,
-            token_ids=tuple(token_ids),
-            token_scales=tuple(token_scales),
-            vocabulary_hash=vocabulary.vocabulary_hash,
-        )
-
     def _prepare_lora_for_request(
         self,
         adapter_path: str | None,
@@ -1096,8 +934,6 @@ class InferenceRuntime:
         if self.key.compile_model:
             raise RuntimeError("Dynamic LoRA loading is not compatible with compile_model=True.")
 
-        self._ensure_condition_embedding_for_adapter(resolved_path)
-
         adapter_name = self._lora_adapter_names.get(resolved_path)
         if adapter_name is None:
             adapter_name = self._adapter_name_for_path(resolved_path)
@@ -1129,7 +965,6 @@ class InferenceRuntime:
         self,
         req: SamplingRequest,
         *,
-        resolved_condition_tokens: _ResolvedConditionTokens | None,
         lora_adapter: str | None,
     ) -> _ReferenceCacheKey | None:
         source_type: str
@@ -1158,15 +993,6 @@ class InferenceRuntime:
             latent_patch_size=int(self.model_cfg.latent_patch_size),
             speaker_patch_size=int(self.model_cfg.speaker_patch_size),
             lora_adapter=lora_adapter,
-            condition_token_ids=()
-            if resolved_condition_tokens is None
-            else resolved_condition_tokens.token_ids,
-            condition_token_scales=()
-            if resolved_condition_tokens is None
-            else resolved_condition_tokens.token_scales,
-            condition_vocabulary_hash=None
-            if resolved_condition_tokens is None
-            else resolved_condition_tokens.vocabulary_hash,
             speaker_ref_fixed_length=req.speaker_ref_fixed_length,
             speaker_ref_bucket_sizes=(
                 tuple(req.speaker_ref_bucket_sizes)
@@ -1272,10 +1098,6 @@ class InferenceRuntime:
             raise RuntimeError("Speaker conditioning is disabled for this checkpoint.")
 
         lora_adapter = self._resolve_lora_adapter_path(request.lora_adapter)
-        resolved_condition_tokens = self._resolve_condition_tokens(
-            request,
-            lora_adapter=lora_adapter,
-        )
         messages: list[str] = []
         # 通常合成と同じロック内で計算し、CUDA のモデル実行と参照読込を直列化する
         with self._infer_lock, torch.inference_mode():
@@ -1291,7 +1113,6 @@ class InferenceRuntime:
             else:
                 ref_latent, ref_mask = self._load_reference_latent(
                     req=request,
-                    resolved_condition_tokens=resolved_condition_tokens,
                     lora_adapter=lora_adapter,
                     batch_size=1,
                     messages=messages,
@@ -1309,7 +1130,6 @@ class InferenceRuntime:
                 # 呼び出し側が speaker_state を保持するため、大きい参照 latent はランタイムに残さない
                 cache_key = self._reference_cache_key(
                     request,
-                    resolved_condition_tokens=resolved_condition_tokens,
                     lora_adapter=lora_adapter,
                 )
                 if cache_key is not None:
@@ -1334,7 +1154,6 @@ class InferenceRuntime:
         self,
         *,
         req: SamplingRequest,
-        resolved_condition_tokens: _ResolvedConditionTokens | None,
         lora_adapter: str | None,
         ref_latent: torch.Tensor | None,
         ref_mask: torch.Tensor | None,
@@ -1348,7 +1167,6 @@ class InferenceRuntime:
 
         cache_key = self._reference_cache_key(
             req,
-            resolved_condition_tokens=resolved_condition_tokens,
             lora_adapter=lora_adapter,
         )
         cached_state, cached_mask = self._get_cached_speaker_condition(
@@ -1384,7 +1202,6 @@ class InferenceRuntime:
         caption_text: str,
         caption_max_len: int,
         *,
-        resolved_condition_tokens: _ResolvedConditionTokens | None,
         lora_adapter: str | None,
     ) -> _CaptionCacheKey:
         """
@@ -1406,15 +1223,6 @@ class InferenceRuntime:
             model_device=str(self.model_device),
             model_dtype=str(self._model_dtype),
             lora_adapter=lora_adapter,
-            condition_token_ids=()
-            if resolved_condition_tokens is None
-            else resolved_condition_tokens.token_ids,
-            condition_token_scales=()
-            if resolved_condition_tokens is None
-            else resolved_condition_tokens.token_scales,
-            condition_vocabulary_hash=None
-            if resolved_condition_tokens is None
-            else resolved_condition_tokens.vocabulary_hash,
         )
 
     def _get_cached_caption_condition(
@@ -1465,7 +1273,6 @@ class InferenceRuntime:
         self,
         *,
         req: SamplingRequest,
-        resolved_condition_tokens: _ResolvedConditionTokens | None,
         lora_adapter: str | None,
         caption_text: str,
         caption_ids: torch.Tensor,
@@ -1533,7 +1340,6 @@ class InferenceRuntime:
             req,
             caption_text,
             caption_max_len,
-            resolved_condition_tokens=resolved_condition_tokens,
             lora_adapter=lora_adapter,
         )
         cached_state, cached_mask = self._get_cached_caption_condition(
@@ -1561,7 +1367,6 @@ class InferenceRuntime:
         self,
         *,
         req: SamplingRequest,
-        resolved_condition_tokens: _ResolvedConditionTokens | None,
         lora_adapter: str | None,
         batch_size: int,
         messages: list[str],
@@ -1597,7 +1402,6 @@ class InferenceRuntime:
 
         cache_key = self._reference_cache_key(
             req,
-            resolved_condition_tokens=resolved_condition_tokens,
             lora_adapter=lora_adapter,
         )
         cached_latent, cached_mask = self._get_cached_reference_condition(
@@ -1874,26 +1678,19 @@ class InferenceRuntime:
             )
 
         lora_adapter = self._resolve_lora_adapter_path(req.lora_adapter)
-        resolved_condition_tokens = self._resolve_condition_tokens(
-            req,
-            lora_adapter=lora_adapter,
-        )
         (
             cfg_scale_text,
             cfg_scale_caption,
             cfg_scale_speaker,
-            cfg_scale_condition,
             scale_messages,
         ) = resolve_cfg_scales(
             cfg_guidance_mode=cfg_mode,
             cfg_scale_text=req.cfg_scale_text,
             cfg_scale_caption=req.cfg_scale_caption,
             cfg_scale_speaker=req.cfg_scale_speaker,
-            cfg_scale_condition=req.cfg_scale_condition,
             cfg_scale=req.cfg_scale,
             use_caption_condition=has_caption_text,
             use_speaker_condition=use_speaker_for_request,
-            use_token_condition=resolved_condition_tokens is not None,
         )
         messages.extend(scale_messages)
         for msg in scale_messages:
@@ -1930,21 +1727,6 @@ class InferenceRuntime:
             _log(f"[runtime] tokenize_text: {stage_sec * 1000.0:.1f} ms")
             text_ids = text_ids.to(self.model_device)
             text_mask = text_mask.to(self.model_device)
-            condition_token_ids = None
-            condition_token_mask = None
-            condition_token_scales = None
-            if resolved_condition_tokens is not None:
-                condition_token_ids = torch.tensor(
-                    [list(resolved_condition_tokens.token_ids)] * num_candidates,
-                    dtype=torch.long,
-                    device=self.model_device,
-                )
-                condition_token_mask = torch.ones_like(condition_token_ids, dtype=torch.bool)
-                condition_token_scales = torch.tensor(
-                    [list(resolved_condition_tokens.token_scales)] * num_candidates,
-                    dtype=self._model_dtype,
-                    device=self.model_device,
-                )
             caption_ids = None
             caption_mask = None
             caption_state_override = None
@@ -1968,7 +1750,6 @@ class InferenceRuntime:
                     caption_state_override, caption_mask_override = (
                         self._load_cached_caption_condition(
                             req=req,
-                            resolved_condition_tokens=resolved_condition_tokens,
                             lora_adapter=lora_adapter,
                             caption_text=caption_text,
                             caption_ids=caption_ids,
@@ -2041,7 +1822,6 @@ class InferenceRuntime:
                     cached_speaker_mask,
                 ) = self._load_cached_speaker_condition(
                     req=req,
-                    resolved_condition_tokens=resolved_condition_tokens,
                     lora_adapter=lora_adapter,
                     ref_latent=None,
                     ref_mask=None,
@@ -2051,7 +1831,6 @@ class InferenceRuntime:
                 if cached_speaker_state is None or cached_speaker_mask is None:
                     ref_latent, ref_mask = self._load_reference_latent(
                         req=req,
-                        resolved_condition_tokens=resolved_condition_tokens,
                         lora_adapter=lora_adapter,
                         batch_size=num_candidates,
                         messages=messages,
@@ -2061,7 +1840,6 @@ class InferenceRuntime:
                         cached_speaker_mask,
                     ) = self._load_cached_speaker_condition(
                         req=req,
-                        resolved_condition_tokens=resolved_condition_tokens,
                         lora_adapter=lora_adapter,
                         ref_latent=ref_latent,
                         ref_mask=ref_mask,
@@ -2086,7 +1864,6 @@ class InferenceRuntime:
 
             hop_length = int(self.codec.model.hop_length)
             encoded_conditions = None
-            encoded_conditions_without_condition_tokens = None
             if manual_seconds is not None:
                 clamped_seconds = min(max_seconds, max(min_seconds, manual_seconds))
                 if clamped_seconds != manual_seconds:
@@ -2120,24 +1897,7 @@ class InferenceRuntime:
                     caption_state_override=caption_state_override,
                     caption_mask_override=caption_mask_override,
                     speaker_uncond_mode=req.speaker_uncond_mode,
-                    condition_token_ids=condition_token_ids,
-                    condition_token_mask=condition_token_mask,
-                    condition_token_scales=condition_token_scales,
                 )
-                if condition_token_ids is not None and cfg_scale_condition > 0.0:
-                    encoded_conditions_without_condition_tokens = self.model.encode_conditions(
-                        text_input_ids=text_ids,
-                        text_mask=text_mask,
-                        ref_latent=ref_latent,
-                        ref_mask=ref_mask,
-                        caption_input_ids=caption_ids,
-                        caption_mask=caption_mask,
-                        speaker_state_override=speaker_state_override,
-                        speaker_mask_override=speaker_mask_override,
-                        caption_state_override=caption_state_override,
-                        caption_mask_override=caption_mask_override,
-                        speaker_uncond_mode=req.speaker_uncond_mode,
-                    )
                 stage_sec = _measure_end(self.model_device, t0)
                 stage_timings.append(("encode_conditions", stage_sec))
                 _log(f"[runtime] encode_conditions: {stage_sec * 1000.0:.1f} ms")
@@ -2163,9 +1923,6 @@ class InferenceRuntime:
                     ref_mask=ref_mask,
                     caption_input_ids=caption_ids,
                     caption_mask=caption_mask,
-                    condition_token_ids=condition_token_ids,
-                    condition_token_mask=condition_token_mask,
-                    condition_token_scales=condition_token_scales,
                     speaker_state_override=speaker_state_override,
                     speaker_mask_override=speaker_mask_override,
                     caption_state_override=caption_state_override,
@@ -2180,20 +1937,6 @@ class InferenceRuntime:
                     _duration_caption_state,
                     _duration_caption_mask,
                 ) = encoded_conditions
-                if condition_token_ids is not None and cfg_scale_condition > 0.0:
-                    encoded_conditions_without_condition_tokens = self.model.encode_conditions(
-                        text_input_ids=text_ids,
-                        text_mask=text_mask,
-                        ref_latent=ref_latent,
-                        ref_mask=ref_mask,
-                        caption_input_ids=caption_ids,
-                        caption_mask=caption_mask,
-                        speaker_state_override=speaker_state_override,
-                        speaker_mask_override=speaker_mask_override,
-                        caption_state_override=caption_state_override,
-                        caption_mask_override=caption_mask_override,
-                        speaker_uncond_mode=req.speaker_uncond_mode,
-                    )
                 pred_log_frames = self.model.predict_duration_log_frames(
                     text_state=duration_text_state,
                     text_mask=duration_text_mask,
@@ -2257,25 +2000,7 @@ class InferenceRuntime:
                         caption_state_override=caption_state_override,
                         caption_mask_override=caption_mask_override,
                         speaker_uncond_mode=req.speaker_uncond_mode,
-                        condition_token_ids=condition_token_ids,
-                        condition_token_mask=condition_token_mask,
-                        condition_token_scales=condition_token_scales,
                     )
-                    if condition_token_ids is not None and cfg_scale_condition > 0.0:
-                        encoded_conditions_without_condition_tokens = self.model.encode_conditions(
-                            text_input_ids=text_ids,
-                            text_mask=text_mask,
-                            ref_latent=ref_latent,
-                            ref_mask=ref_mask,
-                            caption_input_ids=caption_ids,
-                            caption_mask=caption_mask,
-                            speaker_state_override=speaker_state_override,
-                            speaker_mask_override=speaker_mask_override,
-                            caption_state_override=caption_state_override,
-                            caption_mask_override=caption_mask_override,
-                            speaker_uncond_mode=req.speaker_uncond_mode,
-                        )
-
             # TensorRT など固定コンテキスト容量を持つ実装では、K/V キャッシュや RF 本体へ入る前に超過を確定させる
             ## パディング後の shape ではなく mask の有効数を数えるため、通常参照・Speaker Inversion・no_ref を同じ契約で扱える
             if encoded_conditions is not None:
@@ -2371,7 +2096,6 @@ class InferenceRuntime:
                     cfg_scale_text=cfg_scale_text,
                     cfg_scale_caption=cfg_scale_caption,
                     cfg_scale_speaker=cfg_scale_speaker,
-                    cfg_scale_condition=cfg_scale_condition,
                     cfg_guidance_mode=cfg_mode,
                     cfg_min_t=float(req.cfg_min_t),
                     cfg_max_t=float(req.cfg_max_t),
@@ -2387,16 +2111,10 @@ class InferenceRuntime:
                     sway_coeff=float(req.sway_coeff),
                     waveex=req.waveex,
                     encoded_conditions=encoded_conditions,
-                    encoded_conditions_without_condition_tokens=(
-                        encoded_conditions_without_condition_tokens
-                    ),
                     noise_dtype=noise_dtype,
                     initial_noise=initial_noise,
                     initial_noise_offset=initial_noise_offset,
                     latent_mask=latent_mask,
-                    condition_token_ids=condition_token_ids,
-                    condition_token_mask=condition_token_mask,
-                    condition_token_scales=condition_token_scales,
                     velocity_field_guidance=req.velocity_field_guidance,
                     trajectory_observer=req.trajectory_observer,
                 )

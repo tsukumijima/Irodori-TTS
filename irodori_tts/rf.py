@@ -206,13 +206,11 @@ def sample_euler_rf_cfg(
     caption_state_override: torch.Tensor | None = None,
     caption_mask_override: torch.Tensor | None = None,
     encoded_conditions: EncodedConditions | None = None,
-    encoded_conditions_without_condition_tokens: EncodedConditions | None = None,
     speaker_uncond_mode: str = "mask",
     num_steps: int = 40,
     cfg_scale_text: float = 3.0,
     cfg_scale_caption: float = 3.0,
     cfg_scale_speaker: float = 5.0,
-    cfg_scale_condition: float = 0.0,
     cfg_guidance_mode: str = "independent",
     cfg_min_t: float = 0.5,
     cfg_max_t: float = 1.0,
@@ -232,9 +230,6 @@ def sample_euler_rf_cfg(
     initial_noise: torch.Tensor | None = None,
     initial_noise_offset: int = 0,
     latent_mask: torch.Tensor | None = None,
-    condition_token_ids: torch.Tensor | None = None,
-    condition_token_mask: torch.Tensor | None = None,
-    condition_token_scales: torch.Tensor | None = None,
     velocity_field_guidance: VelocityFieldGuidance | None = None,
     trajectory_observer: TrajectoryObserver | None = None,
 ) -> torch.Tensor:
@@ -390,9 +385,6 @@ def sample_euler_rf_cfg(
             caption_state_override=caption_state_override,
             caption_mask_override=caption_mask_override,
             speaker_uncond_mode=speaker_uncond_mode,
-            condition_token_ids=condition_token_ids,
-            condition_token_mask=condition_token_mask,
-            condition_token_scales=condition_token_scales,
         )
     else:
         (
@@ -426,74 +418,6 @@ def sample_euler_rf_cfg(
         else:
             speaker_state_uncond = torch.zeros_like(speaker_state_cond)
             speaker_mask_uncond = torch.zeros_like(speaker_mask_cond)
-    condition_token_mask_cond = None
-    if condition_token_ids is not None:
-        if condition_token_mask is None:
-            condition_token_mask_cond = torch.ones_like(condition_token_ids, dtype=torch.bool)
-        else:
-            condition_token_mask_cond = condition_token_mask.to(device=device, dtype=torch.bool)
-    has_condition_cfg = (
-        model.cfg.use_speaker_condition_resolved
-        and cfg_scale_condition > 0
-        and condition_token_mask_cond is not None
-        and bool(condition_token_mask_cond.any().item())
-    )
-    condition_token_uncond_bundle = None
-    if has_condition_cfg:
-        if encoded_conditions_without_condition_tokens is None:
-            # 条件 CFG では reference speaker は残し、LoRA で学習した条件 token だけを外す
-            encoded_conditions_without_condition_tokens = model.encode_conditions(
-                text_input_ids=text_input_ids,
-                text_mask=text_mask,
-                ref_latent=ref_latent,
-                ref_mask=ref_mask,
-                caption_input_ids=caption_input_ids,
-                caption_mask=caption_mask,
-                speaker_state_override=speaker_state_override,
-                speaker_mask_override=speaker_mask_override,
-                caption_state_override=caption_state_override,
-                caption_mask_override=caption_mask_override,
-                speaker_uncond_mode=speaker_uncond_mode,
-            )
-        condition_token_uncond_bundle = encoded_conditions_without_condition_tokens
-        if condition_token_uncond_bundle.ref_state is not None and speaker_state_cond is not None:
-            condition_speaker_state = condition_token_uncond_bundle.ref_state
-            condition_speaker_mask = condition_token_uncond_bundle.ref_mask
-            if condition_speaker_mask is None:
-                raise RuntimeError("Condition-token uncond speaker mask is missing.")
-            cond_tokens = int(speaker_state_cond.shape[1])
-            uncond_tokens = int(condition_speaker_state.shape[1])
-            if uncond_tokens < cond_tokens:
-                # 条件 CFG では token を無効化するだけなので、形合わせ用の末尾 token は mask=False にする
-                pad_tokens = cond_tokens - uncond_tokens
-                state_pad = torch.zeros(
-                    (
-                        condition_speaker_state.shape[0],
-                        pad_tokens,
-                        condition_speaker_state.shape[2],
-                    ),
-                    device=condition_speaker_state.device,
-                    dtype=condition_speaker_state.dtype,
-                )
-                mask_pad = torch.zeros(
-                    (condition_speaker_mask.shape[0], pad_tokens),
-                    device=condition_speaker_mask.device,
-                    dtype=torch.bool,
-                )
-                condition_speaker_state = torch.cat([condition_speaker_state, state_pad], dim=1)
-                condition_speaker_mask = torch.cat([condition_speaker_mask, mask_pad], dim=1)
-                condition_token_uncond_bundle = (
-                    condition_token_uncond_bundle[0],
-                    condition_token_uncond_bundle[1],
-                    condition_speaker_state,
-                    condition_speaker_mask,
-                    condition_token_uncond_bundle[4],
-                    condition_token_uncond_bundle[5],
-                )
-            elif uncond_tokens != cond_tokens:
-                raise RuntimeError(
-                    "Condition-token uncond speaker state is longer than the conditioned state."
-                )
     caption_state_uncond = None
     caption_mask_uncond = None
     if model.cfg.use_caption_condition:
@@ -654,9 +578,6 @@ def sample_euler_rf_cfg(
     if has_speaker_cfg:
         enabled_cfg_names.append("speaker")
         cfg_scales["speaker"] = float(cfg_scale_speaker)
-    if has_condition_cfg and not (use_joint_cfg and has_speaker_cfg):
-        enabled_cfg_names.append("condition")
-        cfg_scales["condition"] = float(cfg_scale_condition)
     if has_caption_cfg:
         enabled_cfg_names.append("caption")
         cfg_scales["caption"] = float(cfg_scale_caption)
@@ -683,16 +604,6 @@ def sample_euler_rf_cfg(
                         caption_mask_uncond if name == "caption" else caption_mask_cond
                     ),
                 )
-            )
-        if has_condition_cfg and condition_token_uncond_bundle is not None:
-            condition_index = independent_names.index("condition")
-            independent_bundles[condition_index] = _bundle(
-                text_state=text_state_cond,
-                text_mask_val=text_mask_cond,
-                speaker_state=condition_token_uncond_bundle[2],
-                speaker_mask_val=condition_token_uncond_bundle[3],
-                caption_state=caption_state_cond,
-                caption_mask_val=caption_mask_cond,
             )
     cfg_batch_mult = len(independent_bundles)
 
@@ -722,16 +633,6 @@ def sample_euler_rf_cfg(
         caption_state=caption_state_uncond,
         caption_mask_val=caption_mask_uncond,
     )
-    if has_condition_cfg and not has_speaker_cfg and condition_token_uncond_bundle is not None:
-        # speaker CFG を使わない joint CFG では、話者参照を残したまま条件 token だけを外す
-        joint_uncond_bundle = _bundle(
-            text_state=text_state_uncond if has_text_cfg else text_state_cond,
-            text_mask_val=text_mask_uncond if has_text_cfg else text_mask_cond,
-            speaker_state=condition_token_uncond_bundle[2],
-            speaker_mask_val=condition_token_uncond_bundle[3],
-            caption_state=caption_state_uncond if has_caption_cfg else caption_state_cond,
-            caption_mask_val=caption_mask_uncond if has_caption_cfg else caption_mask_cond,
-        )
 
     alternating_bundles: dict[
         str,
@@ -767,15 +668,6 @@ def sample_euler_rf_cfg(
             text_mask_val=text_mask_cond,
             speaker_state=speaker_state_uncond,
             speaker_mask_val=speaker_mask_uncond,
-            caption_state=caption_state_cond,
-            caption_mask_val=caption_mask_cond,
-        )
-    if has_condition_cfg and condition_token_uncond_bundle is not None:
-        alternating_bundles["condition"] = _bundle(
-            text_state=text_state_cond,
-            text_mask_val=text_mask_cond,
-            speaker_state=condition_token_uncond_bundle[2],
-            speaker_mask_val=condition_token_uncond_bundle[3],
             caption_state=caption_state_cond,
             caption_mask_val=caption_mask_cond,
         )

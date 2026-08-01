@@ -162,7 +162,6 @@ def resolve_lora_modules_to_save(
     spec: str | Sequence[str] | None,
     *,
     use_duration_predictor: bool,
-    use_speaker_condition_embedding: bool = False,
 ) -> list[str] | None:
     if spec is None:
         return None
@@ -172,12 +171,9 @@ def resolve_lora_modules_to_save(
         if not value or value.lower() == "none":
             return None
         if value.lower() == "auto":
-            modules_to_save: list[str] = []
             if use_duration_predictor:
-                modules_to_save.append("duration_predictor")
-            if use_speaker_condition_embedding:
-                modules_to_save.append("speaker_condition_embedding")
-            return modules_to_save or None
+                return ["duration_predictor"]
+            return None
         modules = [chunk.strip() for chunk in value.split(",") if chunk.strip()]
     else:
         modules = [str(item).strip() for item in spec if str(item).strip()]
@@ -213,7 +209,6 @@ def build_lora_config_kwargs(
     raw: TrainConfig | Mapping[str, Any],
     *,
     use_duration_predictor: bool = False,
-    use_speaker_condition_embedding: bool = False,
 ) -> dict[str, Any]:
     bias = str(_lookup_config_value(raw, "lora_bias")).strip().lower()
     if bias not in {"none", "all", "lora_only"}:
@@ -231,7 +226,6 @@ def build_lora_config_kwargs(
     modules_to_save = resolve_lora_modules_to_save(
         _lookup_config_value(raw, "lora_modules_to_save"),
         use_duration_predictor=use_duration_predictor,
-        use_speaker_condition_embedding=use_speaker_condition_embedding,
     )
     if modules_to_save is not None:
         kwargs["modules_to_save"] = modules_to_save
@@ -246,18 +240,15 @@ def apply_lora(
         return model
 
     lora_config_cls, _, get_peft_model = _require_peft()
-    kwargs = build_lora_config_kwargs(
-        raw,
-        use_duration_predictor=bool(model.cfg.use_duration_predictor),
-        use_speaker_condition_embedding=model.speaker_condition_embedding is not None,
-    )
-    validate_lora_modules_to_save(kwargs.get("modules_to_save"), model=model)
     peft_model = get_peft_model(
         model,
         lora_config_cls(
             task_type=None,
             inference_mode=False,
-            **kwargs,
+            **build_lora_config_kwargs(
+                raw,
+                use_duration_predictor=bool(model.cfg.use_duration_predictor),
+            ),
         ),
     )
     return peft_model
