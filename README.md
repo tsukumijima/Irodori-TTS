@@ -1,5 +1,11 @@
 # Irodori-TTS
 
+> [!NOTE]
+> このフォークでは README の内容を更新しておらず、以下の記述が現行の `pyproject.toml` や実装と一致していることは保証されません。  
+> 依存関係の正本は `pyproject.toml` や `uv.lock` を参照してください。
+
+---
+
 [![Model](https://img.shields.io/badge/Model-HuggingFace-yellow)](https://huggingface.co/Aratako/Irodori-TTS-v4-Small)
 [![Demo](https://img.shields.io/badge/Demo-HuggingFace%20Space-blue)](https://huggingface.co/spaces/Aratako/Irodori-TTS-v4-Small-Demo)
 [![License: MIT](https://img.shields.io/badge/Code%20License-MIT-green.svg)](LICENSE)
@@ -51,13 +57,39 @@ Audio is represented as continuous latent sequences via the codec configured by 
 ```bash
 git clone https://github.com/Aratako/Irodori-TTS.git
 cd Irodori-TTS
-uv sync
+uv sync --extra cu128  # NVIDIA CUDA 12.8 (Linux/Windows)
 ```
 
-The default development group includes inference, training, data preparation, Gradio,
-LoRA, watermarking, tests, and code-quality tools. On Linux x86-64 and Windows, uv
-installs the CUDA 13.0 build of PyTorch from the configured PyTorch index. Other
-platforms use the PyPI build selected by uv.
+If you want to explicitly select a PyTorch backend, use one of the backend
+extras below:
+
+```bash
+# NVIDIA CUDA 12.8 on Linux/Windows
+uv sync --extra cu128
+
+# AMD ROCm on Linux/WSL
+uv sync --extra rocm
+
+# Intel XPU on Linux/Windows
+uv sync --extra xpu
+
+# CPU-only, or macOS CPU/MPS via PyPI
+uv sync --extra cpu
+```
+
+The PyTorch backend extras are mutually exclusive. The `cu128` extra uses the
+PyTorch CUDA 12.8 index, the `rocm` extra uses the PyTorch ROCm index on
+Linux, and the `xpu` extra uses the PyTorch XPU index on Linux/Windows.
+The `cpu` extra uses the CPU PyTorch index on Linux/Windows and falls
+back to the standard PyPI PyTorch wheels on macOS.
+
+After syncing with a backend extra, use `uv run --no-sync ...` for the commands
+below to avoid re-syncing the environment without the selected PyTorch backend
+extra.
+
+The `rocm` extra includes `pytorch-triton-rocm` because `triton-rocm` alone does
+not provide `triton.language` for the `transformers` to `torch._dynamo` import
+path. This was validated with AMD GPU inference.
 
 ## Quick Start
 
@@ -139,12 +171,6 @@ uv run --no-sync python infer.py \
 ```
 
 ### Gradio Web UI
-
-Install the project dependencies before starting either web UI:
-
-```bash
-uv sync
-```
 
 ```bash
 uv run --no-sync python gradio_app.py --server-name 0.0.0.0 --server-port 7860
@@ -275,13 +301,7 @@ For tuning guidance and detailed explanations of inference options, see the
 
 Generated audio is passed through [SilentCipher](https://github.com/sony/silentcipher) watermarking automatically when the dependency and model files are available.
 
-The development dependency group installs SilentCipher automatically. The inference runtime
-continues without watermarking when SilentCipher or its model files are unavailable.
-
 ## Training
-
-Run `uv sync` before preparing manifests or starting training. The default development group
-contains the data preparation and training dependencies.
 
 ### 1. Prepare Manifest (Precompute DACVAE Latents)
 
