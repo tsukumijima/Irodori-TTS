@@ -5,13 +5,12 @@ import argparse
 import math
 from pathlib import Path
 
-from huggingface_hub import hf_hub_download
-
 from irodori_tts.inference_runtime import (
     InferenceRuntime,
     RuntimeKey,
     SamplingRequest,
     default_runtime_device,
+    download_hf_checkpoint,
     resolve_cfg_scales,
     save_wav,
 )
@@ -52,10 +51,7 @@ def _resolve_checkpoint_path(args: argparse.Namespace) -> str:
     if repo_id == "":
         raise ValueError("hf_checkpoint must be non-empty.")
 
-    checkpoint_path = hf_hub_download(
-        repo_id=repo_id,
-        filename="model.safetensors",
-    )
+    checkpoint_path = download_hf_checkpoint(repo_id)
     print(
         f"[checkpoint] downloaded model.safetensors from hf://{repo_id} -> {checkpoint_path}",
         flush=True,
@@ -131,8 +127,11 @@ def main() -> None:
     parser.add_argument(
         "--max-ref-seconds",
         type=float,
-        default=30.0,
-        help="Maximum reference duration in seconds. Set <=0 to disable the cap.",
+        default=None,
+        help=(
+            "Maximum reference duration in seconds. By default, use the checkpoint "
+            "recommendation (30 seconds for legacy checkpoints). Set <=0 to disable the cap."
+        ),
     )
     parser.add_argument(
         "--ref-normalize-db",
@@ -407,9 +406,31 @@ def main() -> None:
         help="Reference waveform path for speaker conditioning.",
     )
     ref_group.add_argument(
+        "--ref-wavs",
+        nargs="+",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Reference waveform paths to encode separately and concatenate in input order "
+            "before applying the checkpoint's maximum reference length. For v4-Small long-reference "
+            "cloning, prefer multiple shorter clips from the same speaker; this matches training. "
+            "A single uninterrupted long recording is accepted but has not been evaluated."
+        ),
+    )
+    ref_group.add_argument(
         "--ref-latent",
         default=None,
         help="Reference latent (.pt) path for speaker conditioning.",
+    )
+    ref_group.add_argument(
+        "--ref-latents",
+        nargs="+",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Reference latent (.pt) paths to concatenate in input order before applying "
+            "the checkpoint's maximum reference length."
+        ),
     )
     ref_group.add_argument(
         "--ref-embed",
@@ -448,13 +469,12 @@ def main() -> None:
     if runtime.model_cfg.use_speaker_condition_resolved and not (
         args.no_ref
         or args.ref_wav is not None
+        or args.ref_wavs is not None
         or args.ref_latent is not None
+        or args.ref_latents is not None
         or args.ref_embed is not None
     ):
-        parser.error(
-            "speaker-conditioned checkpoints require one of --ref-wav, --ref-latent, "
-            "--ref-embed, or --no-ref."
-        )
+        parser.error("speaker-conditioned checkpoints require one reference option or --no-ref.")
     use_speaker_for_request = bool(
         runtime.model_cfg.use_speaker_condition_resolved and not args.no_ref
     )
@@ -493,7 +513,9 @@ def main() -> None:
             text=str(args.text),
             caption=None if args.caption is None else str(args.caption),
             ref_wav=args.ref_wav,
+            ref_wavs=args.ref_wavs,
             ref_latent=args.ref_latent,
+            ref_latents=args.ref_latents,
             ref_embed=args.ref_embed,
             no_ref=bool(args.no_ref),
             ref_normalize_db=args.ref_normalize_db,

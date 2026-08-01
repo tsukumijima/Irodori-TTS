@@ -15,7 +15,7 @@ dependencies = [
     "soxr>=1.0.0",
     "sentencepiece>=0.1.99,<0.2",
     "torch>=2.12.1,<2.13.0",
-    "transformers",
+    "transformers>=5.12.1,<6",
 ]
 
 # 単体利用時の依存関係グループ
@@ -23,14 +23,18 @@ dependencies = [
 dev = [
     "datasets>=3.0.0",
     "gradio>=5.0.0",
+    "llvmlite>=0.40.0",
+    "numba>=0.57.0",
     "nvidia-cudnn-frontend==1.26.0; sys_platform == 'linux' or sys_platform == 'win32'",
     "peft>=0.18.0",
     "pytest>=8.4.2",
     "ruff>=0.14.8,<0.15.0",
     "silentcipher @ git+https://github.com/SesameAILabs/silentcipher.git@d46d7d0893a583d8968ab3a6626e2289faec9152",
     "taskipy>=1.14.0,<2.0.0",
+    "torchcodec>=0.10.0,<0.11.0",
     "tqdm>=4.67.3",
     "wandb>=0.17.0",
+    "torchdata>=0.11.0",
 ]
 
 [tool.taskipy.tasks]

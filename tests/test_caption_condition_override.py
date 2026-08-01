@@ -1,12 +1,29 @@
 from __future__ import annotations
 
 import unittest
+from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any, cast
 
 import torch
 
 from irodori_tts.inference_runtime import InferenceRuntime, SamplingRequest
+
+
+class RecordingCaptionEncoder:
+    """事前学習済みバックボーンを受け取ったことを記録するテスト用エンコーダー。"""
+
+    def __init__(self) -> None:
+        self.backbone: object | None = None
+
+    def __call__(
+        self,
+        backbone: object,
+        input_ids: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        self.backbone = backbone
+        return input_ids.unsqueeze(-1).to(dtype=torch.float32) * mask.unsqueeze(-1)
 
 
 class CaptionConditionOverrideTest(unittest.TestCase):
@@ -90,6 +107,32 @@ class CaptionConditionOverrideTest(unittest.TestCase):
                 ),
                 batch_size=1,
             )
+
+    def test_caption_cache_uses_pretrained_backbone(self) -> None:
+        runtime = self._runtime()
+        encoder = RecordingCaptionEncoder()
+        backbone = object()
+        runtime.model.caption_encoder = encoder
+        runtime.model.caption_norm = torch.nn.Identity()
+        runtime.model.pretrained_text_backbone = backbone
+        runtime._model_dtype = torch.float32
+        runtime._caption_condition_cache = OrderedDict()
+        runtime._caption_condition_cache_max_entries = 4
+
+        state, mask = runtime._load_cached_caption_condition(
+            req=SamplingRequest(text="テスト"),
+            lora_adapter=None,
+            caption_text="落ち着いた声",
+            caption_ids=torch.tensor([[1, 2]], dtype=torch.long),
+            caption_mask=torch.tensor([[True, True]]),
+            caption_max_len=2,
+            batch_size=1,
+            messages=[],
+        )
+
+        self.assertIs(encoder.backbone, backbone)
+        self.assertEqual(tuple(state.shape), (1, 2, 1))
+        torch.testing.assert_close(mask, torch.tensor([[True, True]]))
         with self.assertRaisesRegex(ValueError, "must be specified together"):
             self._load(
                 SamplingRequest(

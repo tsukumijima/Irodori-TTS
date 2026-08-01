@@ -90,6 +90,11 @@ def _make_rng(seed: int, device: torch.device) -> tuple[torch.Generator, torch.d
         return torch.Generator(device="cpu").manual_seed(seed), torch.device("cpu")
 
 
+def rf_predict_x0(x_t: torch.Tensor, v_pred: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    # x_t = x0 + t * v から観測用の完成潜在を復元
+    return x_t - t[:, None, None] * v_pred
+
+
 def sample_logit_normal_t(
     batch_size: int,
     device: torch.device,
@@ -140,11 +145,6 @@ def rf_interpolate(x0: torch.Tensor, noise: torch.Tensor, t: torch.Tensor) -> to
 def rf_velocity_target(x0: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
     # For x_t = (1-t) x0 + t z, velocity is d/dt x_t = z - x0.
     return noise - x0
-
-
-def rf_predict_x0(x_t: torch.Tensor, v_pred: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-    # x_t = x0 + t * v  =>  x0 = x_t - t * v
-    return x_t - t[:, None, None] * v_pred
 
 
 def temporal_score_rescale(
