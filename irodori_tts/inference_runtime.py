@@ -327,7 +327,6 @@ class SamplingRequest:
     speaker_uncond_mode: str = "mask"
     seed: int | None = None
     noise_precision: str | None = None
-    chunk_seed_mode: str = "same"
     t_schedule_mode: str = "linear"
     sway_coeff: float = -1.0
     trim_tail: bool = True
