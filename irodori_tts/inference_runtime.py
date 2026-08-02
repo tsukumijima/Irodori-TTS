@@ -287,6 +287,19 @@ class SpeakerCondition:
 
 
 @dataclass
+class ReferenceCondition:
+    """Reference latent and its valid token range.
+
+    Attributes:
+        latent: Encoded and patched ``(batch, tokens, dim)`` reference latent.
+        mask: ``(batch, tokens)`` mask selecting valid reference tokens.
+    """
+
+    latent: torch.Tensor
+    mask: torch.Tensor
+
+
+@dataclass
 class CaptionCondition:
     """Caption condition state and its valid token range.
 
@@ -1314,6 +1327,44 @@ class InferenceRuntime:
         while len(self._speaker_condition_cache) > self._speaker_condition_cache_max_entries:
             self._speaker_condition_cache.popitem(last=False)
 
+    def encode_reference_condition(
+        self,
+        request: SamplingRequest,
+        *,
+        batch_size: int = 1,
+        log_fn: Callable[[str], None] | None = None,
+    ) -> ReferenceCondition:
+        """Encode waveform or latent references through the normal inference path."""
+
+        if request.ref_embed is not None:
+            raise ValueError("Reference encoding does not accept ref_embed.")
+        if (
+            request.no_ref is not True
+            and request.ref_wav is None
+            and not request.ref_wavs
+            and request.ref_latent is None
+            and not request.ref_latents
+        ):
+            raise ValueError(
+                "Reference encoding requires ref_wav, ref_wavs, ref_latent, ref_latents, or no_ref."
+            )
+
+        lora_adapter = self._resolve_lora_adapter_path(request.lora_adapter)
+        messages: list[str] = []
+        with self._infer_lock, torch.inference_mode():
+            latent, mask = self._load_reference_latent(
+                req=request,
+                lora_adapter=lora_adapter,
+                batch_size=batch_size,
+                messages=messages,
+            )
+        if latent is None or mask is None:
+            raise RuntimeError("Reference encoding did not produce a latent and mask.")
+        if log_fn is not None:
+            for message in messages:
+                log_fn(message)
+        return ReferenceCondition(latent=latent.detach(), mask=mask.detach())
+
     def encode_speaker_condition(
         self,
         request: SamplingRequest,
@@ -1339,8 +1390,16 @@ class InferenceRuntime:
 
         if request.no_ref is True:
             raise ValueError("Speaker encoding requires a reference or inversion embedding.")
-        if request.ref_wav is None and request.ref_latent is None and request.ref_embed is None:
-            raise ValueError("Speaker encoding requires ref_wav, ref_latent, or ref_embed.")
+        if (
+            request.ref_wav is None
+            and not request.ref_wavs
+            and request.ref_latent is None
+            and not request.ref_latents
+            and request.ref_embed is None
+        ):
+            raise ValueError(
+                "Speaker encoding requires ref_wav, ref_wavs, ref_latent, ref_latents, or ref_embed."
+            )
         if self.model_cfg.use_speaker_condition_resolved is False:
             raise RuntimeError("Speaker conditioning is disabled for this checkpoint.")
 

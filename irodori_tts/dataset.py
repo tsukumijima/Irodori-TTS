@@ -102,6 +102,8 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
         self.enable_caption_condition = bool(enable_caption_condition)
         self.enable_speaker_condition = bool(enable_speaker_condition)
         self.caption_key = str(caption_key)
+        if (ref_min_frames is None) != (ref_max_frames is None):
+            raise ValueError("ref_min_frames and ref_max_frames must be set together.")
         if ref_min_frames is not None and ref_max_frames is not None:
             if int(ref_min_frames) <= 0 or int(ref_max_frames) <= 0:
                 raise ValueError(
@@ -118,6 +120,7 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
             self.ref_min_frames = None
             self.ref_max_frames = None
         self._manifest_fp = None
+        self._manifest_fp_pid: int | None = None
         subset_index_tensor: torch.Tensor | None = None
         if subset_indices is not None:
             if isinstance(subset_indices, torch.Tensor):
@@ -278,8 +281,14 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
         return ref_latent
 
     def _manifest_file(self):
-        if self._manifest_fp is None or self._manifest_fp.closed:
+        current_pid = os.getpid()
+        if (
+            self._manifest_fp is None
+            or self._manifest_fp.closed
+            or self._manifest_fp_pid != current_pid
+        ):
             self._manifest_fp = self.manifest_path.open("r", encoding="utf-8")
+            self._manifest_fp_pid = current_pid
         return self._manifest_fp
 
     def _read_item(self, index: int) -> dict[str, Any]:

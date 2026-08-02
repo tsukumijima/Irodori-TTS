@@ -47,8 +47,13 @@ def _resolve_device(raw: str) -> torch.device:
     device = torch.device(normalized)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise ValueError("CUDA was requested but torch.cuda.is_available() is False.")
-    if device.type == "xpu" and not torch.xpu.is_available():
-        raise ValueError("XPU was requested but torch.xpu.is_available() is False.")
+    if device.type == "xpu":
+        try:
+            is_xpu_available = torch.xpu.is_available()
+        except AttributeError as ex:
+            raise ValueError("XPU was requested but torch.xpu is unavailable.") from ex
+        if not is_xpu_available:
+            raise ValueError("XPU was requested but torch.xpu.is_available() is False.")
     return device
 
 

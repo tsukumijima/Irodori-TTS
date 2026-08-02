@@ -250,8 +250,10 @@ layer counts, vocabulary sizes, or conditioning branches usually prevents checkp
 loading unless you are intentionally training from scratch or using an upgrade path
 handled by the code.
 
-With `text_encoder_type: pretrained`, the Hugging Face backbone is optimized with the TTS model
-and saved in full for exact resume and inference. Text and caption calls share these weights and
+With `text_encoder_type: pretrained`, the Hugging Face backbone is optimized with the TTS model.
+Full-training checkpoints save the complete backbone for exact resume and inference. LoRA
+checkpoints save only LoRA weights and the configured `modules_to_save`, so restoration also
+requires the separate base checkpoint. Text and caption calls share the backbone weights and
 accumulate gradients into the same backbone. The checkpoint converter embeds the encoder
 architecture config in `model.safetensors` and exports its tokenizer under `tokenizer/`. Inference
 prefers these bundled assets; legacy checkpoints without them continue to resolve their tokenizer

@@ -109,6 +109,24 @@ def test_encode_speaker_condition_returns_server_cache_value() -> None:
     assert runtime._reference_condition_cache == {"unrelated-key": unrelated_cache_value}
 
 
+def test_encode_reference_condition_accepts_multiple_waveforms() -> None:
+    """複数参照も通常推論と同じ読込経路から公開条件として返す。"""
+
+    runtime = cast(Any, InferenceRuntime.__new__(InferenceRuntime))
+    runtime._infer_lock = threading.Lock()
+    runtime._resolve_lora_adapter_path = lambda _path: None
+    expected_latent = torch.zeros(1, 5, 6)
+    expected_mask = torch.ones(1, 5, dtype=torch.bool)
+    runtime._load_reference_latent = lambda **_kwargs: (expected_latent, expected_mask)
+
+    condition = runtime.encode_reference_condition(
+        SamplingRequest(text="", ref_wavs=["first.flac", "second.flac"]),
+    )
+
+    torch.testing.assert_close(condition.latent, expected_latent)
+    torch.testing.assert_close(condition.mask, expected_mask)
+
+
 @pytest.mark.parametrize(
     "sampling_request",
     [

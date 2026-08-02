@@ -77,7 +77,13 @@ class ModelConfig:
 
     @property
     def use_pretrained_text_encoder(self) -> bool:
-        return str(self.text_encoder_type).strip().lower() == "pretrained"
+        text_encoder_type = str(self.text_encoder_type).strip().lower()
+        if text_encoder_type not in {"scratch", "pretrained"}:
+            raise ValueError(
+                "text_encoder_type must be either 'scratch' or 'pretrained': "
+                f"got {self.text_encoder_type!r}"
+            )
+        return text_encoder_type == "pretrained"
 
     @property
     def caption_vocab_size_resolved(self) -> int:

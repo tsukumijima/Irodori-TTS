@@ -1474,7 +1474,7 @@ def _apply_base_initialization(
         require_caption_match = checkpoint_has_caption and current_has_caption
         checkpoint_speaker_patch = None
         if isinstance(init_model_cfg, dict):
-            checkpoint_speaker_patch = init_model_cfg.get("speaker_patch_size")
+            checkpoint_speaker_patch = checkpoint_cfg.speaker_patch_size
         upgrade_speaker_patch = bool(
             model_cfg.use_speaker_condition_resolved
             and checkpoint_speaker_patch is not None

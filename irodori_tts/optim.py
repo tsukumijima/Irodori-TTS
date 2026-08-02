@@ -385,6 +385,9 @@ def build_scheduler(
 
 
 def current_lr(optimizer) -> float:
+    for group in optimizer.param_groups:
+        if str(group.get("group_name", "")).startswith("main_"):
+            return float(group["lr"])
     return float(optimizer.param_groups[0]["lr"])
 
 

@@ -115,7 +115,7 @@ def _extract_inference_values(raw: dict[str, Any]) -> dict[str, int | float]:
     inference_cfg: dict[str, int | float] = {}
     for key in INFERENCE_INT_CONFIG_KEYS:
         value = raw.get(key)
-        if isinstance(value, int) and not isinstance(value, bool):
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             inference_cfg[key] = int(value)
     for key in INFERENCE_FLOAT_CONFIG_KEYS:
         value = raw.get(key)
