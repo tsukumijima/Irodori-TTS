@@ -41,12 +41,12 @@ class EncodedContextCapacityTest(unittest.TestCase):
             None if caption_mask is None else torch.zeros((batch_size, caption_mask.shape[1], 1))
         )
         return EncodedConditions(
-            text_state,
-            text_mask,
-            speaker_state,
-            speaker_mask,
-            caption_state,
-            caption_mask,
+            text_state=text_state,
+            text_mask=text_mask,
+            ref_state=speaker_state,
+            ref_mask=speaker_mask,
+            caption_state=caption_state,
+            caption_mask=caption_mask,
         )
 
     def test_capacity_boundary_accepts_864_and_rejects_865(self) -> None:

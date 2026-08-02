@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import tempfile
 from pathlib import Path
 
 import torch
@@ -14,7 +15,9 @@ from irodori_tts.config import ModelConfig, merge_dataclass_overrides
 from irodori_tts.model import TextToLatentRFDiT
 from irodori_tts.quantization import (
     DEFAULT_INT4_GROUP_SIZE,
+    INT4_CUDA_PACKING_FORMAT,
     INT4_GROUP_SIZES,
+    INT4_XPU_PACKING_FORMAT,
     QUANTIZATION_CLI_CHOICES,
     QUANTIZATION_PROFILES,
     flatten_quantized_state_dict,
@@ -57,14 +60,13 @@ def _resolve_device(raw: str) -> torch.device:
     return device
 
 
-def _copy_bundled_tokenizer(input_path: Path, output_path: Path) -> Path | None:
+def _copy_bundled_tokenizer(input_path: Path, tokenizer_dir: Path) -> Path | None:
     source = input_path.parent / "tokenizer"
     if not (source / "tokenizer_config.json").is_file():
         return None
-    destination = output_path.parent / "tokenizer"
-    if source.resolve() != destination.resolve():
-        shutil.copytree(source, destination, dirs_exist_ok=True)
-    return destination
+    if source.resolve() != tokenizer_dir.resolve():
+        shutil.copytree(source, tokenizer_dir, dirs_exist_ok=True)
+    return tokenizer_dir
 
 
 def parse_args() -> argparse.Namespace:
@@ -155,7 +157,7 @@ def main() -> None:
     compute_dtype = torch.bfloat16
     model = model.eval().to(device=device, dtype=compute_dtype)
     quantization_type = normalize_quantization_type(args.quantization)
-    selected_modules = quantize_model(
+    quantized_modules = quantize_model(
         model,
         quantization_type=quantization_type,
         profile=args.profile,
@@ -170,13 +172,30 @@ def main() -> None:
         quantization_type=quantization_type,
         profile=args.profile,
         compute_dtype=compute_dtype,
-        quantized_modules=len(selected_modules),
+        quantized_modules=len(quantized_modules),
         int4_group_size=args.int4_group_size,
-        int4_packing_format=("plain_int32" if device.type == "xpu" else "tile_packed_to_4d"),
+        int4_packing_format=(
+            INT4_XPU_PACKING_FORMAT if device.type == "xpu" else INT4_CUDA_PACKING_FORMAT
+        ),
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    save_file(flattened_state, str(output_path), metadata=metadata)
-    tokenizer_dir = _copy_bundled_tokenizer(input_path, output_path)
+    # モデルと tokenizer を一時領域で準備し、両方の成功後に公開する
+    with tempfile.TemporaryDirectory(
+        prefix=f".{output_path.stem}.quantize-",
+        dir=output_path.parent,
+    ) as temporary_dir_name:
+        temporary_dir = Path(temporary_dir_name)
+        temporary_output_path = temporary_dir / output_path.name
+        temporary_tokenizer_dir = _copy_bundled_tokenizer(
+            input_path,
+            temporary_dir / "tokenizer",
+        )
+        save_file(flattened_state, str(temporary_output_path), metadata=metadata)
+        tokenizer_dir = None
+        if temporary_tokenizer_dir is not None:
+            tokenizer_dir = output_path.parent / "tokenizer"
+            shutil.copytree(temporary_tokenizer_dir, tokenizer_dir, dirs_exist_ok=True)
+        temporary_output_path.replace(output_path)
 
     tensor_bytes = sum(
         tensor.numel() * tensor.element_size() for tensor in flattened_state.values()
@@ -187,7 +206,7 @@ def main() -> None:
     if args.quantization == "int4-weight-only":
         print(f"INT4 group size: {args.int4_group_size}")
     print(f"Profile: {args.profile}")
-    print(f"Quantized Linear modules: {len(selected_modules):,}")
+    print(f"Quantized Linear modules: {len(quantized_modules):,}")
     print(f"Stored tensor bytes: {tensor_bytes / (1024**3):.2f} GiB")
     if tokenizer_dir is not None:
         print(f"Tokenizer: {tokenizer_dir}")

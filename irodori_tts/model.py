@@ -1841,7 +1841,10 @@ class TextToLatentRFDiT(nn.Module):
         caption_state = None
         if self.cfg.use_caption_condition:
             if caption_state_override is None:
-                assert caption_input_ids is not None and caption_mask is not None
+                if caption_input_ids is None or caption_mask is None:
+                    raise ValueError(
+                        "caption_input_ids and caption_mask are required when caption conditioning is enabled."
+                    )
                 caption_state = self.encode_caption_condition(
                     input_ids=caption_input_ids,
                     mask=caption_mask,
@@ -1927,6 +1930,10 @@ class TextToLatentRFDiT(nn.Module):
                     dtype=dtype,
                 )
             else:
+                if ref_latent is None or ref_mask is None:
+                    raise ValueError(
+                        "ref_latent and ref_mask are required when speaker conditioning has no override or inversion."
+                    )
                 ref_latent, ref_mask = patch_sequence_with_mask(
                     seq=ref_latent,
                     mask=ref_mask,

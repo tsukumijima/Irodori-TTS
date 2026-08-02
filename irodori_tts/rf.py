@@ -732,6 +732,8 @@ def sample_euler_rf_cfg(
     context_kv_cfg = None
     context_kv_joint_uncond = None
     context_kv_alternating: dict[str, list[tuple[torch.Tensor, ...]]] = {}
+    context_kv_guidance_target = None
+    context_kv_guidance_opposite = None
     if effective_use_context_kv_cache:
         context_kv_cond = model.build_context_kv_cache(
             text_state=text_state_cond,
@@ -759,7 +761,21 @@ def sample_euler_rf_cfg(
                     speaker_state=bundle[2],
                     caption_state=bundle[4],
                 )
+    if velocity_field_guidance is not None and velocity_field_guidance.alpha != 0.0:
+        # 速度場ガイダンスの条件は反復中に不変なので、射影済み K/V を全ステップで再利用する
+        context_kv_guidance_target = model.build_context_kv_cache(
+            text_state=text_state_cond,
+            speaker_state=target_speaker_state,
+            caption_state=target_caption_state,
+        )
+        context_kv_guidance_opposite = model.build_context_kv_cache(
+            text_state=text_state_cond,
+            speaker_state=opposite_speaker_state,
+            caption_state=opposite_caption_state,
+        )
     if speaker_kv_scale is not None:
+        if context_kv_cond is None:
+            raise RuntimeError("Speaker KV scaling requires the conditional context cache.")
         scale_speaker_kv_cache(
             context_kv_cache=context_kv_cond,
             scale=float(speaker_kv_scale),
@@ -777,6 +793,13 @@ def sample_euler_rf_cfg(
                 scale=float(speaker_kv_scale),
                 max_layers=speaker_kv_max_layers,
             )
+        for cache in (context_kv_guidance_target, context_kv_guidance_opposite):
+            if cache is not None:
+                scale_speaker_kv_cache(
+                    context_kv_cache=cache,
+                    scale=float(speaker_kv_scale),
+                    max_layers=speaker_kv_max_layers,
+                )
     speaker_kv_active = speaker_kv_scale is not None
 
     waveex_cfg = waveex if (waveex is not None and waveex.enabled) else None
@@ -816,6 +839,13 @@ def sample_euler_rf_cfg(
                 scale=inverse_scale,
                 max_layers=speaker_kv_max_layers,
             )
+        for cache in (context_kv_guidance_target, context_kv_guidance_opposite):
+            if cache is not None:
+                scale_speaker_kv_cache(
+                    context_kv_cache=cache,
+                    scale=inverse_scale,
+                    max_layers=speaker_kv_max_layers,
+                )
 
     for i in range(num_steps):
         t = t_schedule[i]
@@ -950,7 +980,7 @@ def sample_euler_rf_cfg(
                 speaker_mask=target_speaker_mask,
                 caption_state=target_caption_state,
                 caption_mask=target_caption_mask,
-                context_kv_cache=None,
+                context_kv_cache=context_kv_guidance_target,
                 latent_mask=latent_mask,
             )
             opposite_velocity = model.forward_with_encoded_conditions(
@@ -962,7 +992,7 @@ def sample_euler_rf_cfg(
                 speaker_mask=opposite_speaker_mask,
                 caption_state=opposite_caption_state,
                 caption_mask=opposite_caption_mask,
-                context_kv_cache=None,
+                context_kv_cache=context_kv_guidance_opposite,
                 latent_mask=latent_mask,
             )
             v = v + velocity_field_guidance.alpha * (target_velocity - opposite_velocity)

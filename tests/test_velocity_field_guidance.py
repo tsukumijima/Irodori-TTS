@@ -25,6 +25,21 @@ class FakeVelocityModel:
             use_speaker_condition_resolved=False,
         )
         self.caption_sums: list[float] = []
+        self.context_cache_builds = 0
+
+    def build_context_kv_cache(self, **_kwargs: Any) -> list[tuple[torch.Tensor, ...]]:
+        """
+        ガイダンス条件ごとの KV キャッシュ構築回数を記録する。
+
+        Args:
+            **_kwargs (Any): 実モデルと同じ呼び出しを受ける未使用の条件 Tensor
+
+        Returns:
+            list[tuple[torch.Tensor, ...]]: forward へ渡す空のテスト用キャッシュ
+        """
+
+        self.context_cache_builds += 1
+        return []
 
     def encode_conditions(self, **kwargs: Any) -> EncodedConditions:
         """テスト入力をサンプラーが使う条件タプルへ変換する。"""
@@ -121,6 +136,7 @@ class VelocityFieldGuidanceTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(baseline, guided))
         self.assertEqual(len(model.caption_sums), 3)
+        self.assertEqual(model.context_cache_builds, 0)
 
     def test_partial_caption_pair_is_rejected(self) -> None:
         partial = VelocityFieldGuidance(
@@ -171,6 +187,7 @@ class VelocityFieldGuidanceTest(unittest.TestCase):
         self.assertEqual(model.caption_sums.count(6.0), 1)
         self.assertEqual(model.caption_sums.count(-2.0), 1)
         self.assertEqual(len(model.caption_sums), 5)
+        self.assertEqual(model.context_cache_builds, 2)
 
 
 if __name__ == "__main__":

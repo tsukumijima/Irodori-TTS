@@ -2745,13 +2745,6 @@ def main() -> None:
         model_cfg = replace(model_cfg, latent_patch_size=args.latent_patch_size)
 
     set_seed(train_cfg.seed + rank)
-    text_encoder_type = str(model_cfg.text_encoder_type).strip().lower()
-    if text_encoder_type not in {"scratch", "pretrained"}:
-        raise ValueError(
-            "model.text_encoder_type must be 'scratch' or 'pretrained', "
-            f"got {model_cfg.text_encoder_type!r}."
-        )
-    model_cfg = replace(model_cfg, text_encoder_type=text_encoder_type)
     pretrained_projector_type = str(model_cfg.pretrained_projector_type).strip().lower()
     if pretrained_projector_type not in {"linear", "residual_mlp"}:
         raise ValueError(

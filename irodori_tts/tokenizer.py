@@ -101,8 +101,8 @@ class PretrainedTextTokenizer:
         if max_length <= 0:
             raise ValueError(f"max_length must be > 0, got {max_length}")
 
+        bos_id = self.bos_token_id
         if self.add_bos:
-            bos_id = self.bos_token_id
             if bos_id is None:
                 raise ValueError("Tokenizer has no bos_token_id but BOS prepend was requested.")
             if max_length == 1:
@@ -139,6 +139,8 @@ class PretrainedTextTokenizer:
 
         if not self.add_bos:
             return body_ids, body_mask
+        if bos_id is None:
+            raise RuntimeError("BOS token validation was bypassed unexpectedly.")
 
         batch = torch.full(
             (len(texts), max_length),
@@ -146,7 +148,7 @@ class PretrainedTextTokenizer:
             dtype=torch.long,
         )
         mask = torch.zeros((len(texts), max_length), dtype=torch.bool)
-        batch[:, 0] = int(self.bos_token_id)
+        batch[:, 0] = bos_id
         mask[:, 0] = True
         batch[:, 1:] = body_ids
         mask[:, 1:] = body_mask

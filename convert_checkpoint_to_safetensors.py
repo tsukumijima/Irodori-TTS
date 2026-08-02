@@ -154,11 +154,17 @@ def _load_text_encoder_config(flat_config: dict[str, Any]) -> dict[str, Any] | N
 
     from transformers import AutoConfig
 
-    config = AutoConfig.from_pretrained(
-        model_cfg.text_tokenizer_repo,
-        trust_remote_code=False,
-        revision=model_cfg.text_encoder_revision,
-    )
+    try:
+        config = AutoConfig.from_pretrained(
+            model_cfg.text_tokenizer_repo,
+            trust_remote_code=False,
+            revision=model_cfg.text_encoder_revision,
+        )
+    except (OSError, ValueError) as ex:
+        raise RuntimeError(
+            "Checkpoint metadata does not include text_encoder_config, and loading it from "
+            f"text_tokenizer_repo={model_cfg.text_tokenizer_repo!r} failed."
+        ) from ex
     return config.to_dict()
 
 
@@ -181,7 +187,7 @@ def _build_safetensors_metadata(
 
 def _export_tokenizer(
     flat_config: dict[str, Any],
-    output_path: Path,
+    tokenizer_dir: Path,
     *,
     source_checkpoint: Path | None = None,
 ) -> Path | None:
@@ -189,7 +195,6 @@ def _export_tokenizer(
     if not model_cfg.use_pretrained_text_encoder:
         return None
 
-    tokenizer_dir = output_path.parent / "tokenizer"
     if source_checkpoint is not None:
         bundled_tokenizer_dir = source_checkpoint.parent / "tokenizer"
         if (bundled_tokenizer_dir / "tokenizer_config.json").is_file():
@@ -629,16 +634,18 @@ def main() -> None:
         dir=output_path.parent,
     ) as temporary_dir_name:
         temporary_output_path = Path(temporary_dir_name) / output_path.name
+        temporary_tokenizer_path = Path(temporary_dir_name) / "tokenizer"
         temporary_tokenizer_dir = _export_tokenizer(
             flat_config,
-            temporary_output_path,
+            temporary_tokenizer_path,
             source_checkpoint=tokenizer_source_checkpoint,
         )
-        save_file(model_state, str(output_path), metadata=metadata)
+        save_file(model_state, str(temporary_output_path), metadata=metadata)
         tokenizer_dir = None
         if temporary_tokenizer_dir is not None:
             tokenizer_dir = output_path.parent / "tokenizer"
             shutil.copytree(temporary_tokenizer_dir, tokenizer_dir, dirs_exist_ok=True)
+        temporary_output_path.replace(output_path)
 
     total_params = sum(int(t.numel()) for t in model_state.values())
     total_bytes = sum(int(t.numel()) * int(t.element_size()) for t in model_state.values())

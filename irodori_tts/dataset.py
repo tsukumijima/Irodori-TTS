@@ -283,6 +283,12 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
     def _manifest_file(self):
         current_pid = os.getpid()
         if (
+            self._manifest_fp is not None
+            and not self._manifest_fp.closed
+            and self._manifest_fp_pid != current_pid
+        ):
+            self._manifest_fp.close()
+        if (
             self._manifest_fp is None
             or self._manifest_fp.closed
             or self._manifest_fp_pid != current_pid
@@ -351,7 +357,7 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
                     if ref_sample_index == self._sample_index(index):
                         ref_sample_index = int(self.speaker_group_indices[group_end - 1])
                     ref_item = self._read_item_by_sample_index(ref_sample_index)
-                    ref_latent = self._load_latent(ref_item["latent_path"])
+                    ref_latent = self._load_ref_latent(ref_item["latent_path"])
                     has_speaker = True
 
         if ref_latent is None:

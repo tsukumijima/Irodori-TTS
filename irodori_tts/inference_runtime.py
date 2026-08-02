@@ -272,7 +272,7 @@ class RuntimeKey:
     attention_backend: str = "auto"
 
 
-@dataclass
+@dataclass(frozen=True)
 class SpeakerCondition:
     """
     話者条件の状態と有効トークン範囲を保持する。
@@ -286,7 +286,7 @@ class SpeakerCondition:
     mask: torch.Tensor
 
 
-@dataclass
+@dataclass(frozen=True)
 class ReferenceCondition:
     """Reference latent and its valid token range.
 
@@ -299,7 +299,7 @@ class ReferenceCondition:
     mask: torch.Tensor
 
 
-@dataclass
+@dataclass(frozen=True)
 class CaptionCondition:
     """Caption condition state and its valid token range.
 
@@ -420,18 +420,6 @@ class _ReferenceCacheKey:
     # パディング設定もキャッシュキーに含め、異なるパディング条件でキャッシュ混在を防ぐ
     speaker_ref_fixed_length: int | None = None
     speaker_ref_bucket_sizes: tuple[int, ...] | None = None
-
-
-@dataclass(frozen=True)
-class _ReferenceCondition:
-    latent: torch.Tensor
-    mask: torch.Tensor
-
-
-@dataclass(frozen=True)
-class _SpeakerCondition:
-    state: torch.Tensor
-    mask: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -884,11 +872,11 @@ class InferenceRuntime:
         self._infer_lock = threading.Lock()
         self._model_dtype = next(self.model.parameters()).dtype
         self._lora_adapter_names: dict[str, str] = {}
-        self._reference_condition_cache: OrderedDict[_ReferenceCacheKey, _ReferenceCondition] = (
+        self._reference_condition_cache: OrderedDict[_ReferenceCacheKey, ReferenceCondition] = (
             OrderedDict()
         )
         self._reference_condition_cache_max_entries = 32
-        self._speaker_condition_cache: OrderedDict[_ReferenceCacheKey, _SpeakerCondition] = (
+        self._speaker_condition_cache: OrderedDict[_ReferenceCacheKey, SpeakerCondition] = (
             OrderedDict()
         )
         self._speaker_condition_cache_max_entries = 32
@@ -1280,7 +1268,7 @@ class InferenceRuntime:
     def _put_cached_reference_condition(
         self,
         key: _ReferenceCacheKey | None,
-        condition: _ReferenceCondition,
+        condition: ReferenceCondition,
     ) -> None:
         if key is None:
             return
@@ -1291,7 +1279,7 @@ class InferenceRuntime:
 
     @staticmethod
     def _expand_reference_condition(
-        condition: _ReferenceCondition,
+        condition: ReferenceCondition,
         *,
         batch_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1318,7 +1306,7 @@ class InferenceRuntime:
     def _put_cached_speaker_condition(
         self,
         key: _ReferenceCacheKey | None,
-        condition: _SpeakerCondition,
+        condition: SpeakerCondition,
     ) -> None:
         if key is None:
             return
@@ -1492,7 +1480,7 @@ class InferenceRuntime:
 
     @staticmethod
     def _expand_speaker_condition(
-        condition: _SpeakerCondition,
+        condition: SpeakerCondition,
         *,
         batch_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1537,7 +1525,7 @@ class InferenceRuntime:
             ref_mask=ref_mask[:1],
             speaker_uncond_mode=req.speaker_uncond_mode,
         )
-        condition = _SpeakerCondition(state=state.detach(), mask=mask.detach())
+        condition = SpeakerCondition(state=state.detach(), mask=mask.detach())
         self._put_cached_speaker_condition(cache_key, condition)
         # speaker_state の生成後は大きい参照 latent を保持する必要がない
         ## 次回以降は話者状態を直接返し、GPU メモリと参照音声の再エンコードを両方省く
@@ -1824,16 +1812,29 @@ class InferenceRuntime:
                     "info: reference peak safety scaling enabled per clip (ensure_max=True)."
                 )
             latent_pieces = []
+            accumulated_latent_steps = 0
             for path in wav_paths:
                 wav, sr = _load_audio(path)
-                if len(wav_paths) == 1 and max_ref_seconds > 0:
-                    max_ref_samples = max(1, int(max_ref_seconds * float(sr)))
-                    if wav.shape[1] > max_ref_samples:
+                if max_ref_latent_steps is not None:
+                    remaining_latent_steps = max_ref_latent_steps - accumulated_latent_steps
+                    if remaining_latent_steps <= 0:
+                        break
+                    remaining_samples = max(
+                        1,
+                        int(
+                            remaining_latent_steps
+                            * int(self.codec.model.hop_length)
+                            * float(sr)
+                            / float(self.codec.sample_rate)
+                        ),
+                    )
+                    if wav.shape[1] > remaining_samples:
                         messages.append(
                             f"warning: reference audio exceeds max_ref_seconds ({max_ref_seconds}s). "
-                            f"Trimming from {float(wav.shape[1]) / float(sr):.2f}s to {float(max_ref_samples) / float(sr):.2f}s."
+                            f"Trimming this clip from {float(wav.shape[1]) / float(sr):.2f}s "
+                            f"to the remaining {float(remaining_samples) / float(sr):.2f}s."
                         )
-                        wav = wav[:, :max_ref_samples]
+                        wav = wav[:, :remaining_samples]
                 piece = self.codec.encode_waveform(
                     wav.unsqueeze(0),
                     sample_rate=int(sr),
@@ -1843,9 +1844,10 @@ class InferenceRuntime:
                 if piece.shape[1] == 0:
                     raise ValueError(f"Reference waveform produced an empty latent: {path}")
                 latent_pieces.append(piece)
+                accumulated_latent_steps += int(piece.shape[1])
                 if (
                     max_ref_latent_steps is not None
-                    and sum(int(item.shape[1]) for item in latent_pieces) >= max_ref_latent_steps
+                    and accumulated_latent_steps >= max_ref_latent_steps
                 ):
                     break
             ref_latent = torch.cat(latent_pieces, dim=1)
@@ -1918,7 +1920,7 @@ class InferenceRuntime:
                 device=self.model_device,
             )
 
-        condition = _ReferenceCondition(latent=ref_latent_patched, mask=ref_mask)
+        condition = ReferenceCondition(latent=ref_latent_patched, mask=ref_mask)
         self._put_cached_reference_condition(cache_key, condition)
         return self._expand_reference_condition(condition, batch_size=batch_size)
 
@@ -2202,7 +2204,7 @@ class InferenceRuntime:
                         f"mask: {int(speaker_condition_override.mask.shape[1])}."
                     )
                 speaker_state_override, speaker_mask_override = self._expand_speaker_condition(
-                    _SpeakerCondition(
+                    SpeakerCondition(
                         state=speaker_condition_override.state.detach().to(
                             device=self.model_device,
                             dtype=self._model_dtype,

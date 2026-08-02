@@ -83,8 +83,8 @@ explicit = true
 line-length = 100
 # インデントの幅を4スペースに設定
 indent-width = 4
-# Python 3.10 を利用する
-target-version = "py310"
+# Python 3.11 を利用する
+target-version = "py311"
 
 [tool.ruff.lint]
 # flake8, pycodestyle, pyupgrade, isort, Ruff 固有のルールを使う
@@ -113,7 +113,7 @@ indent-style = "space"
 
 [tool.pyright]
 # Python バージョンを指定
-pythonVersion = "3.10"
+pythonVersion = "3.11"
 # Pyright 実行時に .venv/ を確実に参照させる
 # この設定により Codex サンドボックス上から Pyright を実行すると依存関係を解決できない問題を回避できる
 venvPath = "."

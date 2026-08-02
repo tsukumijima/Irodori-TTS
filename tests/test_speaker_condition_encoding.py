@@ -7,6 +7,7 @@ from typing import Any, cast
 import pytest
 import torch
 
+import irodori_tts.inference_runtime as inference_runtime_module
 from irodori_tts.inference_runtime import InferenceRuntime, SamplingRequest
 
 
@@ -49,6 +50,32 @@ class RecordingSpeakerModel:
         )
 
 
+class RecordingReferenceCodec:
+    """参照音声の符号化前サンプル数を記録するテスト用 codec。"""
+
+    def __init__(self) -> None:
+        self.sample_rate = 10
+        self.model = SimpleNamespace(hop_length=2)
+        self.input_lengths: list[int] = []
+
+    def encode_waveform(self, waveform: torch.Tensor, **_kwargs: object) -> torch.Tensor:
+        """
+        入力サンプル数に対応する固定幅 latent を返す。
+
+        Args:
+            waveform (torch.Tensor): 符号化前の波形
+            **_kwargs (object): 実 codec と同じ呼び出しを受ける未使用の追加引数
+
+        Returns:
+            torch.Tensor: ホップ長2で換算したゼロ埋め latent
+        """
+
+        sample_count = int(waveform.shape[-1])
+        self.input_lengths.append(sample_count)
+        latent_steps = (sample_count + 1) // 2
+        return torch.zeros((1, latent_steps, 1), dtype=torch.float32)
+
+
 @pytest.mark.parametrize("speaker_patch_size", [1, 4])
 def test_no_ref_dummy_preserves_minimum_length_after_speaker_patching(
     speaker_patch_size: int,
@@ -75,7 +102,7 @@ def test_no_ref_dummy_preserves_minimum_length_after_speaker_patching(
     assert mask is not None
     assert latent.shape == (2, 4 * speaker_patch_size, 32)
     assert mask.shape == (2, 4 * speaker_patch_size)
-    assert mask.any().item() is False
+    assert not mask.any().item()
 
 
 def test_encode_speaker_condition_returns_server_cache_value() -> None:
@@ -125,6 +152,53 @@ def test_encode_reference_condition_accepts_multiple_waveforms() -> None:
 
     torch.testing.assert_close(condition.latent, expected_latent)
     torch.testing.assert_close(condition.mask, expected_mask)
+
+
+def test_multiple_reference_waveforms_trim_each_clip_to_remaining_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    複数参照の後続クリップが残り潜在長へ合わせて切り詰められることを検証する。
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): 参照音声読込を固定波形へ置き換えるフィクスチャ
+    """
+
+    runtime = cast(Any, InferenceRuntime.__new__(InferenceRuntime))
+    runtime.model = torch.nn.Linear(1, 1)
+    runtime.model_cfg = SimpleNamespace(
+        use_speaker_condition_resolved=True,
+        latent_dim=1,
+        latent_patch_size=1,
+        speaker_patch_size=1,
+    )
+    runtime.model_device = torch.device("cpu")
+    runtime.default_max_ref_seconds = 1.0
+    runtime.codec = RecordingReferenceCodec()
+    runtime._reference_cache_key = lambda _request, lora_adapter: None
+    runtime._reference_condition_cache = {}
+
+    waveforms = {
+        "first.wav": (torch.zeros((1, 6)), 10),
+        "second.wav": (torch.zeros((1, 10)), 10),
+    }
+    monkeypatch.setattr(
+        inference_runtime_module,
+        "_load_audio",
+        lambda path: waveforms[path],
+    )
+
+    latent, mask = runtime._load_reference_latent(
+        req=SamplingRequest(text="", ref_wavs=["first.wav", "second.wav"]),
+        lora_adapter=None,
+        batch_size=1,
+        messages=[],
+    )
+
+    assert latent is not None
+    assert mask is not None
+    assert runtime.codec.input_lengths == [6, 4]
+    assert latent.shape == (1, 5, 1)
 
 
 @pytest.mark.parametrize(

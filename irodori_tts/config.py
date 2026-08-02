@@ -54,6 +54,15 @@ class ModelConfig:
     duration_caption_fusion: str = "adarn_zero"
     duration_caption_pooling: str = "masked_mean"
 
+    def __post_init__(self) -> None:
+        text_encoder_type = str(self.text_encoder_type).strip().lower()
+        if text_encoder_type not in {"scratch", "pretrained"}:
+            raise ValueError(
+                "text_encoder_type must be either 'scratch' or 'pretrained': "
+                f"got {self.text_encoder_type!r}"
+            )
+        self.text_encoder_type = text_encoder_type
+
     @property
     def patched_latent_dim(self) -> int:
         return self.latent_dim * self.latent_patch_size
@@ -77,13 +86,7 @@ class ModelConfig:
 
     @property
     def use_pretrained_text_encoder(self) -> bool:
-        text_encoder_type = str(self.text_encoder_type).strip().lower()
-        if text_encoder_type not in {"scratch", "pretrained"}:
-            raise ValueError(
-                "text_encoder_type must be either 'scratch' or 'pretrained': "
-                f"got {self.text_encoder_type!r}"
-            )
-        return text_encoder_type == "pretrained"
+        return self.text_encoder_type == "pretrained"
 
     @property
     def caption_vocab_size_resolved(self) -> int:

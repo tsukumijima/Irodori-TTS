@@ -354,12 +354,13 @@ class DACVAECodec:
         else:
             effective_normalize_db = float(normalize_db)
         # 音量正規化の有効時は内部でピークも制限するため、無効時だけ追加のピーク制限を使う
-        effective_ensure_max = (
-            effective_normalize_db is None and bool(ensure_max) if ensure_max is not None else False
-        )
+        if effective_normalize_db is None and ensure_max is not None:
+            effective_ensure_max = bool(ensure_max)
+        else:
+            effective_ensure_max = False
 
-        # 後続の音量処理と codec encode に合わせて、対象デバイス上の float32 へ変換する
-        waveform = waveform.to(self.device, dtype=torch.float32)
+        # 音量測定とピーク制限は CPU の float32 で行い、波形ごとのデバイス同期を避ける
+        waveform = waveform.to(device="cpu", dtype=torch.float32)
         if effective_normalize_db is not None or effective_ensure_max:
             # Keep behavior deterministic per utterance by normalizing each waveform independently.
             processed: list[torch.Tensor] = []
@@ -381,6 +382,7 @@ class DACVAECodec:
                 processed.append(wav)
             waveform = torch.stack(processed, dim=0).unsqueeze(1)
 
+        # 音量処理を CPU で完了してから、codec encode 用のデバイスと精度へ一度だけ転送する
         waveform = waveform.to(self.device, dtype=self.dtype)
         if self.deterministic_encode:
             required_paths_present = (

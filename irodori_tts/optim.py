@@ -124,14 +124,14 @@ def _is_pretrained_text_backbone_parameter(name: str) -> bool:
     return name.startswith("pretrained_text_backbone.") or (".pretrained_text_backbone." in name)
 
 
-def _partition_adamw_params(
-    model: torch.nn.Module,
-) -> tuple[
-    list[torch.nn.Parameter],
-    list[torch.nn.Parameter],
-    list[torch.nn.Parameter],
-    list[torch.nn.Parameter],
-]:
+class _AdamWParameterPartitions(NamedTuple):
+    decay: list[torch.nn.Parameter]
+    no_decay: list[torch.nn.Parameter]
+    pretrained_decay: list[torch.nn.Parameter]
+    pretrained_no_decay: list[torch.nn.Parameter]
+
+
+def _partition_adamw_params(model: torch.nn.Module) -> _AdamWParameterPartitions:
     decay: list[torch.nn.Parameter] = []
     no_decay: list[torch.nn.Parameter] = []
     pretrained_decay: list[torch.nn.Parameter] = []
@@ -149,7 +149,12 @@ def _partition_adamw_params(
             decay.append(p)
         else:
             no_decay.append(p)
-    return decay, no_decay, pretrained_decay, pretrained_no_decay
+    return _AdamWParameterPartitions(
+        decay=decay,
+        no_decay=no_decay,
+        pretrained_decay=pretrained_decay,
+        pretrained_no_decay=pretrained_no_decay,
+    )
 
 
 class _MuonParameterPartitions(NamedTuple):
@@ -231,32 +236,32 @@ def _append_param_group(
 def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
     opt_name = cfg.optimizer.lower()
     if opt_name == "adamw":
-        decay, no_decay, pretrained_decay, pretrained_no_decay = _partition_adamw_params(model)
+        partitions = _partition_adamw_params(model)
         param_groups: list[dict[str, Any]] = []
         _append_param_group(
             param_groups,
-            decay,
+            partitions.decay,
             weight_decay=cfg.weight_decay,
             learning_rate=cfg.learning_rate,
             group_name="main_decay",
         )
         _append_param_group(
             param_groups,
-            no_decay,
+            partitions.no_decay,
             weight_decay=0.0,
             learning_rate=cfg.learning_rate,
             group_name="main_no_decay",
         )
         _append_param_group(
             param_groups,
-            pretrained_decay,
+            partitions.pretrained_decay,
             weight_decay=cfg.weight_decay,
             learning_rate=cfg.pretrained_text_encoder_learning_rate,
             group_name="pretrained_text_encoder_decay",
         )
         _append_param_group(
             param_groups,
-            pretrained_no_decay,
+            partitions.pretrained_no_decay,
             weight_decay=0.0,
             learning_rate=cfg.pretrained_text_encoder_learning_rate,
             group_name="pretrained_text_encoder_no_decay",

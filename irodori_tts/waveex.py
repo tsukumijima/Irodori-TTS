@@ -162,6 +162,8 @@ def _build_dwt_matrix(
     h = bank["dec_lo"]
     g = bank["dec_hi"]
     L = int(h.numel())
+    if L > T:
+        raise ValueError(f"DWT filter length must not exceed T, got L={L} and T={T}.")
     W = torch.zeros(T, T, device=device, dtype=dtype)
     half = T // 2
     for n in range(half):
@@ -341,7 +343,7 @@ class WaveExBuffer:
     # -------------------------------------------------------------------
 
     def _wavelet_predict(self, stack: torch.Tensor) -> torch.Tensor:
-        # Use highest available power-of-two prefix so DWT/IDWT round trips cleanly.
+        # 1段の DWT/IDWT 往復には偶数長だけが必要なため、奇数時は最古の1点を除く
         T = int(stack.shape[0])
         if T % 2 == 1:
             stack = stack[1:]  # drop the oldest sample to keep T even

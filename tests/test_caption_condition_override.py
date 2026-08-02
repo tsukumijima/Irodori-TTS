@@ -74,6 +74,12 @@ class CaptionConditionOverrideTest(unittest.TestCase):
         runtime.model_cfg = cast(Any, SimpleNamespace(use_caption_condition=True))
         runtime.model = cast(Any, RecordingCaptionModel())
         runtime.model_device = torch.device("cpu")
+        runtime._model_dtype = torch.float32
+        runtime._caption_condition_cache = OrderedDict()
+        runtime._caption_condition_cache_max_entries = 4
+        runtime.caption_tokenizer = None
+        runtime.default_caption_max_len = 16
+        runtime._infer_lock = threading.Lock()
         return runtime
 
     def _load(
@@ -160,10 +166,6 @@ class CaptionConditionOverrideTest(unittest.TestCase):
         model.caption_encoder = encoder
         model.caption_norm = torch.nn.Identity()
         model.pretrained_text_backbone = backbone
-        runtime._model_dtype = torch.float32
-        runtime._caption_condition_cache = OrderedDict()
-        runtime._caption_condition_cache_max_entries = 4
-
         state, mask = runtime._load_cached_caption_condition(
             req=SamplingRequest(text="テスト"),
             lora_adapter=None,
@@ -189,8 +191,6 @@ class CaptionConditionOverrideTest(unittest.TestCase):
         model.caption_norm = torch.nn.Identity()
         model.pretrained_text_backbone = backbone
         runtime.caption_tokenizer = cast(Any, tokenizer)
-        runtime.default_caption_max_len = 16
-        runtime._infer_lock = threading.Lock()
 
         condition = runtime.encode_caption_condition(" 落ち着いた声 ", max_length=8)
 

@@ -272,6 +272,11 @@ def _run_generation(
     ref_wav_paths = resolve_gradio_reference_wavs(ref_wavs)
     effective_no_ref = not ref_wav_paths or not runtime.model_cfg.use_speaker_condition_resolved
     if effective_no_ref:
+        if ref_wav_paths and not runtime.model_cfg.use_speaker_condition_resolved:
+            stdout_log(
+                "[gradio-caption] uploaded reference audio was ignored because this checkpoint "
+                "does not support speaker conditioning."
+            )
         ref_wav_paths = []
 
     stdout_log(f"[gradio-caption] runtime: {'reloaded' if reloaded else 'reused'}")

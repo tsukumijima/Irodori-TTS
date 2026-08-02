@@ -15,11 +15,11 @@ def coerce_gradio_file_path(value: object) -> str | None:
             if candidate is not None and str(candidate).strip():
                 return str(candidate)
         return None
-    candidate = getattr(value, "name", None)
-    if candidate is not None and str(candidate).strip():
-        return str(candidate)
-    text = str(value).strip()
-    return text or None
+    for attribute in ("path", "name"):
+        candidate = getattr(value, attribute, None)
+        if candidate is not None and str(candidate).strip():
+            return str(candidate)
+    return None
 
 
 def resolve_gradio_reference_wavs(uploaded_audio: object) -> list[str]:
