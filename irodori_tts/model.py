@@ -937,6 +937,46 @@ class ReferenceLatentEncoder(nn.Module):
             self._freqs_cis_cache = cache
         return cache[:seq_len]
 
+    def upgrade_patch_projection(
+        self,
+        old_weight: torch.Tensor,
+        *,
+        old_patch_size: int,
+        new_patch_size: int,
+    ) -> None:
+        """
+        Expand a speaker projection when the reference patch size increases.
+
+        Args:
+            old_weight (torch.Tensor): Projection weight from the source checkpoint.
+            old_patch_size (int): Reference patch size used by the source checkpoint.
+            new_patch_size (int): Reference patch size used by this encoder.
+
+        Raises:
+            ValueError: Patch sizes are incompatible or the source weight shape is invalid.
+        """
+
+        if new_patch_size <= old_patch_size or new_patch_size % old_patch_size != 0:
+            raise ValueError(
+                "speaker_patch_size upgrade must be a positive integer multiple: "
+                f"old={old_patch_size} new={new_patch_size}"
+            )
+        factor = new_patch_size // old_patch_size
+        expected_output_dim = int(self.in_proj.weight.shape[0])
+        expected_old_input_dim = int(self.in_proj.weight.shape[1]) // factor
+        if tuple(old_weight.shape) != (expected_output_dim, expected_old_input_dim):
+            raise ValueError(
+                f"Speaker projection has shape {tuple(old_weight.shape)}, expected "
+                f"({expected_output_dim}, {expected_old_input_dim}) for patch upgrade "
+                f"{old_patch_size}->{new_patch_size}."
+            )
+        # 同じフレームが連続する場合の出力を保つよう、複製した各区間の寄与を平均する
+        upgraded_weight = old_weight.to(dtype=self.in_proj.weight.dtype).repeat(
+            1, factor
+        ).contiguous() / float(factor)
+        with torch.no_grad():
+            self.in_proj.weight.copy_(upgraded_weight.to(device=self.in_proj.weight.device))
+
     def forward(self, latent: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         x = self.in_proj(latent)
         x = x / 6.0

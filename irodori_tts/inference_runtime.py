@@ -269,6 +269,7 @@ class RuntimeKey:
     compile_model: bool = False
     compile_dynamic: bool = False
     enable_watermark: bool = False
+    # CUDA SDPA backend flags are process-global; the most recently created runtime controls all runtimes.
     attention_backend: str = "auto"
 
 
@@ -455,7 +456,10 @@ def _maybe_compile_inference_model(
 
 def _configure_attention_backend(attention_backend: str) -> None:
     """
-    Configure the global SDPA backend preference for inference.
+    Configure the process-global CUDA SDPA backend preference for inference.
+
+    Cached runtimes do not isolate these flags. The most recently configured
+    backend applies to every runtime in the process.
 
     Args:
         attention_backend (str): Backend name (`auto`, `mem_efficient`, `cudnn`, `math`, `flash`)
@@ -1264,12 +1268,17 @@ class InferenceRuntime:
         # 複数参照では入力順も話者条件へ影響するため、各ファイルの識別情報を順序付きで保持する
         sources: list[tuple[str, str, int, int]] = []
         for source_type, source_path in source_paths:
-            path = Path(source_path).expanduser()
-            stat = path.stat()
+            path = Path(source_path).expanduser().resolve()
+            try:
+                stat = path.stat()
+            except FileNotFoundError as ex:
+                raise FileNotFoundError(
+                    f"Reference {source_type} file was not found: {path}"
+                ) from ex
             sources.append(
                 (
                     source_type,
-                    str(path.resolve()),
+                    str(path),
                     int(stat.st_mtime_ns),
                     int(stat.st_size),
                 )
@@ -1536,6 +1545,7 @@ class InferenceRuntime:
         *,
         req: SamplingRequest,
         lora_adapter: str | None,
+        cache_key: _ReferenceCacheKey | None,
         ref_latent: torch.Tensor | None,
         ref_mask: torch.Tensor | None,
         batch_size: int,
@@ -1546,10 +1556,6 @@ class InferenceRuntime:
         if req.no_ref or req.ref_embed is not None:
             return None, None
 
-        cache_key = self._reference_cache_key(
-            req,
-            lora_adapter=lora_adapter,
-        )
         cached_state, cached_mask = self._get_cached_speaker_condition(
             cache_key,
             batch_size=batch_size,
@@ -2264,6 +2270,11 @@ class InferenceRuntime:
             if speaker_state_override is None:
                 ref_latent = None
                 ref_mask = None
+                # 同一要求の話者条件再試行では、参照ファイルの識別情報を一度だけ取得する
+                speaker_cache_key = self._reference_cache_key(
+                    req,
+                    lora_adapter=lora_adapter,
+                )
                 # 起動時または過去の要求で作成済みなら speaker_state を直接再利用する
                 (
                     cached_speaker_state,
@@ -2271,6 +2282,7 @@ class InferenceRuntime:
                 ) = self._load_cached_speaker_condition(
                     req=req,
                     lora_adapter=lora_adapter,
+                    cache_key=speaker_cache_key,
                     ref_latent=None,
                     ref_mask=None,
                     batch_size=num_candidates,
@@ -2289,6 +2301,7 @@ class InferenceRuntime:
                     ) = self._load_cached_speaker_condition(
                         req=req,
                         lora_adapter=lora_adapter,
+                        cache_key=speaker_cache_key,
                         ref_latent=ref_latent,
                         ref_mask=ref_mask,
                         batch_size=num_candidates,

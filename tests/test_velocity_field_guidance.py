@@ -116,6 +116,7 @@ class FakeSpeakerVelocityModel(FakeVelocityModel):
 class VelocityFieldGuidanceTest(unittest.TestCase):
     def test_sampling_request_keeps_guidance_before_new_positional_fields(self) -> None:
         field_names = [field.name for field in fields(SamplingRequest)]
+        # index 50 を固定し、既存フィールドと新規位置引数の互換境界を検証する
         self.assertEqual(field_names.index("velocity_field_guidance"), 50)
 
     def _sample(

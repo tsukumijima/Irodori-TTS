@@ -27,7 +27,7 @@ class ConstantVelocityModel:
         self.dtype = torch.float32
         self.cfg = SimpleNamespace(
             patched_latent_dim=1,
-            use_caption_condition=False,
+            use_caption_condition=True,
             use_speaker_condition_resolved=False,
         )
 
@@ -41,7 +41,9 @@ class ConstantVelocityModel:
 
         text_state = torch.zeros((1, 1, 1), dtype=self.dtype)
         text_mask = torch.ones((1, 1), dtype=torch.bool)
-        return EncodedConditions(text_state, text_mask, None, None, None, None)
+        caption_state = torch.zeros((1, 1, 1), dtype=self.dtype)
+        caption_mask = torch.ones((1, 1), dtype=torch.bool)
+        return EncodedConditions(text_state, text_mask, None, None, caption_state, caption_mask)
 
     def forward_with_encoded_conditions(self, **kwargs: Any) -> torch.Tensor:
         """
@@ -98,7 +100,7 @@ class TrajectoryObserverTest(unittest.TestCase):
             sequence_length=2,
             num_steps=num_steps,
             cfg_scale_text=0.0,
-            cfg_scale_caption=0.0,
+            cfg_scale_caption=1.0,
             cfg_scale_speaker=0.0,
             use_context_kv_cache=False,
             initial_noise=torch.ones((1, 2, 1), dtype=torch.float32),
@@ -111,6 +113,7 @@ class TrajectoryObserverTest(unittest.TestCase):
         with patch.object(torch.Tensor, "item", return_value=True) as item_mock:
             self._sample(None, num_steps=2)
         short_schedule_calls = item_mock.call_count
+        self.assertGreater(short_schedule_calls, 0)
 
         with patch.object(torch.Tensor, "item", return_value=True) as item_mock:
             self._sample(None, num_steps=5)

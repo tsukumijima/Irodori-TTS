@@ -356,7 +356,13 @@ class WaveExBuffer:
 
         order = int(self.cfg.taylor_order)
         history = list(self._history)
-        if len(history) >= 4 and len(history) >= order + 1:
+        filter_length = int(_WAVELET_BANKS[self.cfg.wavelet.lower()]["dec_lo"].numel())
+        wavelet_history_length = len(history) - (len(history) % 2)
+        if (
+            len(history) >= 4
+            and len(history) >= order + 1
+            and wavelet_history_length >= filter_length
+        ):
             stack = torch.stack(history, dim=0)  # (T, *)
             return self._wavelet_predict(stack)
         return self._taylor_predict_direct()

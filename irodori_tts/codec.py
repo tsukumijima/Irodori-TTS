@@ -228,10 +228,16 @@ class DACVAECodec:
                 waveform,
                 gate_samples,
             )[::step_samples]
-            energy: NDArray[np.float32] = np.asarray(
-                np.mean(np.square(windows), axis=1, dtype=np.float32),
-                dtype=np.float32,
-            )
+            # 長音声でも全窓分の二乗配列を同時に確保しないよう、窓を固定数ずつ集計する
+            energy = np.empty((windows.shape[0],), dtype=np.float32)
+            window_chunk_size = 1024
+            for window_start in range(0, windows.shape[0], window_chunk_size):
+                window_end = min(window_start + window_chunk_size, windows.shape[0])
+                energy[window_start:window_end] = np.mean(
+                    np.square(windows[window_start:window_end]),
+                    axis=1,
+                    dtype=np.float32,
+                )
         else:
             energy = np.empty((0,), dtype=np.float32)
         # 窓を1つも作れない短音声は、有限な無音値として扱う

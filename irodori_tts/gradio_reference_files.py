@@ -20,13 +20,17 @@ def coerce_gradio_file_path(value: object) -> str | None:
     if isinstance(value, dict):
         for key in ("path", "name"):
             candidate = value.get(key)
-            if candidate is not None and str(candidate).strip():
-                return str(candidate)
+            if candidate is not None:
+                text = str(candidate).strip()
+                if text:
+                    return text
         return None
     for attribute in ("path", "name"):
         candidate = getattr(value, attribute, None)
-        if candidate is not None and str(candidate).strip():
-            return str(candidate)
+        if candidate is not None:
+            text = str(candidate).strip()
+            if text:
+                return text
     return None
 
 
