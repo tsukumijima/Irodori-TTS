@@ -21,7 +21,7 @@ warm-up phase.
 
 from __future__ import annotations
 
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -134,7 +134,8 @@ def _get_filter_bank(
 # ---------------------------------------------------------------------------
 
 
-_DWT_MATRIX_CACHE: dict[tuple[str, int, str, str], torch.Tensor] = {}
+_DWT_MATRIX_CACHE_MAX_ENTRIES = 32
+_DWT_MATRIX_CACHE: OrderedDict[tuple[str, int, str, str], torch.Tensor] = OrderedDict()
 
 
 def _build_dwt_matrix(
@@ -157,6 +158,7 @@ def _build_dwt_matrix(
     cache_key = (str(wavelet).lower(), int(T), str(device), str(dtype))
     cached = _DWT_MATRIX_CACHE.get(cache_key)
     if cached is not None:
+        _DWT_MATRIX_CACHE.move_to_end(cache_key)
         return cached
     bank = _get_filter_bank(wavelet, device=device, dtype=dtype)
     h = bank["dec_lo"]
@@ -172,6 +174,8 @@ def _build_dwt_matrix(
             W[n, col] = W[n, col] + h[k]
             W[half + n, col] = W[half + n, col] + g[k]
     _DWT_MATRIX_CACHE[cache_key] = W
+    if len(_DWT_MATRIX_CACHE) > _DWT_MATRIX_CACHE_MAX_ENTRIES:
+        _DWT_MATRIX_CACHE.popitem(last=False)
     return W
 
 
@@ -291,7 +295,15 @@ class WaveExConfig:
         if num_steps <= 0:
             raise ValueError(f"num_steps must be > 0, got {num_steps}.")
         if self.ode_step_indices is not None:
-            indices = {int(i) for i in self.ode_step_indices if 0 <= int(i) < num_steps}
+            invalid_indices = [
+                int(index) for index in self.ode_step_indices if not 0 <= int(index) < num_steps
+            ]
+            if len(invalid_indices) > 0:
+                raise ValueError(
+                    f"ode_step_indices must satisfy 0 <= index < {num_steps}, "
+                    f"got {invalid_indices}."
+                )
+            indices = {int(i) for i in self.ode_step_indices}
             indices.add(0)
             return indices
 
@@ -392,8 +404,7 @@ class WaveExBuffer:
             return x_n
         x_next = x_n + d1
         if order >= 2 and len(history) >= 3:
-            d2 = history[-1] - 2 * history[-2] + history[-3]
-            x_next = x_next + 0.5 * d2
+            x_next = 3 * history[-1] - 3 * history[-2] + history[-3]
         return x_next
 
 

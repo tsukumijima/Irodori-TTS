@@ -107,11 +107,15 @@ class TrajectoryObserverTest(unittest.TestCase):
         )
 
     def test_default_sampling_does_not_read_cuda_scalars_per_step(self) -> None:
-        # CPU テストでも Tensor.item() を禁止し、反復ごとの CUDA 同期が再混入した場合に検出する
+        # ステップ数を増やしても item() 回数が増えないことから、反復内の CUDA 同期再混入を検出する
         with patch.object(torch.Tensor, "item", return_value=True) as item_mock:
-            self._sample(None)
+            self._sample(None, num_steps=2)
+        short_schedule_calls = item_mock.call_count
 
-        self.assertEqual(item_mock.call_count, 0)
+        with patch.object(torch.Tensor, "item", return_value=True) as item_mock:
+            self._sample(None, num_steps=5)
+
+        self.assertEqual(item_mock.call_count, short_schedule_calls)
 
     def test_observer_receives_predict_x0_without_changing_output(self) -> None:
         observations: list[TrajectoryObservation] = []
@@ -192,6 +196,38 @@ class TrajectoryObserverTest(unittest.TestCase):
                     history_size=2,
                 ),
             )
+
+    def test_observer_rejects_duplicate_step_indices(self) -> None:
+        observer = TrajectoryObserver(
+            step_indices=(0, 0),
+            callback=lambda _observation: None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "must not contain duplicates"):
+            self._sample(observer)
+
+    def test_observer_rejects_out_of_range_step_indices(self) -> None:
+        observer = TrajectoryObserver(
+            step_indices=(2,),
+            callback=lambda _observation: None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "must be within"):
+            self._sample(observer)
+
+    def test_sampling_rejects_non_decreasing_schedule(self) -> None:
+        with (
+            patch(
+                "irodori_tts.rf.torch.linspace",
+                return_value=torch.tensor([0.0, 0.0, 1.0]),
+            ),
+            self.assertRaisesRegex(ValueError, "strictly decreasing"),
+        ):
+            self._sample(None)
+
+    def test_sampling_rejects_non_positive_step_count(self) -> None:
+        with self.assertRaisesRegex(ValueError, "greater than zero"):
+            self._sample(None, num_steps=0)
 
 
 if __name__ == "__main__":

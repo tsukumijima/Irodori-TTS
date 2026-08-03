@@ -448,9 +448,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # WaveEx の履歴差分には少なくとも2状態が必要なため、設定構築前に CLI エラーへ変換する
-    if args.waveex_history_size < 2:
-        parser.error("--waveex-history-size must be at least 2.")
     checkpoint_path = _resolve_checkpoint_path(args)
 
     runtime = InferenceRuntime.from_key(
@@ -497,17 +494,20 @@ def main() -> None:
 
     waveex_cfg: WaveExConfig | None = None
     if bool(args.waveex):
-        waveex_cfg = WaveExConfig(
-            enabled=True,
-            ode_step_indices=parse_ode_step_indices(
-                args.waveex_ode_steps,
-                num_steps=int(args.num_steps),
-            ),
-            wavelet=str(args.waveex_wavelet),
-            taylor_order=int(args.waveex_taylor_order),
-            history_size=int(args.waveex_history_size),
-            high_freq_mode=str(args.waveex_high_freq_mode),
-        )
+        try:
+            waveex_cfg = WaveExConfig(
+                enabled=True,
+                ode_step_indices=parse_ode_step_indices(
+                    args.waveex_ode_steps,
+                    num_steps=int(args.num_steps),
+                ),
+                wavelet=str(args.waveex_wavelet),
+                taylor_order=int(args.waveex_taylor_order),
+                history_size=int(args.waveex_history_size),
+                high_freq_mode=str(args.waveex_high_freq_mode),
+            )
+        except ValueError as ex:
+            parser.error(str(ex))
 
     result = runtime.synthesize(
         SamplingRequest(

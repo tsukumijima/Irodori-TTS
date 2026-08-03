@@ -465,6 +465,26 @@ def _configure_attention_backend(attention_backend: str) -> None:
     """
 
     backend = str(attention_backend).strip().lower().replace("-", "_")
+    supported_backends = {
+        "",
+        "auto",
+        "default",
+        "mem",
+        "memory_efficient",
+        "mem_efficient",
+        "efficient",
+        "cudnn",
+        "math",
+        "flash",
+    }
+    if backend not in supported_backends:
+        raise ValueError(
+            "attention_backend must be one of: auto, mem_efficient, cudnn, math, flash. "
+            f"Got {attention_backend!r}."
+        )
+    # CPU と MPS では CUDA の大域 SDPA 設定を変更せず、各バックエンドの既定動作を維持する
+    if not torch.cuda.is_available():
+        return
     if backend in {"", "auto", "default"}:
         torch.backends.cuda.enable_flash_sdp(True)
         torch.backends.cuda.enable_mem_efficient_sdp(True)
@@ -495,10 +515,7 @@ def _configure_attention_backend(attention_backend: str) -> None:
         torch.backends.cuda.enable_cudnn_sdp(False)
         torch.backends.cuda.enable_math_sdp(False)
         return
-    raise ValueError(
-        "attention_backend must be one of: auto, mem_efficient, cudnn, math, flash. "
-        f"Got {attention_backend!r}."
-    )
+    raise RuntimeError(f"Validated attention backend was not configured: {backend!r}")
 
 
 def _move_inference_module(
@@ -665,7 +682,7 @@ def _extract_inference_train_config(
         value = raw.get(key)
         if value is None:
             continue
-        if not isinstance(value, int):
+        if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(f"Inference config key '{key}' must be int, got {type(value)!r}.")
         inference_cfg[key] = int(value)
 
@@ -678,8 +695,7 @@ def _extract_inference_train_config(
         value_float = float(value)
         if not math.isfinite(value_float):
             raise ValueError(f"Inference config key '{key}' must be finite, got {value!r}.")
-        if value_float > 0.0:
-            inference_cfg[key] = value_float
+        inference_cfg[key] = value_float
 
     return inference_cfg or None
 
@@ -691,7 +707,7 @@ def _split_flat_checkpoint_config(
     inference_cfg: dict[str, int | float] = {}
     for key, value in flat_config.items():
         if key in _INFERENCE_INT_CONFIG_KEYS:
-            if not isinstance(value, int):
+            if isinstance(value, bool) or not isinstance(value, int):
                 raise ValueError(
                     f"Inference config key '{key}' must be int in checkpoint metadata: {path}"
                 )
@@ -707,8 +723,7 @@ def _split_flat_checkpoint_config(
                 raise ValueError(
                     f"Inference config key '{key}' must be finite in checkpoint metadata: {path}"
                 )
-            if value_float > 0.0:
-                inference_cfg[key] = value_float
+            inference_cfg[key] = value_float
             continue
         model_cfg[key] = value
     return model_cfg, (inference_cfg or None)
@@ -719,7 +734,7 @@ def _default_max_ref_seconds(train_cfg: dict[str, Any] | None) -> float:
         value = train_cfg.get("ref_max_seconds")
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             value_float = float(value)
-            if math.isfinite(value_float) and value_float > 0.0:
+            if math.isfinite(value_float):
                 return value_float
     return _LEGACY_MAX_REF_SECONDS
 
@@ -1202,16 +1217,44 @@ class InferenceRuntime:
         self.model.eval()
         return nullcontext()
 
+    @staticmethod
+    def _validate_reference_inputs(req: SamplingRequest) -> tuple[list[str], list[str]]:
+        """
+        参照入力の排他条件とパス文字列を検証する。
+
+        Args:
+            req (SamplingRequest): 検証する推論要求
+
+        Returns:
+            tuple[list[str], list[str]]: latent パス列と音声パス列
+
+        Raises:
+            ValueError: 参照種別が競合するか空のパスを含む場合
+        """
+
+        latent_paths = ([req.ref_latent] if req.ref_latent is not None else []) + list(
+            req.ref_latents or []
+        )
+        wav_paths = ([req.ref_wav] if req.ref_wav is not None else []) + list(req.ref_wavs or [])
+        if req.ref_wav is not None and req.ref_wavs:
+            raise ValueError("ref_wav and ref_wavs cannot be used together.")
+        if req.ref_latent is not None and req.ref_latents:
+            raise ValueError("ref_latent and ref_latents cannot be used together.")
+        if wav_paths and latent_paths:
+            raise ValueError("Waveform and latent reference inputs cannot be mixed.")
+        if any(not path.strip() for path in wav_paths):
+            raise ValueError("Reference waveform paths must be non-empty strings.")
+        if any(not path.strip() for path in latent_paths):
+            raise ValueError("Reference latent paths must be non-empty strings.")
+        return latent_paths, wav_paths
+
     def _reference_cache_key(
         self,
         req: SamplingRequest,
         *,
         lora_adapter: str | None,
     ) -> _ReferenceCacheKey | None:
-        latent_paths = ([req.ref_latent] if req.ref_latent is not None else []) + list(
-            req.ref_latents or []
-        )
-        wav_paths = ([req.ref_wav] if req.ref_wav is not None else []) + list(req.ref_wavs or [])
+        latent_paths, wav_paths = self._validate_reference_inputs(req)
         source_paths = [("latent", path) for path in latent_paths] + [
             ("wav", path) for path in wav_paths
         ]
@@ -1669,7 +1712,10 @@ class InferenceRuntime:
                 )
             messages.append("info: using request caption conditioning override.")
             condition = CaptionCondition(
-                state=caption_state_override.detach().to(self.model_device),
+                state=caption_state_override.detach().to(
+                    device=self.model_device,
+                    dtype=self._model_dtype,
+                ),
                 mask=caption_mask_override.detach().to(self.model_device),
             )
             return self._expand_caption_condition(condition, batch_size=batch_size)
@@ -1717,20 +1763,7 @@ class InferenceRuntime:
             if req.max_ref_seconds is None
             else float(req.max_ref_seconds)
         )
-        wav_paths = ([req.ref_wav] if req.ref_wav is not None else []) + list(req.ref_wavs or [])
-        latent_paths = ([req.ref_latent] if req.ref_latent is not None else []) + list(
-            req.ref_latents or []
-        )
-        if req.ref_wav is not None and req.ref_wavs:
-            raise ValueError("ref_wav and ref_wavs cannot be used together.")
-        if req.ref_latent is not None and req.ref_latents:
-            raise ValueError("ref_latent and ref_latents cannot be used together.")
-        if wav_paths and latent_paths:
-            raise ValueError("Waveform and latent reference inputs cannot be mixed.")
-        if any(not path.strip() for path in wav_paths):
-            raise ValueError("Reference waveform paths must be non-empty strings.")
-        if any(not path.strip() for path in latent_paths):
-            raise ValueError("Reference latent paths must be non-empty strings.")
+        latent_paths, wav_paths = self._validate_reference_inputs(req)
         if not self.model_cfg.use_speaker_condition_resolved:
             if wav_paths or latent_paths:
                 messages.append(
@@ -1783,6 +1816,7 @@ class InferenceRuntime:
 
         if latent_paths:
             latent_pieces: list[torch.Tensor] = []
+            accumulated_latent_steps = 0
             for path in latent_paths:
                 latent_raw = torch.load(path, map_location="cpu", weights_only=True)
                 piece = _coerce_latent_shape(
@@ -1791,9 +1825,10 @@ class InferenceRuntime:
                 if piece.shape[1] == 0:
                     raise ValueError(f"Reference latent is empty: {path}")
                 latent_pieces.append(piece.to(dtype=runtime_dtype))
+                accumulated_latent_steps += int(piece.shape[1])
                 if (
                     max_ref_latent_steps is not None
-                    and sum(int(item.shape[1]) for item in latent_pieces) >= max_ref_latent_steps
+                    and accumulated_latent_steps >= max_ref_latent_steps
                 ):
                     break
             ref_latent = torch.cat(latent_pieces, dim=1)
@@ -1814,7 +1849,7 @@ class InferenceRuntime:
             latent_pieces = []
             accumulated_latent_steps = 0
             for path in wav_paths:
-                wav, sr = _load_audio(path)
+                wav, sr = load_audio(path)
                 if max_ref_latent_steps is not None:
                     remaining_latent_steps = max_ref_latent_steps - accumulated_latent_steps
                     if remaining_latent_steps <= 0:
@@ -2569,6 +2604,7 @@ class InferenceRuntime:
                         device=self.model_device,
                         ref_latent=generated_reference_latent,
                         ref_mask=generated_reference_mask,
+                        speaker_uncond_mode=req.speaker_uncond_mode,
                     )
                 )
                 generated_speaker_condition = SpeakerCondition(
@@ -2729,9 +2765,22 @@ def clear_cached_runtime() -> None:
         runtime.unload()
 
 
-def _load_audio(path: str | Path) -> tuple[torch.Tensor, int]:
+def load_audio(path: str | Path) -> tuple[torch.Tensor, int]:
+    """
+    SoundFile 対応音声を推論用のチャンネル先頭波形として読み込む。
+
+    Args:
+        path (str | Path): 読み込む音声ファイル
+
+    Returns:
+        tuple[torch.Tensor, int]: `(channel, frame)` 波形とサンプリング周波数
+    """
+
     # SoundFile の (frame, channel) を推論内部の (channel, frame) へ変換する
-    data, sample_rate = sf.read(str(path), dtype="float32", always_2d=True)
+    try:
+        data, sample_rate = sf.read(str(path), dtype="float32", always_2d=True)
+    except sf.LibsndfileError as ex:
+        raise RuntimeError(f"Failed to load reference audio: {path}") from ex
     waveform = torch.from_numpy(np.ascontiguousarray(data.T))
     return waveform, int(sample_rate)
 

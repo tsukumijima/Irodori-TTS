@@ -60,20 +60,63 @@ class FakeVelocityModel:
         return torch.full_like(x_t, caption_sum)
 
 
+class FakeSpeakerVelocityModel(FakeVelocityModel):
+    """
+    話者条件対による追加 forward を記録する。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cfg.use_caption_condition = False
+        self.cfg.use_speaker_condition_resolved = True
+        self.speaker_sums: list[float] = []
+
+    def encode_conditions(self, **_kwargs: Any) -> EncodedConditions:
+        """
+        話者条件を含む最小の符号化済み条件を返す。
+
+        Args:
+            **_kwargs (Any): 実モデルと同じ呼び出しを受ける未使用の条件 Tensor
+
+        Returns:
+            EncodedConditions: 話者状態とマスクを含む条件一式
+        """
+
+        text_state = torch.zeros((1, 1, 1), dtype=self.dtype)
+        text_mask = torch.ones((1, 1), dtype=torch.bool)
+        speaker_state = torch.ones((1, 2, 1), dtype=self.dtype)
+        speaker_mask = torch.ones((1, 2), dtype=torch.bool)
+        return EncodedConditions(
+            text_state,
+            text_mask,
+            speaker_state,
+            speaker_mask,
+            None,
+            None,
+        )
+
+    def forward_with_encoded_conditions(self, **kwargs: Any) -> torch.Tensor:
+        """
+        話者状態の合計を速度として返す。
+
+        Args:
+            **kwargs (Any): `x_t` と `speaker_state` を含むサンプラー引数
+
+        Returns:
+            torch.Tensor: 入力潜在と同じ形の一定速度
+        """
+
+        x_t = cast(torch.Tensor, kwargs["x_t"])
+        speaker_state = cast(torch.Tensor, kwargs["speaker_state"])
+        speaker_sum = float(speaker_state.sum().item())
+        self.speaker_sums.append(speaker_sum)
+        return torch.full_like(x_t, speaker_sum)
+
+
 class VelocityFieldGuidanceTest(unittest.TestCase):
     def test_sampling_request_keeps_guidance_before_new_positional_fields(self) -> None:
         field_names = [field.name for field in fields(SamplingRequest)]
-        self.assertEqual(
-            field_names[-6:],
-            [
-                "velocity_field_guidance",
-                "trajectory_observer",
-                "caption_state_override",
-                "caption_mask_override",
-                "speaker_condition_override",
-                "capture_generated_speaker_condition",
-            ],
-        )
+        self.assertEqual(field_names.index("velocity_field_guidance"), 50)
 
     def _sample(
         self,
@@ -177,6 +220,36 @@ class VelocityFieldGuidanceTest(unittest.TestCase):
             with self.subTest(alpha=alpha):
                 with self.assertRaisesRegex(ValueError, "alpha must be finite"):
                     self._sample(self._caption_guidance(alpha=alpha))
+
+    def test_guidance_rejects_invalid_tensor_contracts(self) -> None:
+        valid = self._caption_guidance()
+        invalid_values = (
+            replace(valid, target_caption_state=torch.ones((2, 1))),
+            replace(valid, target_caption_mask=torch.ones((1, 2, 1), dtype=torch.bool)),
+            replace(valid, target_caption_state=torch.ones((2, 2, 1))),
+            replace(valid, target_caption_state=torch.ones((1, 2, 1), dtype=torch.float64)),
+            replace(valid, target_caption_state=torch.ones((1, 2, 1), device="meta")),
+        )
+        for guidance in invalid_values:
+            with self.subTest(guidance=guidance):
+                with self.assertRaisesRegex(ValueError, "shape|batch size|must use|must be on"):
+                    self._sample(guidance)
+
+    def test_speaker_guidance_runs_target_and_opposite_forwards(self) -> None:
+        model = FakeSpeakerVelocityModel()
+        mask = torch.ones((1, 2), dtype=torch.bool)
+        guidance = VelocityFieldGuidance(
+            alpha=1.0,
+            target_speaker_state=torch.full((1, 2, 1), 3.0),
+            target_speaker_mask=mask,
+            opposite_speaker_state=torch.full((1, 2, 1), -1.0),
+            opposite_speaker_mask=mask.clone(),
+        )
+
+        self._sample(guidance, model=cast(Any, model))
+
+        self.assertEqual(model.speaker_sums.count(6.0), 3)
+        self.assertEqual(model.speaker_sums.count(-2.0), 3)
 
     def test_time_window_includes_both_boundaries(self) -> None:
         # サンプラーと同じ float32 の時刻を境界値に使い、丸め誤差と包含判定を分離

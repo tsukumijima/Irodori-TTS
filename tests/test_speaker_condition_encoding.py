@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -114,10 +115,12 @@ def test_encode_speaker_condition_returns_server_cache_value() -> None:
     runtime._model_dtype = torch.float32
     runtime._infer_lock = threading.Lock()
     unrelated_cache_value = object()
-    runtime._reference_condition_cache = {
-        "cache-key": object(),
-        "unrelated-key": unrelated_cache_value,
-    }
+    runtime._reference_condition_cache = OrderedDict(
+        (
+            ("cache-key", object()),
+            ("unrelated-key", unrelated_cache_value),
+        )
+    )
     runtime.model = RecordingSpeakerModel()
     runtime._resolve_lora_adapter_path = lambda _path: None
     runtime._reference_cache_key = lambda _request, lora_adapter: "cache-key"
@@ -133,7 +136,9 @@ def test_encode_speaker_condition_returns_server_cache_value() -> None:
     assert condition.state.shape == (1, 3, 4)
     assert condition.mask.shape == (1, 3)
     assert runtime.model.ref_latent is not None
-    assert runtime._reference_condition_cache == {"unrelated-key": unrelated_cache_value}
+    assert runtime._reference_condition_cache == OrderedDict(
+        (("unrelated-key", unrelated_cache_value),)
+    )
 
 
 def test_encode_reference_condition_accepts_multiple_waveforms() -> None:
@@ -184,7 +189,7 @@ def test_multiple_reference_waveforms_trim_each_clip_to_remaining_budget(
     }
     monkeypatch.setattr(
         inference_runtime_module,
-        "_load_audio",
+        "load_audio",
         lambda path: waveforms[path],
     )
 

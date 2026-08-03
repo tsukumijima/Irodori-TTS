@@ -1,45 +1,52 @@
+import pytest
 import torch
 
 from irodori_tts.codec import DACVAECodec
 
 
-def test_measure_loudness_matches_torchaudio_reference_values() -> None:
+@pytest.mark.parametrize(
+    ("sample_rate", "expected_sine", "expected_noise"),
+    (
+        (16000, -29.7590274810791, -37.323036193847656),
+        (32000, -29.75702667236328, -36.99609375),
+        (44100, -29.75666618347168, -36.891578674316406),
+        (48000, -29.75687599182129, -36.87406921386719),
+    ),
+)
+def test_measure_loudness_matches_torchaudio_reference_values(
+    sample_rate: int,
+    expected_sine: float,
+    expected_noise: float,
+) -> None:
     """Torchaudio 2.9 で事前計測した BS.1770 値との数値差を監視する。
 
     各サンプルレートで1秒の 440Hz 正弦波と seed 1 の白色雑音を作り、
     `torchaudio.functional.loudness()` へ渡した値を参照値として固定する。
     """
 
-    # 参照音声で現れる主要なサンプルレートごとに、Torchaudio 2.9 の値を固定する
-    for sample_rate, expected_sine, expected_noise in (
-        (16000, -29.7590274810791, -37.323036193847656),
-        (32000, -29.75702667236328, -36.99609375),
-        (44100, -29.75666618347168, -36.891578674316406),
-        (48000, -29.75687599182129, -36.87406921386719),
-    ):
-        time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate
-        sine = 0.05 * torch.sin(2.0 * torch.pi * 440.0 * time)
-        noise = (
-            torch.randn(
-                sample_rate,
-                generator=torch.Generator().manual_seed(1),
-                dtype=torch.float32,
-            )
-            * 0.01
+    time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate
+    sine = 0.05 * torch.sin(2.0 * torch.pi * 440.0 * time)
+    noise = (
+        torch.randn(
+            sample_rate,
+            generator=torch.Generator().manual_seed(1),
+            dtype=torch.float32,
         )
+        * 0.01
+    )
 
-        torch.testing.assert_close(
-            DACVAECodec._measure_loudness(sine, sample_rate),
-            torch.tensor(expected_sine),
-            atol=1e-3,
-            rtol=0.0,
-        )
-        torch.testing.assert_close(
-            DACVAECodec._measure_loudness(noise, sample_rate),
-            torch.tensor(expected_noise),
-            atol=1e-3,
-            rtol=0.0,
-        )
+    torch.testing.assert_close(
+        DACVAECodec.measure_loudness(sine, sample_rate),
+        torch.tensor(expected_sine),
+        atol=1e-3,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        DACVAECodec.measure_loudness(noise, sample_rate),
+        torch.tensor(expected_noise),
+        atol=1e-3,
+        rtol=0.0,
+    )
 
 
 def test_measure_loudness_returns_finite_silence_for_short_and_silent_audio() -> None:
@@ -47,7 +54,7 @@ def test_measure_loudness_returns_finite_silence_for_short_and_silent_audio() ->
         torch.zeros(100, dtype=torch.float32),
         torch.zeros(48000, dtype=torch.float32),
     ):
-        measured_db = DACVAECodec._measure_loudness(waveform, 48000)
+        measured_db = DACVAECodec.measure_loudness(waveform, 48000)
 
         torch.testing.assert_close(measured_db, torch.tensor(-70.0))
 
@@ -64,7 +71,7 @@ def test_normalize_loudness_reaches_target_without_peak_clipping() -> None:
     )
 
     # 正規化後の統合ラウドネスが指定値へ到達していることを確認する
-    measured_db = DACVAECodec._measure_loudness(
+    measured_db = DACVAECodec.measure_loudness(
         normalized,
         sample_rate,
     )

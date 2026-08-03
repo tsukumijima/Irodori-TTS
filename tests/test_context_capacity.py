@@ -23,6 +23,8 @@ class EncodedContextCapacityTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "greater than zero"):
             runtime.set_max_encoded_context_tokens(0)
+        with self.assertRaisesRegex(ValueError, "greater than zero"):
+            runtime.set_max_encoded_context_tokens(-1)
 
     def _conditions(
         self,

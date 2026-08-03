@@ -1,6 +1,14 @@
 from __future__ import annotations
 
 
+LONG_REFERENCE_TIP_MARKDOWN = (
+    "**Long-reference tip:** Upload multiple clean, shorter clips from the same "
+    "speaker and arrange them in the desired order. This matches v4-Small "
+    "training. A single uninterrupted long recording is accepted but has not "
+    "been evaluated."
+)
+
+
 def coerce_gradio_file_path(value: object) -> str | None:
     """Normalize a Gradio upload value to a non-empty file path."""
 

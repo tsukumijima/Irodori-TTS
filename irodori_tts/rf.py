@@ -284,6 +284,10 @@ def sample_euler_rf_cfg(
     """
     Euler sampling over RF ODE with text/reference/caption conditioning CFG.
 
+    ``truncation_factor`` scales ``x_t`` for generated and externally supplied
+    ``initial_noise`` alike. Shared chunk noise must be passed unscaled because
+    pre-scaled input would apply the factor twice.
+
     Returns:
       latent sequence in patched space, shape (B, sequence_length, patched_latent_dim)
     """
@@ -525,6 +529,10 @@ def sample_euler_rf_cfg(
             raise ValueError(
                 "velocity_field_guidance requires exactly one complete caption or speaker pair."
             )
+        if has_caption_pair and model.cfg.use_caption_condition is False:
+            raise ValueError("velocity_field_guidance caption pairs require caption conditioning.")
+        if has_speaker_pair and model.cfg.use_speaker_condition_resolved is False:
+            raise ValueError("velocity_field_guidance speaker pairs require speaker conditioning.")
         if not math.isfinite(float(velocity_field_guidance.alpha)):
             raise ValueError("velocity_field_guidance alpha must be finite.")
         if not 0.0 <= velocity_field_guidance.min_t <= velocity_field_guidance.max_t <= 1.0:
@@ -777,6 +785,10 @@ def sample_euler_rf_cfg(
             speaker_state=opposite_speaker_state,
             caption_state=opposite_caption_state,
         )
+    if speaker_kv_scale is not None and (
+        math.isfinite(float(speaker_kv_scale)) is False or float(speaker_kv_scale) == 0.0
+    ):
+        raise ValueError("speaker_kv_scale must be finite and non-zero.")
     if speaker_kv_scale is not None:
         if context_kv_cond is None:
             raise RuntimeError("Speaker KV scaling requires the conditional context cache.")
@@ -851,6 +863,29 @@ def sample_euler_rf_cfg(
                     max_layers=speaker_kv_max_layers,
                 )
 
+    def _restore_speaker_kv_cache_scale_after_boundary(
+        *,
+        current_t: float,
+        next_t: float,
+    ) -> None:
+        """
+        時刻境界を越えた直後に話者 KV キャッシュの倍率を1回だけ戻す。
+
+        Args:
+            current_t (float): 現在ステップの時刻
+            next_t (float): 次ステップの時刻
+        """
+
+        nonlocal speaker_kv_active
+        if (
+            speaker_kv_active
+            and speaker_kv_min_t is not None
+            and next_t < speaker_kv_min_t
+            and current_t >= speaker_kv_min_t
+        ):
+            _restore_speaker_kv_cache_scale()
+            speaker_kv_active = False
+
     for i in range(num_steps):
         t = t_schedule[i]
         t_next = t_schedule[i + 1]
@@ -872,14 +907,10 @@ def sample_euler_rf_cfg(
                 raise RuntimeError("WaveEx buffer is missing during Taylor extrapolation.")
             x_t = buffer.predict_next()
             buffer.push(x_t)
-            if (
-                speaker_kv_active
-                and speaker_kv_min_t is not None
-                and t_next_value < speaker_kv_min_t
-                and t_value >= speaker_kv_min_t
-            ):
-                _restore_speaker_kv_cache_scale()
-                speaker_kv_active = False
+            _restore_speaker_kv_cache_scale_after_boundary(
+                current_t=t_value,
+                next_t=t_next_value,
+            )
             continue
 
         if use_cfg:
@@ -1022,14 +1053,10 @@ def sample_euler_rf_cfg(
                 )
             )
 
-        if (
-            speaker_kv_active
-            and speaker_kv_min_t is not None
-            and t_next_value < speaker_kv_min_t
-            and t_value >= speaker_kv_min_t
-        ):
-            _restore_speaker_kv_cache_scale()
-            speaker_kv_active = False
+        _restore_speaker_kv_cache_scale_after_boundary(
+            current_t=t_value,
+            next_t=t_next_value,
+        )
 
         x_t = x_t + v * (t_next - t)
         if waveex_buffer is not None:

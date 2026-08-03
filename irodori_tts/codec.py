@@ -9,6 +9,7 @@ import soundfile as sf
 import soxr
 import torch
 from huggingface_hub import hf_hub_download
+from numpy.typing import NDArray
 from scipy.signal import lfilter
 
 
@@ -222,17 +223,17 @@ class DACVAECodec:
         # 400ms窓を75%重複させ、絶対ゲートと相対ゲートを順に適用する
         gate_samples = round(0.4 * sample_rate)
         step_samples = round(gate_samples * 0.25)
-        block_starts = range(0, waveform.shape[-1] - gate_samples + 1, step_samples)
-        energy = np.asarray(
-            [
-                np.mean(
-                    np.square(waveform[start : start + gate_samples]),
-                    dtype=np.float32,
-                )
-                for start in block_starts
-            ],
-            dtype=np.float32,
-        )
+        if waveform.shape[-1] >= gate_samples:
+            windows: NDArray[np.float32] = np.lib.stride_tricks.sliding_window_view(
+                waveform,
+                gate_samples,
+            )[::step_samples]
+            energy: NDArray[np.float32] = np.asarray(
+                np.mean(np.square(windows), axis=1, dtype=np.float32),
+                dtype=np.float32,
+            )
+        else:
+            energy = np.empty((0,), dtype=np.float32)
         # 窓を1つも作れない短音声は、有限な無音値として扱う
         if energy.size == 0:
             return torch.tensor(-70.0, dtype=torch.float32)
@@ -258,6 +259,21 @@ class DACVAECodec:
             ) / np.count_nonzero(gated_blocks)
             measured_db = np.float32(-0.691) + np.float32(10.0) * np.log10(gated_energy)
         return torch.tensor(measured_db, dtype=torch.float32)
+
+    @staticmethod
+    def measure_loudness(wav: torch.Tensor, sample_rate: int) -> torch.Tensor:
+        """
+        ITU-R BS.1770-4 の統合ラウドネスを測定する。
+
+        Args:
+            wav (torch.Tensor): モノラル波形
+            sample_rate (int): サンプリング周波数
+
+        Returns:
+            torch.Tensor: CPU 上の float32 ラウドネス値
+        """
+
+        return DACVAECodec._measure_loudness(wav, sample_rate)
 
     @staticmethod
     def _normalize_loudness(
@@ -294,6 +310,9 @@ class DACVAECodec:
             loudness_input,
             int(sample_rate),
         ).clamp_min(-70.0)
+        # 測定下限の無音は増幅もピーク制限も行わず、入力波形をそのまま返す
+        if measured_db.item() == -70.0:
+            return wav.to(dtype=torch.float32, device=wav_device)
         gain = torch.exp(
             (torch.as_tensor(float(target_db)) - measured_db)
             * (torch.log(torch.tensor(10.0)) / 20.0)

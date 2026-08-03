@@ -8,7 +8,10 @@ from pathlib import Path
 import gradio as gr
 
 from irodori_tts.gradio_emoji_palette import EMOJI_PALETTE_CSS, build_emoji_palette
-from irodori_tts.gradio_reference_files import resolve_gradio_reference_wavs
+from irodori_tts.gradio_reference_files import (
+    LONG_REFERENCE_TIP_MARKDOWN,
+    resolve_gradio_reference_wavs,
+)
 from irodori_tts.inference_runtime import (
     RuntimeKey,
     SamplingRequest,
@@ -450,12 +453,7 @@ def build_ui() -> gr.Blocks:
             label="Caption / Style Prompt (optional)",
             lines=4,
         )
-        gr.Markdown(
-            "**Long-reference tip:** Upload multiple clean, shorter clips from the same "
-            "speaker and arrange them in the desired order. This matches v4-Small "
-            "training. A single uninterrupted long recording is accepted but has not "
-            "been evaluated."
-        )
+        gr.Markdown(LONG_REFERENCE_TIP_MARKDOWN)
         ref_wavs = gr.File(
             label=(
                 "Reference Audio Uploads (optional; concatenated in displayed order, "

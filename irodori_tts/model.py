@@ -851,8 +851,8 @@ class PretrainedConditionProjector(nn.Module):
             )
         if hidden_ratio <= 0:
             raise ValueError(f"projector hidden_ratio must be > 0, got {hidden_ratio}.")
-        if not 0.0 <= dropout <= 1.0:
-            raise ValueError(f"projector dropout must be in [0, 1], got {dropout}.")
+        if not 0.0 <= dropout < 1.0:
+            raise ValueError(f"projector dropout must be in [0, 1), got {dropout}.")
 
         self.projector_type = projector_type
         self.projector = nn.Linear(backbone_dim, output_dim, bias=True)
@@ -1656,28 +1656,30 @@ class TextToLatentRFDiT(nn.Module):
         return state, mask
 
     @staticmethod
-    def _expand_speaker_condition_batch(
+    def _expand_condition_batch(
         state: torch.Tensor,
         mask: torch.Tensor | None,
         *,
         batch_size: int,
-        speaker_dim: int,
+        condition_dim: int,
+        state_name: str,
+        mask_name: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if state.ndim == 2:
             state = state.unsqueeze(0)
         if state.ndim != 3:
             raise ValueError(
-                f"speaker_state must have shape (B,S,D) or (S,D), got {tuple(state.shape)}"
+                f"{state_name} must have shape (B,S,D) or (S,D), got {tuple(state.shape)}"
             )
-        if int(state.shape[-1]) != int(speaker_dim):
+        if int(state.shape[-1]) != int(condition_dim):
             raise ValueError(
-                f"speaker_state last dim must be {int(speaker_dim)}, got {int(state.shape[-1])}"
+                f"{state_name} last dim must be {int(condition_dim)}, got {int(state.shape[-1])}"
             )
         if state.shape[0] == 1 and batch_size != 1:
             state = state.expand(batch_size, -1, -1)
         elif int(state.shape[0]) != int(batch_size):
             raise ValueError(
-                f"speaker_state batch mismatch: expected {int(batch_size)}, got {int(state.shape[0])}"
+                f"{state_name} batch mismatch: expected {int(batch_size)}, got {int(state.shape[0])}"
             )
 
         if mask is None:
@@ -1687,17 +1689,17 @@ class TextToLatentRFDiT(nn.Module):
                 mask = mask.unsqueeze(0)
             if mask.ndim != 2:
                 raise ValueError(
-                    f"speaker_mask must have shape (B,S) or (S,), got {tuple(mask.shape)}"
+                    f"{mask_name} must have shape (B,S) or (S,), got {tuple(mask.shape)}"
                 )
             if mask.shape[0] == 1 and batch_size != 1:
                 mask = mask.expand(batch_size, -1)
             elif int(mask.shape[0]) != int(batch_size):
                 raise ValueError(
-                    f"speaker_mask batch mismatch: expected {int(batch_size)}, got {int(mask.shape[0])}"
+                    f"{mask_name} batch mismatch: expected {int(batch_size)}, got {int(mask.shape[0])}"
                 )
             if int(mask.shape[1]) != int(state.shape[1]):
                 raise ValueError(
-                    "speaker_mask token mismatch: "
+                    f"{mask_name} token mismatch: "
                     f"state={tuple(state.shape)} mask={tuple(mask.shape)}"
                 )
             mask = mask.to(device=state.device, dtype=torch.bool)
@@ -1733,11 +1735,13 @@ class TextToLatentRFDiT(nn.Module):
                 uncond_state = torch.randn_like(speaker_state) * scale
             if uncond_mask is None:
                 uncond_mask = torch.ones_like(speaker_mask)
-            uncond_state, uncond_mask = self._expand_speaker_condition_batch(
+            uncond_state, uncond_mask = self._expand_condition_batch(
                 uncond_state,
                 uncond_mask,
                 batch_size=speaker_state.shape[0],
-                speaker_dim=self.cfg.speaker_dim,
+                condition_dim=self.cfg.speaker_dim,
+                state_name="speaker_state",
+                mask_name="speaker_mask",
             )
             uncond_state = uncond_state.to(device=speaker_state.device, dtype=speaker_state.dtype)
             uncond_mask = uncond_mask.to(device=speaker_state.device, dtype=torch.bool)
@@ -1766,6 +1770,31 @@ class TextToLatentRFDiT(nn.Module):
         speaker_condition_dropout: torch.Tensor | None = None,
         caption_condition_dropout: torch.Tensor | None = None,
     ) -> EncodedConditions:
+        """Encode text and optional speaker or caption conditions.
+
+        ``caption_state_override`` must be the normalized state returned by
+        :meth:`encode_caption_condition`; this path does not apply ``caption_norm`` again.
+
+        Args:
+            text_input_ids: Text token IDs.
+            text_mask: Boolean text-token mask.
+            ref_latent: Reference-audio latent sequence.
+            ref_mask: Boolean reference-latent mask.
+            caption_input_ids: Caption token IDs.
+            caption_mask: Boolean caption-token mask.
+            speaker_state_override: Pre-encoded speaker condition state.
+            speaker_mask_override: Boolean mask for the speaker override.
+            caption_state_override: Normalized caption condition state.
+            caption_mask_override: Boolean mask for the caption override.
+            speaker_uncond_mode: Speaker unconditional-conditioning mode.
+            text_condition_dropout: Batch entries whose text condition is masked.
+            speaker_condition_dropout: Batch entries whose speaker condition is masked.
+            caption_condition_dropout: Batch entries whose caption condition is masked.
+
+        Returns:
+            EncodedConditions: Encoded model conditions.
+        """
+
         if text_condition_dropout is not None:
             text_mask = text_mask.clone()
             text_mask[text_condition_dropout] = False
@@ -1851,9 +1880,16 @@ class TextToLatentRFDiT(nn.Module):
                     mask=caption_mask,
                 )
             else:
-                caption_state = caption_state_override.to(
-                    device=text_state.device, dtype=text_state.dtype
+                caption_state, caption_mask = self._expand_condition_batch(
+                    caption_state_override,
+                    caption_mask,
+                    batch_size=text_input_ids.shape[0],
+                    condition_dim=self.cfg.caption_dim_resolved,
+                    state_name="caption_state",
+                    mask_name="caption_mask",
                 )
+                caption_state = caption_state.to(device=text_state.device, dtype=text_state.dtype)
+                caption_mask = caption_mask.to(device=text_state.device, dtype=torch.bool)
         return EncodedConditions(
             text_state=text_state,
             text_mask=text_mask,
@@ -1876,26 +1912,24 @@ class TextToLatentRFDiT(nn.Module):
             mask: Boolean mask selecting valid caption tokens.
 
         Returns:
-            Normalized caption condition state.
+            Normalized caption condition state suitable for ``caption_state_override``.
 
         Raises:
             RuntimeError: If caption conditioning or its modules are unavailable.
         """
         if not self.cfg.use_caption_condition:
             raise RuntimeError("Caption conditioning is disabled.")
-        caption_encoder = self.caption_encoder
-        caption_norm = self.caption_norm
-        if caption_encoder is None or caption_norm is None:
+        if self.caption_encoder is None or self.caption_norm is None:
             raise RuntimeError("Caption conditioning is enabled but caption modules are missing.")
 
         # The encoder signature differs between scratch and pretrained backbones.
         # Keep that checkpoint-specific dispatch inside the model API so callers
         # do not need to inspect model internals.
         if self.pretrained_text_backbone is None:
-            caption_state = caption_encoder(input_ids, mask)
+            caption_state = self.caption_encoder(input_ids, mask)
         else:
-            caption_state = caption_encoder(self.pretrained_text_backbone, input_ids, mask)
-        return caption_norm(caption_state)
+            caption_state = self.caption_encoder(self.pretrained_text_backbone, input_ids, mask)
+        return self.caption_norm(caption_state)
 
     def encode_speaker_condition(
         self,
@@ -1914,11 +1948,13 @@ class TextToLatentRFDiT(nn.Module):
             raise ValueError("Speaker conditioning is disabled.")
 
         if speaker_state_override is not None:
-            ref_state, ref_mask = self._expand_speaker_condition_batch(
+            ref_state, ref_mask = self._expand_condition_batch(
                 speaker_state_override,
                 speaker_mask_override,
                 batch_size=batch_size,
-                speaker_dim=self.cfg.speaker_dim,
+                condition_dim=self.cfg.speaker_dim,
+                state_name="speaker_state",
+                mask_name="speaker_mask",
             )
             ref_state = ref_state.to(device=device, dtype=dtype)
             ref_mask = ref_mask.to(device=device, dtype=torch.bool)

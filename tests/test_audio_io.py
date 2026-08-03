@@ -4,7 +4,7 @@ import numpy as np
 import soundfile as sf
 import torch
 
-from irodori_tts.inference_runtime import _load_audio, save_wav
+from irodori_tts.inference_runtime import load_audio, save_wav
 
 
 def test_load_audio_preserves_channel_first_float32_contract(tmp_path: Path) -> None:
@@ -19,7 +19,7 @@ def test_load_audio_preserves_channel_first_float32_contract(tmp_path: Path) -> 
     audio_path = tmp_path / "stereo.flac"
     sf.write(audio_path, waveform, sample_rate, subtype="PCM_24")
 
-    loaded, loaded_sample_rate = _load_audio(audio_path)
+    loaded, loaded_sample_rate = load_audio(audio_path)
     expected, _ = sf.read(audio_path, dtype="float32", always_2d=True)
 
     assert loaded_sample_rate == sample_rate
