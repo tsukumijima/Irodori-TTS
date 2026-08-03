@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import pytest
 from torch import nn
 
-from irodori_tts.optim import _partition_adamw_params, _partition_muon_params
+from irodori_tts.config import TrainConfig
+from irodori_tts.optim import _partition_adamw_params, _partition_muon_params, build_optimizer
 
 
 class DummyOptimizerModel(nn.Module):
@@ -25,9 +27,13 @@ def test_adamw_partitions_pretrained_text_backbone() -> None:
 
     partitions = _partition_adamw_params(model)
 
-    assert model.pretrained_text_backbone.weight in partitions.pretrained_decay
-    assert model.pretrained_text_backbone.bias in partitions.pretrained_no_decay
-    assert model.output.weight in partitions.decay
+    assert id(model.pretrained_text_backbone.weight) in {
+        id(param) for param in partitions.pretrained_decay
+    }
+    assert id(model.pretrained_text_backbone.bias) in {
+        id(param) for param in partitions.pretrained_no_decay
+    }
+    assert id(model.output.weight) in {id(param) for param in partitions.decay}
 
 
 def test_muon_partitions_pretrained_text_backbone_into_auxiliary_adamw() -> None:
@@ -39,6 +45,22 @@ def test_muon_partitions_pretrained_text_backbone_into_auxiliary_adamw() -> None
 
     partitions = _partition_muon_params(model)
 
-    assert model.pretrained_text_backbone.weight in partitions.pretrained_decay
-    assert model.pretrained_text_backbone.bias in partitions.pretrained_no_decay
-    assert model.output.weight in partitions.muon_decay
+    assert id(model.pretrained_text_backbone.weight) in {
+        id(param) for param in partitions.pretrained_decay
+    }
+    assert id(model.pretrained_text_backbone.bias) in {
+        id(param) for param in partitions.pretrained_no_decay
+    }
+    assert id(model.output.weight) in {id(param) for param in partitions.muon_decay}
+
+
+def test_adamw_rejects_model_without_trainable_parameters() -> None:
+    """
+    AdamW が学習対象のないモデルを明示的に拒否する。
+    """
+
+    model = nn.Linear(2, 1)
+    model.requires_grad_(False)
+
+    with pytest.raises(ValueError, match="No trainable parameters found for optimizer=adamw"):
+        build_optimizer(model, TrainConfig(optimizer="adamw"))

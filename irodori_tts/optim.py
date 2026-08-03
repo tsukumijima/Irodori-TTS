@@ -279,8 +279,10 @@ def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
             learning_rate=cfg.pretrained_text_encoder_learning_rate,
             group_name="pretrained_text_encoder_no_decay",
         )
+        if not param_groups:
+            raise ValueError("No trainable parameters found for optimizer=adamw.")
         optimizer = torch.optim.AdamW(
-            param_groups if param_groups else model.parameters(),
+            param_groups,
             lr=cfg.learning_rate,
             weight_decay=0.0,
             betas=(cfg.adam_beta1, cfg.adam_beta2),
