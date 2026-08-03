@@ -6,7 +6,6 @@ import inspect
 import json
 import math
 import os
-import shutil
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
@@ -16,6 +15,7 @@ import torch
 from safetensors.torch import save_file
 
 from irodori_tts import load_checkpoint_for_inference
+from irodori_tts.checkpoint_export import CheckpointPublisher
 from irodori_tts.config import ModelConfig, merge_dataclass_overrides
 from irodori_tts.lora import (
     LORA_METADATA_NAME,
@@ -114,15 +114,22 @@ def _extract_inference_values(raw: dict[str, Any]) -> dict[str, int | float]:
 
     inference_cfg: dict[str, int | float] = {}
     for key in INFERENCE_INT_CONFIG_KEYS:
-        value = raw.get(key)
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-            inference_cfg[key] = int(value)
+        if key not in raw:
+            continue
+        value = raw[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"Inference config key '{key}' must be a positive integer.")
+        inference_cfg[key] = int(value)
     for key in INFERENCE_FLOAT_CONFIG_KEYS:
-        value = raw.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            value_float = float(value)
-            if math.isfinite(value_float) and value_float > 0.0:
-                inference_cfg[key] = value_float
+        if key not in raw:
+            continue
+        value = raw[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"Inference config key '{key}' must be a positive finite number.")
+        value_float = float(value)
+        if not math.isfinite(value_float) or value_float <= 0.0:
+            raise ValueError(f"Inference config key '{key}' must be a positive finite number.")
+        inference_cfg[key] = value_float
     return inference_cfg
 
 
@@ -196,11 +203,12 @@ def _export_tokenizer(
         return None
 
     if source_checkpoint is not None:
-        bundled_tokenizer_dir = source_checkpoint.parent / "tokenizer"
-        if (bundled_tokenizer_dir / "tokenizer_config.json").is_file():
-            if bundled_tokenizer_dir.resolve() != tokenizer_dir.resolve():
-                shutil.copytree(bundled_tokenizer_dir, tokenizer_dir, dirs_exist_ok=True)
-            return tokenizer_dir
+        bundled_tokenizer_dir = CheckpointPublisher.copy_bundled_tokenizer(
+            source_checkpoint,
+            tokenizer_dir,
+        )
+        if bundled_tokenizer_dir is not None:
+            return bundled_tokenizer_dir
 
     from transformers import AutoTokenizer
 
@@ -476,9 +484,12 @@ def _load_adapter_checkpoint(
 ]:
     model_cfg, train_cfg = _load_saved_config(adapter_dir)
     base_path = _resolve_base_checkpoint(adapter_dir, base_checkpoint)
-    base_state, base_model_cfg, _, base_text_encoder_config = load_checkpoint_for_inference(
-        base_path
-    )
+    (
+        base_state,
+        base_model_cfg,
+        base_inference_cfg,
+        base_text_encoder_config,
+    ) = load_checkpoint_for_inference(base_path)
     if is_torchao_quantized_state_dict(base_state):
         raise ValueError(
             "LoRA merge requires the matching full-precision base checkpoint. Merge the adapter "
@@ -489,6 +500,33 @@ def _load_adapter_checkpoint(
         model_cfg,
         section="adapter model config",
     )
+
+    base_cfg = merge_dataclass_overrides(
+        ModelConfig(),
+        base_model_cfg,
+        section="base checkpoint model config",
+    )
+    compatibility_fields = (
+        "text_encoder_type",
+        "text_tokenizer_repo",
+        "text_encoder_revision",
+        "text_dim",
+        "text_layers",
+        "text_heads",
+        "text_mlp_ratio_resolved",
+    )
+    mismatches = [
+        field
+        for field in compatibility_fields
+        if getattr(base_cfg, field) != getattr(resolved_model_cfg, field)
+    ]
+    if base_cfg.use_pretrained_text_encoder != resolved_model_cfg.use_pretrained_text_encoder:
+        mismatches.append("use_pretrained_text_encoder")
+    if mismatches:
+        raise ValueError(
+            "LoRA adapter text encoder configuration does not match the base checkpoint: "
+            + ", ".join(mismatches)
+        )
 
     model = TextToLatentRFDiT(
         resolved_model_cfg,
@@ -540,8 +578,17 @@ def _load_adapter_checkpoint(
     merged = peft_model.merge_and_unload()
 
     flat_config = asdict(resolved_model_cfg)
+    adapter_inference_cfg: dict[str, int | float] = {}
     if isinstance(train_cfg, dict):
-        flat_config.update(_extract_inference_values(train_cfg))
+        adapter_inference_cfg = _extract_inference_values(train_cfg)
+    if adapter_inference_cfg:
+        flat_config.update(adapter_inference_cfg)
+    elif base_inference_cfg is not None:
+        flat_config.update(_extract_inference_values(base_inference_cfg))
+    else:
+        raise ValueError(
+            "LoRA integration requires inference metadata from either the adapter or base checkpoint."
+        )
 
     merged_state: dict[str, torch.Tensor] = {}
     for key, value in merged.state_dict().items():
@@ -641,11 +688,12 @@ def main() -> None:
             source_checkpoint=tokenizer_source_checkpoint,
         )
         save_file(model_state, str(temporary_output_path), metadata=metadata)
-        tokenizer_dir = None
-        if temporary_tokenizer_dir is not None:
-            tokenizer_dir = output_path.parent / "tokenizer"
-            shutil.copytree(temporary_tokenizer_dir, tokenizer_dir, dirs_exist_ok=True)
-        temporary_output_path.replace(output_path)
+        tokenizer_dir = CheckpointPublisher.publish(
+            staged_checkpoint=temporary_output_path,
+            output_checkpoint=output_path,
+            staged_tokenizer=temporary_tokenizer_dir,
+            temporary_directory=Path(temporary_dir_name),
+        )
 
     total_params = sum(int(t.numel()) for t in model_state.values())
     total_bytes = sum(int(t.numel()) * int(t.element_size()) for t in model_state.values())

@@ -89,12 +89,8 @@ def _build_torchao_config(
         ) from exc
 
     normalized = normalize_quantization_type(quantization_type)
+    validate_quantization_device(normalized, target_device=target_device)
     if normalized == QUANTIZATION_TYPE_INT4_WEIGHT_ONLY:
-        if target_device.type == "cpu":
-            raise ValueError(
-                "INT4 weight-only quantization is not supported on CPU. "
-                "Use --device cuda or --device xpu."
-            )
         if int4_group_size not in INT4_GROUP_SIZES:
             raise ValueError(
                 f"Unsupported INT4 group size={int4_group_size}. "
@@ -121,6 +117,33 @@ def _build_torchao_config(
             version=2,
         )
     return quantize_, config_classes[normalized](version=2)
+
+
+def validate_quantization_device(
+    quantization_type: str,
+    *,
+    target_device: torch.device,
+) -> None:
+    """
+    量子化方式が対象デバイスで利用可能か検証する。
+
+    Args:
+        quantization_type (str): 正規化前または正規化済みの量子化方式
+        target_device (torch.device): 量子化を実行するデバイス
+
+    Raises:
+        ValueError: INT4 の対象が CUDA または XPU でない場合
+    """
+
+    normalized = normalize_quantization_type(quantization_type)
+    if normalized == QUANTIZATION_TYPE_INT4_WEIGHT_ONLY and target_device.type not in {
+        "cuda",
+        "xpu",
+    }:
+        raise ValueError(
+            "INT4 weight-only quantization requires a CUDA or XPU device, "
+            f"got {target_device.type!r}."
+        )
 
 
 def parse_quantization_metadata(metadata: Mapping[str, str]) -> dict[str, Any] | None:

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -11,6 +10,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from irodori_tts import load_checkpoint_for_inference
+from irodori_tts.checkpoint_export import CheckpointPublisher
 from irodori_tts.config import ModelConfig, merge_dataclass_overrides
 from irodori_tts.model import TextToLatentRFDiT
 from irodori_tts.quantization import (
@@ -25,6 +25,7 @@ from irodori_tts.quantization import (
     parse_quantization_metadata,
     quantization_cli_name,
     quantize_model,
+    validate_quantization_device,
 )
 
 
@@ -58,15 +59,6 @@ def _resolve_device(raw: str) -> torch.device:
         if not is_xpu_available:
             raise ValueError("XPU was requested but torch.xpu.is_available() is False.")
     return device
-
-
-def _copy_bundled_tokenizer(input_path: Path, tokenizer_dir: Path) -> Path | None:
-    source = input_path.parent / "tokenizer"
-    if not (source / "tokenizer_config.json").is_file():
-        return None
-    if source.resolve() != tokenizer_dir.resolve():
-        shutil.copytree(source, tokenizer_dir, dirs_exist_ok=True)
-    return tokenizer_dir
 
 
 def parse_args() -> argparse.Namespace:
@@ -113,6 +105,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    device = _resolve_device(args.device)
+    quantization_type = normalize_quantization_type(args.quantization)
+    validate_quantization_device(quantization_type, target_device=device)
     input_path = Path(args.input_checkpoint).expanduser().resolve()
     if not input_path.is_file():
         raise FileNotFoundError(f"Input checkpoint not found: {input_path}")
@@ -150,13 +145,11 @@ def main() -> None:
         pretrained_backbone_config=text_encoder_config,
         load_pretrained_backbone_weights=not model_cfg.use_pretrained_text_encoder,
     )
-    model.load_state_dict(model_state, assign=model_cfg.use_pretrained_text_encoder)
+    model.load_state_dict(model_state, assign=True)
     del model_state
 
-    device = _resolve_device(args.device)
     compute_dtype = torch.bfloat16
     model = model.eval().to(device=device, dtype=compute_dtype)
-    quantization_type = normalize_quantization_type(args.quantization)
     quantized_modules = quantize_model(
         model,
         quantization_type=quantization_type,
@@ -177,7 +170,7 @@ def main() -> None:
         int4_packing_format={
             "cuda": INT4_CUDA_PACKING_FORMAT,
             "xpu": INT4_XPU_PACKING_FORMAT,
-        }[device.type],
+        }.get(device.type),
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     # モデルと tokenizer を一時領域で準備し、両方の成功後に公開する
@@ -187,16 +180,17 @@ def main() -> None:
     ) as temporary_dir_name:
         temporary_dir = Path(temporary_dir_name)
         temporary_output_path = temporary_dir / output_path.name
-        temporary_tokenizer_dir = _copy_bundled_tokenizer(
+        temporary_tokenizer_dir = CheckpointPublisher.copy_bundled_tokenizer(
             input_path,
             temporary_dir / "tokenizer",
         )
         save_file(flattened_state, str(temporary_output_path), metadata=metadata)
-        tokenizer_dir = None
-        if temporary_tokenizer_dir is not None:
-            tokenizer_dir = output_path.parent / "tokenizer"
-            shutil.copytree(temporary_tokenizer_dir, tokenizer_dir, dirs_exist_ok=True)
-        temporary_output_path.replace(output_path)
+        tokenizer_dir = CheckpointPublisher.publish(
+            staged_checkpoint=temporary_output_path,
+            output_checkpoint=output_path,
+            staged_tokenizer=temporary_tokenizer_dir,
+            temporary_directory=temporary_dir,
+        )
 
     tensor_bytes = sum(
         tensor.numel() * tensor.element_size() for tensor in flattened_state.values()
