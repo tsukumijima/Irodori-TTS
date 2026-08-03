@@ -36,7 +36,13 @@ QUANTIZATION_CLI_CHOICES = (
     "float8-weight-only",
     "float8-dynamic",
 )
-_CLI_TO_QUANTIZATION_TYPE = dict(zip(QUANTIZATION_CLI_CHOICES, QUANTIZATION_TYPES, strict=True))
+_CLI_TO_QUANTIZATION_TYPE = {
+    "int8-weight-only": QUANTIZATION_TYPE_INT8_WEIGHT_ONLY,
+    "int8-dynamic": QUANTIZATION_TYPE_INT8_DYNAMIC,
+    "int4-weight-only": QUANTIZATION_TYPE_INT4_WEIGHT_ONLY,
+    "float8-weight-only": QUANTIZATION_TYPE_FLOAT8_WEIGHT_ONLY,
+    "float8-dynamic": QUANTIZATION_TYPE_FLOAT8_DYNAMIC,
+}
 _QUANTIZATION_TYPE_TO_CLI = {value: key for key, value in _CLI_TO_QUANTIZATION_TYPE.items()}
 
 
@@ -250,7 +256,7 @@ def flatten_quantized_state_dict(
     compute_dtype: torch.dtype,
     quantized_modules: int,
     int4_group_size: int = DEFAULT_INT4_GROUP_SIZE,
-    int4_packing_format: str = INT4_CUDA_PACKING_FORMAT,
+    int4_packing_format: str,
 ) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
     if not is_torchao_quantized_state_dict(state_dict):
         raise ValueError("State dictionary does not contain torchao quantized tensors.")
@@ -271,6 +277,14 @@ def flatten_quantized_state_dict(
             raise ValueError(
                 f"Unsupported INT4 group size={int4_group_size}. "
                 f"Expected one of: {', '.join(map(str, INT4_GROUP_SIZES))}."
+            )
+        if int4_packing_format not in {
+            INT4_CUDA_PACKING_FORMAT,
+            INT4_XPU_PACKING_FORMAT,
+        }:
+            raise ValueError(
+                f"Unsupported INT4 packing format={int4_packing_format!r}. "
+                f"Expected one of: {INT4_CUDA_PACKING_FORMAT}, {INT4_XPU_PACKING_FORMAT}."
             )
         payload["group_size"] = int4_group_size
         payload["packing_format"] = int4_packing_format

@@ -167,10 +167,9 @@ def main() -> None:
         compute_dtype=compute_dtype,
         quantized_modules=len(quantized_modules),
         int4_group_size=args.int4_group_size,
-        int4_packing_format={
-            "cuda": INT4_CUDA_PACKING_FORMAT,
-            "xpu": INT4_XPU_PACKING_FORMAT,
-        }.get(device.type),
+        int4_packing_format=(
+            INT4_XPU_PACKING_FORMAT if device.type == "xpu" else INT4_CUDA_PACKING_FORMAT
+        ),
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     # モデルと tokenizer を一時領域で準備し、両方の成功後に公開する
