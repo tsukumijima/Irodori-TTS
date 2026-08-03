@@ -34,6 +34,7 @@ class CheckpointPublisher:
         output_checkpoint: Path,
         staged_tokenizer: Path | None,
         temporary_directory: Path,
+        force: bool,
     ) -> Path | None:
         """Publish fully prepared checkpoint artifacts and restore the tokenizer on failure.
 
@@ -42,6 +43,7 @@ class CheckpointPublisher:
             output_checkpoint (Path): Final checkpoint path.
             staged_tokenizer (Path | None): Completed tokenizer directory when required.
             temporary_directory (Path): Directory retaining the previous tokenizer during publish.
+            force (bool): Whether an existing checkpoint or tokenizer may be replaced.
 
         Returns:
             Path | None: Published tokenizer directory, or ``None`` when absent.
@@ -51,6 +53,10 @@ class CheckpointPublisher:
         """
 
         tokenizer_directory = output_checkpoint.parent / "tokenizer"
+        if tokenizer_directory.exists() and staged_tokenizer is not None and force is False:
+            raise FileExistsError(
+                f"Tokenizer already exists: {tokenizer_directory} (use --force to overwrite)"
+            )
         previous_tokenizer = temporary_directory / "previous-tokenizer"
         has_previous_tokenizer = staged_tokenizer is not None and tokenizer_directory.exists()
         if has_previous_tokenizer:

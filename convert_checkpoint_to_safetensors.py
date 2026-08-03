@@ -117,6 +117,8 @@ def _extract_inference_values(raw: dict[str, Any]) -> dict[str, int | float]:
         if key not in raw:
             continue
         value = raw[key]
+        if value is None:
+            continue
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"Inference config key '{key}' must be a positive integer.")
         inference_cfg[key] = int(value)
@@ -124,6 +126,8 @@ def _extract_inference_values(raw: dict[str, Any]) -> dict[str, int | float]:
         if key not in raw:
             continue
         value = raw[key]
+        if value is None:
+            continue
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"Inference config key '{key}' must be a positive finite number.")
         value_float = float(value)
@@ -693,6 +697,7 @@ def main() -> None:
             output_checkpoint=output_path,
             staged_tokenizer=temporary_tokenizer_dir,
             temporary_directory=Path(temporary_dir_name),
+            force=bool(args.force),
         )
 
     total_params = sum(int(t.numel()) for t in model_state.values())

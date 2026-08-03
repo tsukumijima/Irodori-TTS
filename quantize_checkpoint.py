@@ -190,6 +190,7 @@ def main() -> None:
             output_checkpoint=output_path,
             staged_tokenizer=temporary_tokenizer_dir,
             temporary_directory=temporary_dir,
+            force=bool(args.force),
         )
 
     tensor_bytes = sum(
