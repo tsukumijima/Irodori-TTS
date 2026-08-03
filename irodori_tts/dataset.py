@@ -519,7 +519,7 @@ class _ManifestIndex:
         caption_key = str(caption_key)
         cached = cls._load_cache(manifest_path, caption_key)
         if cached is not None:
-            if bool((cached.num_frames > 0).any()) is False:
+            if show_progress and bool((cached.num_frames > 0).any()) is False:
                 warnings.warn(
                     "Manifest has no positive num_frames values; reference concatenation will "
                     f"be skipped: {manifest_path}",

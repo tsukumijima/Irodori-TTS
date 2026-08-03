@@ -863,10 +863,10 @@ class PretrainedConditionProjector(nn.Module):
         if self.projector.bias is not None:
             nn.init.zeros_(self.projector.bias)
 
-        self.residual_norm = None
-        self.residual_up = None
-        self.residual_down = None
-        self.residual_dropout = None
+        self.residual_norm: RMSNorm | None = None
+        self.residual_up: nn.Linear | None = None
+        self.residual_down: nn.Linear | None = None
+        self.residual_dropout: nn.Dropout | None = None
         if projector_type == "residual_mlp":
             hidden_dim = max(1, round(output_dim * float(hidden_ratio)))
             self.residual_norm = RMSNorm(backbone_dim, eps=norm_eps)
@@ -2130,6 +2130,7 @@ class TextToLatentRFDiT(nn.Module):
                 caption_mask=caption_mask,
             )
             if duration_only:
+                # duration_only は条件表現を常に切り離す契約のため、逆伝播設定を参照しない
                 return self.predict_duration_log_frames(
                     text_state=text_state,
                     text_mask=text_mask_full,

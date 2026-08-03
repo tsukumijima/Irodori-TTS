@@ -377,6 +377,10 @@ def sample_euler_rf_cfg(
             f"speaker_uncond_mode must be one of {sorted(SPEAKER_INVERSION_UNCOND_MODES)}, "
             f"got {speaker_uncond_mode!r}"
         )
+    if speaker_kv_scale is not None and (
+        math.isfinite(float(speaker_kv_scale)) is False or float(speaker_kv_scale) == 0.0
+    ):
+        raise ValueError("speaker_kv_scale must be finite and non-zero.")
 
     cfg_guidance_mode = str(cfg_guidance_mode).strip().lower()
     if cfg_guidance_mode not in {"independent", "joint", "alternating"}:
@@ -462,6 +466,11 @@ def sample_euler_rf_cfg(
             caption_state_cond,
             caption_mask_cond,
         ) = encoded_conditions
+        if text_state_cond.shape[0] != batch_size:
+            raise ValueError(
+                "encoded_conditions text_state batch size mismatch: "
+                f"expected {batch_size}, got {text_state_cond.shape[0]}."
+            )
     text_state_uncond = torch.zeros_like(text_state_cond)
     text_mask_uncond = torch.zeros_like(text_mask_cond)
     speaker_state_uncond = None
@@ -800,10 +809,6 @@ def sample_euler_rf_cfg(
             speaker_state=opposite_speaker_state,
             caption_state=opposite_caption_state,
         )
-    if speaker_kv_scale is not None and (
-        math.isfinite(float(speaker_kv_scale)) is False or float(speaker_kv_scale) == 0.0
-    ):
-        raise ValueError("speaker_kv_scale must be finite and non-zero.")
     if speaker_kv_scale is not None:
         if context_kv_cond is None:
             raise RuntimeError("Speaker KV scaling requires the conditional context cache.")

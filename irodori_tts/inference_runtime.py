@@ -398,12 +398,6 @@ class SamplingResult:
     min_duration_frames: int | None = None
     max_duration_frames: int | None = None
     duration_was_clamped: bool = False
-    base_seed: int | None = None
-    retry_seed: int | None = None
-    retry_attempts: int = 1
-    seed_retry_base_score: float | None = None
-    seed_retry_candidate_score: float | None = None
-    is_retry_adopted: bool = False
     speaker_condition: SpeakerCondition | None = None
 
 
@@ -418,6 +412,7 @@ class _ReferenceCacheKey:
     latent_patch_size: int
     speaker_patch_size: int
     lora_adapter: str | None
+    speaker_uncond_mode: str
     # パディング設定もキャッシュキーに含め、異なるパディング条件でキャッシュ混在を防ぐ
     speaker_ref_fixed_length: int | None = None
     speaker_ref_bucket_sizes: tuple[int, ...] | None = None
@@ -1293,6 +1288,7 @@ class InferenceRuntime:
             latent_patch_size=int(self.model_cfg.latent_patch_size),
             speaker_patch_size=int(self.model_cfg.speaker_patch_size),
             lora_adapter=lora_adapter,
+            speaker_uncond_mode=str(req.speaker_uncond_mode).strip().lower(),
             speaker_ref_fixed_length=req.speaker_ref_fixed_length,
             speaker_ref_bucket_sizes=(
                 tuple(req.speaker_ref_bucket_sizes)
@@ -2636,8 +2632,6 @@ class InferenceRuntime:
             _log(f"[runtime] unpatchify_latent: {stage_sec * 1000.0:.1f} ms")
             z = z[:, :latent_steps]
 
-            base_seed = used_seed
-
             t0 = _measure_start(self.model_device, self.codec_device)
             hop_length = int(self.codec.model.hop_length)
             max_samples_per_candidate = torch.full(
@@ -2715,12 +2709,6 @@ class InferenceRuntime:
             min_duration_frames=None if min_frames is None else int(min_frames),
             max_duration_frames=None if max_frames is None else int(max_frames),
             duration_was_clamped=bool(duration_was_clamped),
-            base_seed=base_seed,
-            retry_seed=None,
-            retry_attempts=1,
-            seed_retry_base_score=None,
-            seed_retry_candidate_score=None,
-            is_retry_adopted=False,
             speaker_condition=generated_speaker_condition,
         )
 

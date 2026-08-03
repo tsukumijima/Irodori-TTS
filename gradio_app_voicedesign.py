@@ -273,13 +273,16 @@ def _run_generation(
             "Use gradio_app.py for reference-only inference."
         )
     ref_wav_paths = resolve_gradio_reference_wavs(ref_wavs)
+    notifications: list[str] = []
     effective_no_ref = not ref_wav_paths or not runtime.model_cfg.use_speaker_condition_resolved
     if effective_no_ref:
         if ref_wav_paths and not runtime.model_cfg.use_speaker_condition_resolved:
-            stdout_log(
+            notification = (
                 "[gradio-caption] uploaded reference audio was ignored because this checkpoint "
                 "does not support speaker conditioning."
             )
+            stdout_log(notification)
+            notifications.append(notification)
         ref_wav_paths = []
 
     stdout_log(f"[gradio-caption] runtime: {'reloaded' if reloaded else 'reused'}")
@@ -371,6 +374,7 @@ def _run_generation(
         f"seed_used: {result.used_seed}",
         f"candidates: {len(result.audios)}",
         *[f"saved[{i}]: {path}" for i, path in enumerate(out_paths, start=1)],
+        *notifications,
         *result.messages,
     ]
     detail_text = "\n".join(detail_lines)

@@ -36,7 +36,7 @@ class ConstantVelocityModel:
         条件を使わない最小のサンプラー入力を返す。
 
         Returns:
-            tuple[torch.Tensor, ...]: テキスト状態とマスクを含む条件一式。
+            EncodedConditions: テキスト状態とマスクを含む条件一式。
         """
 
         text_state = torch.zeros((1, 1, 1), dtype=self.dtype)
@@ -110,15 +110,24 @@ class TrajectoryObserverTest(unittest.TestCase):
 
     def test_default_sampling_does_not_read_cuda_scalars_per_step(self) -> None:
         # ステップ数を増やしても item() 回数が増えないことから、反復内の CUDA 同期再混入を検出する
-        with patch.object(torch.Tensor, "item", return_value=True) as item_mock:
+        original_item = torch.Tensor.item
+        item_calls = 0
+
+        def record_item(tensor: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
+            nonlocal item_calls
+            item_calls += 1
+            return original_item(tensor, *args, **kwargs)
+
+        with patch.object(torch.Tensor, "item", record_item):
             self._sample(None, num_steps=2)
-        short_schedule_calls = item_mock.call_count
+        short_schedule_calls = item_calls
         self.assertGreater(short_schedule_calls, 0)
 
-        with patch.object(torch.Tensor, "item", return_value=True) as item_mock:
+        item_calls = 0
+        with patch.object(torch.Tensor, "item", record_item):
             self._sample(None, num_steps=5)
 
-        self.assertEqual(item_mock.call_count, short_schedule_calls)
+        self.assertEqual(item_calls, short_schedule_calls)
 
     def test_observer_receives_predict_x0_without_changing_output(self) -> None:
         observations: list[TrajectoryObservation] = []

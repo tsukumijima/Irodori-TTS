@@ -158,7 +158,7 @@ class CaptionConditionOverrideTest(unittest.TestCase):
                 batch_size=1,
             )
 
-    def test_caption_cache_uses_pretrained_backbone(self) -> None:
+    def test_caption_encoder_receives_pretrained_backbone(self) -> None:
         runtime = self._runtime()
         model = cast(RecordingCaptionModel, runtime.model)
         encoder = RecordingCaptionEncoder()
