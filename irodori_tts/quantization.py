@@ -49,7 +49,7 @@ def _require_torchao_safetensors() -> tuple[Any, Any]:
     except ImportError as exc:
         raise RuntimeError(
             "This checkpoint uses torchao quantization. Install the project with a "
-            "supported backend extra or run `pip install torchao>=0.16,<0.17`."
+            "supported backend extra or run `pip install torchao>=0.17,<0.18`."
         ) from exc
     return flatten_tensor_state_dict, unflatten_tensor_state_dict
 
@@ -85,19 +85,26 @@ def _build_torchao_config(
     except ImportError as exc:
         raise RuntimeError(
             "Quantization requires torchao. Install the project with a supported backend extra "
-            "or run `pip install torchao>=0.16,<0.17`."
+            "or run `pip install torchao>=0.17,<0.18`."
         ) from exc
 
     normalized = normalize_quantization_type(quantization_type)
     if normalized == QUANTIZATION_TYPE_INT4_WEIGHT_ONLY:
+        if target_device.type == "cpu":
+            raise ValueError(
+                "INT4 weight-only quantization is not supported on CPU. "
+                "Use --device cuda or --device xpu."
+            )
         if int4_group_size not in INT4_GROUP_SIZES:
             raise ValueError(
                 f"Unsupported INT4 group size={int4_group_size}. "
                 f"Expected one of: {', '.join(map(str, INT4_GROUP_SIZES))}."
             )
-        packing_format = (
-            INT4_XPU_PACKING_FORMAT if target_device.type == "xpu" else INT4_CUDA_PACKING_FORMAT
-        )
+        packing_formats = {
+            "cuda": INT4_CUDA_PACKING_FORMAT,
+            "xpu": INT4_XPU_PACKING_FORMAT,
+        }
+        packing_format = packing_formats[target_device.type]
         return quantize_, Int4WeightOnlyConfig(
             group_size=int4_group_size,
             int4_packing_format=packing_format,

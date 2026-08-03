@@ -31,7 +31,7 @@ dev = [
     "ruff>=0.14.8,<0.15.0",
     "silentcipher @ git+https://github.com/SesameAILabs/silentcipher.git@d46d7d0893a583d8968ab3a6626e2289faec9152",
     "taskipy>=1.14.0,<2.0.0",
-    "torchao>=0.16.0,<0.17.0",
+    "torchao>=0.17.0,<0.18.0",
     "torchcodec>=0.10.0,<0.11.0",
     "tqdm>=4.67.3",
     "wandb>=0.17.0",
