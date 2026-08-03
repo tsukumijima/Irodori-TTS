@@ -669,7 +669,7 @@ def main() -> None:
         if raw_text_encoder_config is not None and not isinstance(raw_text_encoder_config, dict):
             raise ValueError("Checkpoint text_encoder_config must be a dictionary when present.")
         text_encoder_config = raw_text_encoder_config
-        tokenizer_source_checkpoint = None
+        tokenizer_source_checkpoint = input_path
 
     if text_encoder_config is None:
         text_encoder_config = _load_text_encoder_config(flat_config)
