@@ -254,14 +254,16 @@ class VelocityFieldGuidanceTest(unittest.TestCase):
 
     def test_time_window_includes_both_boundaries(self) -> None:
         # サンプラーと同じ float32 の時刻を境界値に使い、丸め誤差と包含判定を分離
-        first_t = float(torch.tensor(0.999, dtype=torch.float32).item())
-        guidance = self._caption_guidance(min_t=first_t, max_t=first_t)
+        schedule = (1.0 - torch.linspace(0.0, 1.0, 4, dtype=torch.float32)) * 0.999
+        first_t = float(schedule[0].item())
+        second_t = float(schedule[1].item())
+        guidance = self._caption_guidance(min_t=second_t, max_t=first_t)
         _result, model = self._sample(guidance, num_steps=3)
 
-        # 通常 forward 3回に加え、t=0.999 の境界上だけ target/opposite を各1回計算
-        self.assertEqual(model.caption_sums.count(6.0), 1)
-        self.assertEqual(model.caption_sums.count(-2.0), 1)
-        self.assertEqual(len(model.caption_sums), 5)
+        # 通常 forward 3回に加え、時間窓の開始・終了境界で target/opposite を各1回計算
+        self.assertEqual(model.caption_sums.count(6.0), 2)
+        self.assertEqual(model.caption_sums.count(-2.0), 2)
+        self.assertEqual(len(model.caption_sums), 7)
         self.assertEqual(model.context_cache_builds, 0)
 
     def test_guidance_reuses_context_cache_when_enabled(self) -> None:

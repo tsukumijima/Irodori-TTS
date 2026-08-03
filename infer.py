@@ -508,6 +508,24 @@ def main() -> None:
             )
         except ValueError as ex:
             parser.error(str(ex))
+    else:
+        # WaveEx が無効な要求では、効果のない非既定オプションを利用者へ知らせる
+        waveex_overrides = {
+            "--waveex-ode-steps": args.waveex_ode_steps,
+            "--waveex-wavelet": args.waveex_wavelet if args.waveex_wavelet != "haar" else None,
+            "--waveex-taylor-order": (
+                args.waveex_taylor_order if args.waveex_taylor_order != 1 else None
+            ),
+            "--waveex-history-size": (
+                args.waveex_history_size if args.waveex_history_size != 2 else None
+            ),
+            "--waveex-high-freq-mode": (
+                args.waveex_high_freq_mode if args.waveex_high_freq_mode != "extrapolate" else None
+            ),
+        }
+        for option, value in waveex_overrides.items():
+            if value is not None:
+                print(f"warning: {option} is ignored because WaveEx is disabled.")
 
     result = runtime.synthesize(
         SamplingRequest(

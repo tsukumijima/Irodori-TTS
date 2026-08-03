@@ -21,6 +21,7 @@ warm-up phase.
 
 from __future__ import annotations
 
+import threading
 from collections import OrderedDict, deque
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -136,6 +137,7 @@ def _get_filter_bank(
 
 _DWT_MATRIX_CACHE_MAX_ENTRIES = 32
 _DWT_MATRIX_CACHE: OrderedDict[tuple[str, int, str, str], torch.Tensor] = OrderedDict()
+_DWT_MATRIX_CACHE_LOCK = threading.Lock()
 
 
 def _build_dwt_matrix(
@@ -156,10 +158,12 @@ def _build_dwt_matrix(
     if T < 2 or T % 2 != 0:
         raise ValueError(f"DWT matrix requires even T>=2, got T={T}.")
     cache_key = (str(wavelet).lower(), int(T), str(device), str(dtype))
-    cached = _DWT_MATRIX_CACHE.get(cache_key)
-    if cached is not None:
-        _DWT_MATRIX_CACHE.move_to_end(cache_key)
-        return cached
+    # LRU の参照順更新を含むため、読み取りも排他区間へ含める
+    with _DWT_MATRIX_CACHE_LOCK:
+        cached = _DWT_MATRIX_CACHE.get(cache_key)
+        if cached is not None:
+            _DWT_MATRIX_CACHE.move_to_end(cache_key)
+            return cached
     bank = _get_filter_bank(wavelet, device=device, dtype=dtype)
     h = bank["dec_lo"]
     g = bank["dec_hi"]
@@ -173,10 +177,16 @@ def _build_dwt_matrix(
             col = (2 * n + k) % T
             W[n, col] = W[n, col] + h[k]
             W[half + n, col] = W[half + n, col] + g[k]
-    _DWT_MATRIX_CACHE[cache_key] = W
-    if len(_DWT_MATRIX_CACHE) > _DWT_MATRIX_CACHE_MAX_ENTRIES:
-        _DWT_MATRIX_CACHE.popitem(last=False)
-    return W
+    # 同じ行列を別スレッドが先に登録した場合は、先行結果を再利用する
+    with _DWT_MATRIX_CACHE_LOCK:
+        cached = _DWT_MATRIX_CACHE.get(cache_key)
+        if cached is not None:
+            _DWT_MATRIX_CACHE.move_to_end(cache_key)
+            return cached
+        _DWT_MATRIX_CACHE[cache_key] = W
+        if len(_DWT_MATRIX_CACHE) > _DWT_MATRIX_CACHE_MAX_ENTRIES:
+            _DWT_MATRIX_CACHE.popitem(last=False)
+        return W
 
 
 def _dwt1d(x: torch.Tensor, wavelet: str) -> tuple[torch.Tensor, torch.Tensor]:
