@@ -100,7 +100,22 @@ def make_initial_noise(
     seed: int,
     noise_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    """Create deterministic RF initial noise on the requested runtime device."""
+    """
+    指定した実行デバイス上へ決定論的な RF 初期ノイズを生成する。
+
+    Args:
+        batch_size (int): 生成するノイズのバッチ数
+        sequence_length (int): 生成する潜在系列の長さ
+        latent_dim (int): パッチ化された潜在の次元数
+        device (torch.device): ノイズを配置する実行デバイス
+        dtype (torch.dtype): 返却するノイズのデータ型
+        seed (int): ノイズ生成に使用する乱数シード
+        noise_dtype (torch.dtype | None): 乱数生成時だけ使用するデータ型
+
+    Returns:
+        torch.Tensor: `(batch_size, sequence_length, latent_dim)` 形状の初期ノイズ
+    """
+
     rng, rng_device = _make_rng(seed=seed, device=device)
     return _make_initial_noise_with_rng(
         batch_size=batch_size,
@@ -334,7 +349,7 @@ def sample_euler_rf_cfg(
             )
 
         # Request-level streaming experiments pass one long noise tensor and let each
-        # chunk consume a non-overlapping span. Clone because the ODE loop updates x_t in-place.
+        # chunk consume a non-overlapping span. Clone so x_t does not retain a view into it.
         x_t = initial_noise[:, noise_start:noise_end, :].to(device=device, dtype=dtype).clone()
     if truncation_factor is not None:
         x_t = x_t * float(truncation_factor)
