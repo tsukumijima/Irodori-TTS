@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from typing import Any, NamedTuple, cast
 
 import torch
@@ -80,6 +81,13 @@ class ScalarLRScheduler:
             loaded_base_lrs = [float(x) for x in state_dict["base_lrs"]]
             if len(loaded_base_lrs) == len(self.optimizer.param_groups):
                 self.base_lrs = loaded_base_lrs
+            else:
+                warnings.warn(
+                    "Scheduler base_lrs were not restored because the optimizer group count "
+                    f"changed: checkpoint={len(loaded_base_lrs)}, "
+                    f"optimizer={len(self.optimizer.param_groups)}.",
+                    stacklevel=2,
+                )
         if "last_step" in state_dict:
             self.last_step = int(state_dict["last_step"])
 
@@ -276,7 +284,7 @@ def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
             eps=cfg.adam_eps,
         )
         optimizer_state = cast(Any, optimizer)
-        optimizer_state.main_group_index = 0
+        optimizer_state.main_group_index = 0 if partitions.decay or partitions.no_decay else None
         pretrained_group_index = len(param_groups) - sum(
             bool(group) for group in (partitions.pretrained_decay, partitions.pretrained_no_decay)
         )
@@ -420,8 +428,10 @@ def current_lr(optimizer) -> float:
     for group in optimizer.param_groups:
         if str(group.get("group_name", "")).startswith("main_"):
             return float(group["lr"])
-    group_index = int(getattr(optimizer, "main_group_index", 0))
-    return float(optimizer.param_groups[group_index]["lr"])
+    group_index = getattr(optimizer, "main_group_index", 0)
+    if group_index is None:
+        return 0.0
+    return float(optimizer.param_groups[int(group_index)]["lr"])
 
 
 def current_pretrained_text_encoder_lr(optimizer) -> float | None:

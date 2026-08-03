@@ -223,7 +223,8 @@ def validate_lora_modules_to_save(
     missing_modules = [
         requested_name
         for requested_name in modules_to_save
-        if not any(
+        if requested_name == ""
+        or not any(
             module_name == requested_name or module_name.endswith(f".{requested_name}")
             for module_name in named_module_names
         )

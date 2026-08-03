@@ -251,15 +251,26 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
         """
         if self.speaker_group_indices is None:
             return []
-        candidates = self.speaker_group_indices[group_start:group_end].tolist()
-        candidates = [int(c) for c in candidates if int(c) != int(target_sample_index)]
-        if not candidates:
+        candidate_count = int(group_end - group_start)
+        if candidate_count <= 1:
             return []
-        random.shuffle(candidates)
         target_frames = random.uniform(float(ref_min_frames), float(ref_max_frames))
         chosen: list[int] = []
         total = 0
-        for sample_index in candidates:
+        remaining_positions = candidate_count
+        swapped_positions: dict[int, int] = {}
+        while remaining_positions > 0:
+            # 部分 Fisher-Yates で必要な候補だけを引き、話者グループ全体のリスト化を避ける
+            random_position = random.randrange(remaining_positions)
+            candidate_position = swapped_positions.get(random_position, random_position)
+            remaining_positions -= 1
+            swapped_positions[random_position] = swapped_positions.get(
+                remaining_positions,
+                remaining_positions,
+            )
+            sample_index = int(self.speaker_group_indices[group_start + candidate_position].item())
+            if sample_index == int(target_sample_index):
+                continue
             n = int(self.manifest_index.num_frames[sample_index])
             if n <= 0:
                 continue
@@ -445,6 +456,11 @@ class _ManifestIndex:
         if offsets.numel() != speaker_codes.numel() or offsets.numel() != num_frames.numel():
             return None
         speakers = [str(x) for x in speakers]
+        # -1 は話者情報なしを表すため、それ以外の範囲外コードだけを破損として扱う
+        if speaker_codes.numel() > 0 and (
+            int(speaker_codes.min().item()) < -1 or int(speaker_codes.max().item()) >= len(speakers)
+        ):
+            return None
         return _ManifestIndex(
             offsets=offsets.detach().to(device="cpu", dtype=torch.int64).contiguous(),
             speaker_codes=speaker_codes.detach().to(device="cpu", dtype=torch.int64).contiguous(),
@@ -562,13 +578,16 @@ class _ManifestIndex:
         return index
 
 
+ManifestIndex = _ManifestIndex
+
+
 def build_manifest_index(
     manifest_path: Path,
     *,
     caption_key: str = "caption",
     show_progress: bool = False,
     progress_desc: str | None = None,
-) -> _ManifestIndex:
+) -> ManifestIndex:
     """
     マニフェストのランダムアクセス用インデックスを構築する。
 
@@ -579,7 +598,7 @@ def build_manifest_index(
         progress_desc (str | None): 進捗表示へ使う説明
 
     Returns:
-        _ManifestIndex: キャッシュを再利用できるマニフェストインデックス
+        ManifestIndex: キャッシュを再利用できるマニフェストインデックス
     """
 
     return _ManifestIndex.build(

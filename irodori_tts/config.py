@@ -73,9 +73,9 @@ class ModelConfig:
                 "pretrained_projector_hidden_ratio must be > 0: "
                 f"got {self.pretrained_projector_hidden_ratio}"
             )
-        if not 0.0 <= self.pretrained_projector_dropout <= 1.0:
+        if not 0.0 <= self.pretrained_projector_dropout < 1.0:
             raise ValueError(
-                "pretrained_projector_dropout must be in [0, 1]: "
+                "pretrained_projector_dropout must be in [0, 1): "
                 f"got {self.pretrained_projector_dropout}"
             )
         self.pretrained_projector_type = pretrained_projector_type
@@ -162,6 +162,7 @@ class TrainConfig:
     num_workers: int = 2
     dataloader_persistent_workers: bool = False
     dataloader_prefetch_factor: int = 2
+    # 再開位置を先へ進めず、専用 CUDA stream で現在バッチを非同期転送する
     dataloader_cuda_prefetch: bool = False
     length_bucket_enabled: bool = False
     length_bucket_window_batches: int = 64
@@ -238,6 +239,13 @@ class TrainConfig:
     lora_target_modules: str = "diffusion_attn"
     lora_modules_to_save: str | None = "auto"
     seed: int = 0
+
+    def __post_init__(self) -> None:
+        if self.ref_min_seconds > self.ref_max_seconds:
+            raise ValueError(
+                "ref_min_seconds must be less than or equal to ref_max_seconds, "
+                f"got {self.ref_min_seconds} > {self.ref_max_seconds}."
+            )
 
 
 @dataclass

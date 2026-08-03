@@ -1189,18 +1189,11 @@ def clear_non_caption_grads(model: TextToLatentRFDiT) -> tuple[int, int]:
 
 def clear_non_pretrained_projector_grads(
     model: TextToLatentRFDiT,
-) -> tuple[int, int]:
-    projector_grad_params = 0
-    cleared_grad_params = 0
+) -> None:
     for key, param in model.named_parameters():
         if is_pretrained_projector_parameter(key):
-            if param.grad is not None:
-                projector_grad_params += 1
             continue
-        if param.grad is not None:
-            cleared_grad_params += 1
         param.grad = None
-    return projector_grad_params, cleared_grad_params
 
 
 def freeze_for_duration_only(model: torch.nn.Module) -> tuple[int, int]:
@@ -1643,6 +1636,21 @@ def _record_batch_stream(batch: dict, stream: torch.cuda.Stream) -> None:
 
 
 def cuda_prefetch_batches(loader, *, device: torch.device, enabled: bool):
+    """
+    現在バッチを専用 CUDA stream で転送し、再開用 iterator 位置を先へ進めず返す。
+
+    次バッチの取得は現在バッチを yield した後に行うため、計算との先読み重複よりも
+    チェックポイントへ保存する DataLoader 位置の一致を優先する。
+
+    Args:
+        loader (Iterable[dict]): 転送対象のバッチを返す DataLoader
+        device (torch.device): バッチを転送する CUDA デバイス
+        enabled (bool): 非同期転送を有効にするか
+
+    Yields:
+        dict: 指定デバイスへ転送済みのバッチ
+    """
+
     if not enabled or device.type != "cuda":
         yield from loader
         return
@@ -1667,8 +1675,9 @@ def cuda_prefetch_batches(loader, *, device: torch.device, enabled: bool):
         current_stream.wait_stream(stream)
         batch = next_batch
         _record_batch_stream(batch, current_stream)
-        preload()
         yield batch
+        # 再開位置を保存するまでは DataLoader iterator を次へ進めず、保存位置と学習済み位置を一致させる
+        preload()
 
 
 class LengthGroupedSampler(Sampler[int]):
@@ -2745,7 +2754,10 @@ def main() -> None:
         model_cfg = replace(model_cfg, latent_patch_size=args.latent_patch_size)
 
     set_seed(train_cfg.seed + rank)
-    if train_cfg.pretrained_text_encoder_learning_rate <= 0:
+    if (
+        model_cfg.use_pretrained_text_encoder
+        and train_cfg.pretrained_text_encoder_learning_rate <= 0
+    ):
         raise ValueError(
             "pretrained_text_encoder_learning_rate must be > 0, got "
             f"{train_cfg.pretrained_text_encoder_learning_rate}."
