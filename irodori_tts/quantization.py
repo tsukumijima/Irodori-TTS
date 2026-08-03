@@ -44,6 +44,9 @@ _CLI_TO_QUANTIZATION_TYPE = {
     "float8-dynamic": QUANTIZATION_TYPE_FLOAT8_DYNAMIC,
 }
 _QUANTIZATION_TYPE_TO_CLI = {value: key for key, value in _CLI_TO_QUANTIZATION_TYPE.items()}
+_TORCHAO_INSTALL_GUIDANCE = (
+    "Install the repository development dependencies with `uv sync --group dev`."
+)
 
 
 def _require_torchao_safetensors() -> tuple[Any, Any]:
@@ -54,13 +57,25 @@ def _require_torchao_safetensors() -> tuple[Any, Any]:
         )
     except ImportError as exc:
         raise RuntimeError(
-            "This checkpoint uses torchao quantization. Install the project with a "
-            "supported backend extra or run `pip install torchao>=0.17,<0.18`."
+            f"This checkpoint uses torchao quantization. {_TORCHAO_INSTALL_GUIDANCE}"
         ) from exc
     return flatten_tensor_state_dict, unflatten_tensor_state_dict
 
 
 def normalize_quantization_type(value: str) -> str:
+    """
+    CLI 名または保存形式名を正規化する。
+
+    Args:
+        value (str): CLI 名または保存形式名
+
+    Returns:
+        str: 正規化済みの保存形式名
+
+    Raises:
+        ValueError: 未対応の量子化方式が指定された場合
+    """
+
     normalized = str(value).strip().lower()
     normalized = _CLI_TO_QUANTIZATION_TYPE.get(normalized, normalized)
     if normalized not in QUANTIZATION_TYPES:
@@ -70,6 +85,19 @@ def normalize_quantization_type(value: str) -> str:
 
 
 def quantization_cli_name(value: str) -> str:
+    """
+    量子化方式を CLI 表記へ変換する。
+
+    Args:
+        value (str): CLI 名または保存形式名
+
+    Returns:
+        str: ハイフン区切りの CLI 表記
+
+    Raises:
+        ValueError: 未対応の量子化方式が指定された場合
+    """
+
     return _QUANTIZATION_TYPE_TO_CLI[normalize_quantization_type(value)]
 
 
@@ -89,10 +117,7 @@ def _build_torchao_config(
             quantize_,
         )
     except ImportError as exc:
-        raise RuntimeError(
-            "Quantization requires torchao. Install the project with a supported backend extra "
-            "or run `pip install torchao>=0.17,<0.18`."
-        ) from exc
+        raise RuntimeError(f"Quantization requires torchao. {_TORCHAO_INSTALL_GUIDANCE}") from exc
 
     normalized = normalize_quantization_type(quantization_type)
     validate_quantization_device(normalized, target_device=target_device)
@@ -206,6 +231,24 @@ def quantize_model(
     int4_group_size: int = DEFAULT_INT4_GROUP_SIZE,
     target_device: torch.device | None = None,
 ) -> list[str]:
+    """
+    選択した線形層を torchao 形式へ量子化する。
+
+    Args:
+        model (torch.nn.Module): 量子化対象のモデル
+        quantization_type (str): 適用する量子化方式
+        profile (str): 対象層を選ぶプロファイル
+        int4_group_size (int): INT4 のグループサイズ
+        target_device (torch.device | None): 量子化先デバイス。省略時はモデルから取得
+
+    Returns:
+        list[str]: 量子化されたモジュール名
+
+    Raises:
+        RuntimeError: torchao を読み込めない場合
+        ValueError: 設定、対象デバイス、または量子化結果が不正な場合
+    """
+
     normalized_profile = str(profile).strip().lower()
     if normalized_profile not in QUANTIZATION_PROFILES:
         raise ValueError(
@@ -258,6 +301,27 @@ def flatten_quantized_state_dict(
     int4_group_size: int = DEFAULT_INT4_GROUP_SIZE,
     int4_packing_format: str | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
+    """
+    torchao の量子化 state dict を safetensors 保存形式へ平坦化する。
+
+    Args:
+        state_dict (Mapping[str, torch.Tensor]): 量子化済み state dict
+        base_metadata (Mapping[str, str]): 出力へ引き継ぐ既存メタデータ
+        quantization_type (str): 保存する量子化方式
+        profile (str): 量子化時に使用したプロファイル
+        compute_dtype (torch.dtype): 推論時の計算 dtype
+        quantized_modules (int): 量子化済みモジュール数
+        int4_group_size (int): INT4 のグループサイズ
+        int4_packing_format (str | None): INT4 のデバイス別 packing 形式
+
+    Returns:
+        tuple[dict[str, torch.Tensor], dict[str, str]]: 平坦化した Tensor とメタデータ
+
+    Raises:
+        RuntimeError: torchao の safetensors 補助機能を読み込めない場合
+        ValueError: 入力 state dict または INT4 メタデータが不正な場合
+    """
+
     if not is_torchao_quantized_state_dict(state_dict):
         raise ValueError("State dictionary does not contain torchao quantized tensors.")
     normalized_type = normalize_quantization_type(quantization_type)
@@ -305,6 +369,21 @@ def unflatten_quantized_state_dict(
     *,
     metadata: Mapping[str, str],
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+    """
+    safetensors から読み込んだ Tensor を torchao の量子化 state dict へ戻す。
+
+    Args:
+        flattened (Mapping[str, torch.Tensor]): 平坦化された Tensor
+        metadata (Mapping[str, str]): 量子化情報を含む safetensors メタデータ
+
+    Returns:
+        tuple[dict[str, torch.Tensor], dict[str, Any]]: 復元した state dict と量子化情報
+
+    Raises:
+        RuntimeError: torchao の safetensors 補助機能を読み込めない場合
+        ValueError: メタデータまたは復元結果が不正な場合
+    """
+
     payload = parse_quantization_metadata(metadata)
     if payload is None:
         raise ValueError("Checkpoint has no Irodori quantization metadata.")

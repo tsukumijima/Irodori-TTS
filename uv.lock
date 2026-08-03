@@ -868,6 +868,7 @@ source = { editable = "." }
 dependencies = [
     { name = "dacvae" },
     { name = "huggingface-hub" },
+    { name = "numpy" },
     { name = "pyyaml" },
     { name = "safetensors" },
     { name = "scipy" },
@@ -902,6 +903,7 @@ dev = [
 requires-dist = [
     { name = "dacvae", git = "https://github.com/tsukumijima/dacvae?rev=d165f907b9cf91d9e05a744f2a5adceaa815b039" },
     { name = "huggingface-hub", specifier = ">=0.34.0,<2.0" },
+    { name = "numpy", specifier = ">=1.26.0,<3.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "safetensors", specifier = ">=0.7.0" },
     { name = "scipy", specifier = ">=1.11.0,<2.0" },

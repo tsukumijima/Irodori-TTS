@@ -8,6 +8,7 @@ requires-python = ">=3.11,<3.14"
 dependencies = [
     "dacvae",
     "huggingface-hub>=0.34.0,<2.0",
+    "numpy>=1.26.0,<3.0",
     "pyyaml>=6.0",
     "safetensors>=0.7.0",
     "scipy>=1.11.0,<2.0",
