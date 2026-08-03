@@ -532,6 +532,7 @@ def _load_adapter_checkpoint(
             + ", ".join(mismatches)
         )
 
+    # 直後に base_state を割り当てるため、事前学習済み backbone の再ダウンロードを省く
     model = TextToLatentRFDiT(
         resolved_model_cfg,
         pretrained_backbone_config=base_text_encoder_config,

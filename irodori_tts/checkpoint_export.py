@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import warnings
 from pathlib import Path
 
 
@@ -53,6 +54,12 @@ class CheckpointPublisher:
         """
 
         tokenizer_directory = output_checkpoint.parent / "tokenizer"
+        if staged_tokenizer is None and tokenizer_directory.exists():
+            warnings.warn(
+                "The existing tokenizer was retained because this export did not stage one; "
+                f"verify that it matches the new checkpoint: {tokenizer_directory}",
+                stacklevel=2,
+            )
         if tokenizer_directory.exists() and staged_tokenizer is not None and force is False:
             raise FileExistsError(
                 f"Tokenizer already exists: {tokenizer_directory} (use --force to overwrite)"
@@ -66,11 +73,18 @@ class CheckpointPublisher:
             if staged_tokenizer is not None:
                 staged_tokenizer.replace(tokenizer_directory)
             staged_checkpoint.replace(output_checkpoint)
-        except OSError:
+        except OSError as publish_ex:
             # モデル公開に失敗した場合は新 tokenizer を一時領域へ戻し、従来の組を復元する
             if staged_tokenizer is not None and tokenizer_directory.exists():
                 tokenizer_directory.replace(staged_tokenizer)
             if has_previous_tokenizer:
-                previous_tokenizer.replace(tokenizer_directory)
+                try:
+                    previous_tokenizer.replace(tokenizer_directory)
+                except OSError as restore_ex:
+                    raise OSError(
+                        "Checkpoint publication failed and the previous tokenizer could not be "
+                        f"restored; its backup remains at {previous_tokenizer}. "
+                        f"Original publication error: {publish_ex}"
+                    ) from restore_ex
             raise
         return tokenizer_directory if staged_tokenizer is not None else None
