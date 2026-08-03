@@ -3403,6 +3403,12 @@ def main() -> None:
                     section="resume checkpoint model_config",
                 )
                 if checkpoint_cfg.use_pretrained_text_encoder:
+                    # 保存済み構成だけで backbone を再構築し、外部設定への暗黙依存を避ける
+                    if resume_text_encoder_config is None:
+                        raise ValueError(
+                            "Non-LoRA resume with a pretrained text encoder requires "
+                            "text_encoder_config in the checkpoint."
+                        )
                     load_pretrained_backbone_weights = False
                     pretrained_backbone_config = resume_text_encoder_config
         else:

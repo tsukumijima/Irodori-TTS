@@ -585,10 +585,14 @@ def _load_adapter_checkpoint(
     adapter_inference_cfg: dict[str, int | float] = {}
     if isinstance(train_cfg, dict):
         adapter_inference_cfg = _extract_inference_values(train_cfg)
+    # 空の辞書を有効な代替元と扱わず、推論条件がないチェックポイントを拒否する
+    base_inference_values = (
+        _extract_inference_values(base_inference_cfg) if base_inference_cfg is not None else {}
+    )
     if adapter_inference_cfg:
         flat_config.update(adapter_inference_cfg)
-    elif base_inference_cfg is not None:
-        flat_config.update(_extract_inference_values(base_inference_cfg))
+    elif base_inference_values:
+        flat_config.update(base_inference_values)
     else:
         raise ValueError(
             "LoRA integration requires inference metadata from either the adapter or base checkpoint."

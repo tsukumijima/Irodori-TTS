@@ -256,7 +256,7 @@ def flatten_quantized_state_dict(
     compute_dtype: torch.dtype,
     quantized_modules: int,
     int4_group_size: int = DEFAULT_INT4_GROUP_SIZE,
-    int4_packing_format: str,
+    int4_packing_format: str | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
     if not is_torchao_quantized_state_dict(state_dict):
         raise ValueError("State dictionary does not contain torchao quantized tensors.")
