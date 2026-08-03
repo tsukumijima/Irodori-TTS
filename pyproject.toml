@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Irodori-TTS training and inference codebase"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "dacvae",
     "huggingface-hub>=0.34.0,<2.0",
@@ -25,7 +25,7 @@ dev = [
     "gradio>=5.10.0",
     "llvmlite>=0.40.0",
     "numba>=0.57.0",
-    "nvidia-cudnn-frontend==1.26.0; sys_platform == 'linux' or sys_platform == 'win32'",
+    "nvidia-cudnn-frontend==1.26.0; sys_platform == 'linux' or (sys_platform == 'win32' and platform_machine == 'AMD64')",
     "peft>=0.18.0",
     "pytest>=8.4.2",
     "ruff>=0.14.8,<0.15.0",
@@ -50,7 +50,7 @@ build-backend = "uv_build"
 
 [tool.uv]
 default-groups = ["dev"]
-exclude-newer = "1 week"
+exclude-newer = "2026-08-03T00:00:00Z"
 
 [tool.uv.build-backend]
 # ルートに irodori_tts パッケージがあるため module-root を空にする
@@ -64,13 +64,17 @@ source-include = [
 source-exclude = [
     ".git",
     ".gitignore",
+    ".venv/**",
+    "**/__pycache__/**",
+    "data/**",
+    "outputs/**",
 ]
 
 [tool.uv.sources]
 dacvae = { git = "https://github.com/tsukumijima/dacvae", rev = "d165f907b9cf91d9e05a744f2a5adceaa815b039" }
 # Windows x64・Linux x64: CUDA 13.0 版 / macOS・その他: PyPI から CPU 版
 torch = [
-    { index = "pytorch-cu130", marker = "(sys_platform == 'linux' and platform_machine == 'x86_64') or sys_platform == 'win32'" },
+    { index = "pytorch-cu130", marker = "(sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')" },
 ]
 
 [[tool.uv.index]]
@@ -120,7 +124,7 @@ venvPath = "."
 venv = ".venv"
 # TypeCheckingMode を strict に設定（VSCode の設定と同等）
 typeCheckingMode = "strict"
-# プロジェクトルートを指定
+# 型検査の対象プラットフォームを指定
 pythonPlatform = "All"
 # インクルードするパッケージパス
 include = [
