@@ -761,7 +761,11 @@ def sample_euler_rf_cfg(
                     speaker_state=bundle[2],
                     caption_state=bundle[4],
                 )
-    if velocity_field_guidance is not None and velocity_field_guidance.alpha != 0.0:
+    if (
+        effective_use_context_kv_cache
+        and velocity_field_guidance is not None
+        and velocity_field_guidance.alpha != 0.0
+    ):
         # 速度場ガイダンスの条件は反復中に不変なので、射影済み K/V を全ステップで再利用する
         context_kv_guidance_target = model.build_context_kv_cache(
             text_state=text_state_cond,

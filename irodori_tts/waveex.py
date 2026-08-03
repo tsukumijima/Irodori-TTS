@@ -239,6 +239,10 @@ class WaveExConfig:
     which the model is evaluated normally. All other indices are predicted via
     wavelet-guided extrapolation.
 
+    History entries are treated as uniformly spaced samples. Non-uniform time
+    schedules such as Sway remain supported as empirically calibrated index
+    schedules, but WaveEx does not rescale Taylor differences by timestep width.
+
     By default the schedule follows the operating point that won an internal
     sweep on the duration-control checkpoint (40 NFE → 6 ODE steps at indices
     [0, 1, 2, 5, 10, 20]; haar + 1st-order direct Taylor on a 2-frame buffer)
@@ -266,6 +270,13 @@ class WaveExConfig:
         if self.wavelet.lower() not in _WAVELET_BANKS:
             raise ValueError(
                 f"Unsupported wavelet={self.wavelet!r}. Expected one of: {available_wavelets()}"
+            )
+        filter_length = int(_WAVELET_BANKS[self.wavelet.lower()]["dec_lo"].numel())
+        if filter_length > self.history_size:
+            raise ValueError(
+                "Wavelet filter length must not exceed history_size: "
+                f"wavelet={self.wavelet!r}, filter_length={filter_length}, "
+                f"history_size={self.history_size}."
             )
 
     def resolve_ode_step_indices(self, num_steps: int) -> set[int]:

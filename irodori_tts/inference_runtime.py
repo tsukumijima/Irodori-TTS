@@ -317,9 +317,6 @@ class SamplingRequest:
     text: str
     caption: str | None = None
     ref_wav: str | None = None
-    ref_wavs: list[str] | None = None
-    ref_latent: str | None = None
-    ref_latents: list[str] | None = None
     ref_embed: str | None = None
     no_ref: bool = False
     ref_normalize_db: float | None = -16.0
@@ -369,6 +366,9 @@ class SamplingRequest:
     speaker_ref_fixed_length: int | None = None
     speaker_ref_bucket_sizes: list[int] | None = None
     # 後方互換のため、新規フィールドは既存の位置引数列の末尾へ追加
+    ref_wavs: list[str] | None = None
+    ref_latent: str | None = None
+    ref_latents: list[str] | None = None
     velocity_field_guidance: VelocityFieldGuidance | None = None
     trajectory_observer: TrajectoryObserver | None = None
     # 事前計算したキャプション条件は必ず状態とマスクを組にして渡す

@@ -81,6 +81,7 @@ class VelocityFieldGuidanceTest(unittest.TestCase):
         *,
         model: FakeVelocityModel | None = None,
         num_steps: int = 3,
+        use_context_kv_cache: bool = False,
     ) -> tuple[torch.Tensor, FakeVelocityModel]:
         runtime_model = FakeVelocityModel() if model is None else model
         caption_state = torch.ones((1, 2, 1), dtype=torch.float32)
@@ -98,7 +99,7 @@ class VelocityFieldGuidanceTest(unittest.TestCase):
             cfg_scale_text=0.0,
             cfg_scale_caption=0.0,
             cfg_scale_speaker=0.0,
-            use_context_kv_cache=False,
+            use_context_kv_cache=use_context_kv_cache,
             initial_noise=torch.ones((1, 2, 1), dtype=torch.float32),
             velocity_field_guidance=guidance,
         )
@@ -187,7 +188,16 @@ class VelocityFieldGuidanceTest(unittest.TestCase):
         self.assertEqual(model.caption_sums.count(6.0), 1)
         self.assertEqual(model.caption_sums.count(-2.0), 1)
         self.assertEqual(len(model.caption_sums), 5)
-        self.assertEqual(model.context_cache_builds, 2)
+        self.assertEqual(model.context_cache_builds, 0)
+
+    def test_guidance_reuses_context_cache_when_enabled(self) -> None:
+        guidance = self._caption_guidance()
+        _result, model = self._sample(guidance, use_context_kv_cache=True)
+
+        # 通常条件とガイダンスの target/opposite を各1回だけ構築し、全ステップで再利用
+        self.assertEqual(model.context_cache_builds, 3)
+        self.assertEqual(model.caption_sums.count(6.0), 3)
+        self.assertEqual(model.caption_sums.count(-2.0), 3)
 
 
 if __name__ == "__main__":

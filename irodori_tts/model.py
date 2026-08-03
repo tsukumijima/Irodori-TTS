@@ -809,7 +809,10 @@ class PretrainedTextBackbone(nn.Module):
         )
         method = getattr(self.backbone, method_name, None)
         if callable(method):
-            method()
+            if enabled:
+                method(gradient_checkpointing_kwargs={"use_reentrant": False})
+            else:
+                method()
 
 
 def _pretrained_hidden_size(config: object) -> int:
@@ -1785,10 +1788,8 @@ class TextToLatentRFDiT(nn.Module):
             raise ValueError(
                 "speaker_state_override was provided but speaker conditioning is disabled."
             )
-        caption_encoder = self.caption_encoder
-        caption_norm = self.caption_norm
         if self.cfg.use_caption_condition:
-            if caption_encoder is None or caption_norm is None:
+            if self.caption_encoder is None or self.caption_norm is None:
                 raise RuntimeError(
                     "Caption conditioning is enabled but caption modules are missing."
                 )

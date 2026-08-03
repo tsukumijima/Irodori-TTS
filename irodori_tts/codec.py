@@ -359,9 +359,9 @@ class DACVAECodec:
         else:
             effective_ensure_max = False
 
-        # 音量測定とピーク制限は CPU の float32 で行い、波形ごとのデバイス同期を避ける
-        waveform = waveform.to(device="cpu", dtype=torch.float32)
         if effective_normalize_db is not None or effective_ensure_max:
+            # 音量測定とピーク制限が必要な波形だけを CPU の float32 へ移す
+            waveform = waveform.to(device="cpu", dtype=torch.float32)
             # Keep behavior deterministic per utterance by normalizing each waveform independently.
             processed: list[torch.Tensor] = []
             for wav in waveform.squeeze(1):
@@ -417,7 +417,10 @@ class DACVAECodec:
 
     def encode_file(self, path: str | Path) -> torch.Tensor:
         # SoundFile で常に (frame, channel) として読み、従来の (channel, frame) 契約へ戻す
-        data, sr = sf.read(str(path), dtype="float32", always_2d=True)
+        try:
+            data, sr = sf.read(str(path), dtype="float32", always_2d=True)
+        except sf.LibsndfileError as ex:
+            raise RuntimeError(f"Failed to load reference audio: {path}") from ex
         wav = torch.from_numpy(np.ascontiguousarray(data.T))
         wav = wav.unsqueeze(0)  # (1, C, T)
         return self.encode_waveform(wav, sr).cpu()
