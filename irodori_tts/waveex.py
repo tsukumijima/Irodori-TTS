@@ -404,14 +404,11 @@ class WaveExBuffer:
         history = list(self._history)
         order = min(int(self.cfg.taylor_order), len(history) - 1)
         x_n = history[-1]
-        if order >= 1 and len(history) >= 2:
-            d1 = history[-1] - history[-2]
-        else:
+        if order < 1:
             return x_n
-        x_next = x_n + d1
-        if order >= 2 and len(history) >= 3:
-            x_next = 3 * history[-1] - 3 * history[-2] + history[-3]
-        return x_next
+        if order >= 2:
+            return 3 * history[-1] - 3 * history[-2] + history[-3]
+        return x_n + (history[-1] - history[-2])
 
 
 def _taylor_extrapolate(c: torch.Tensor, *, order: int) -> torch.Tensor:
