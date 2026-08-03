@@ -1068,65 +1068,6 @@ def load_model_state_partially(
 SPEAKER_IN_PROJ_WEIGHT_KEY = "speaker_encoder.in_proj.weight"
 
 
-def _upgrade_speaker_in_proj(
-    raw_model: torch.nn.Module,
-    init_state: dict[str, torch.Tensor],
-    *,
-    old_patch: int,
-    new_patch: int,
-    is_main_process: bool,
-) -> None:
-    """
-    Rebuild ``speaker_encoder.in_proj.weight`` when ``speaker_patch_size`` is
-    increased by an integer factor ``k = new_patch // old_patch``.
-
-    Strategy: tile the old weight ``k`` times along the input axis (the axis
-    that grew due to speaker patching stacking ``k`` frames together in the
-    channel dimension) and divide by ``k``. Averaging the ``k`` per-frame
-    slices reproduces the old encoder's output when the ``k`` frames are
-    identical, which gives a warm start close to the old model's behavior.
-
-    Bias is unaffected by the patch change (shape ``(speaker_dim,)`` regardless
-    of patch); it is loaded normally by ``load_model_state_partially``.
-    """
-    if new_patch <= old_patch or new_patch % old_patch != 0:
-        raise ValueError(
-            "speaker_patch_size upgrade must be a positive integer multiple: "
-            f"old={old_patch} new={new_patch}"
-        )
-    factor = new_patch // old_patch
-    old_weight = init_state.get(SPEAKER_IN_PROJ_WEIGHT_KEY)
-    if old_weight is None:
-        raise ValueError(
-            f"Checkpoint is missing {SPEAKER_IN_PROJ_WEIGHT_KEY!r}; cannot upgrade "
-            "speaker_patch_size."
-        )
-    speaker_encoder = getattr(raw_model, "speaker_encoder", None)
-    if speaker_encoder is None or not hasattr(speaker_encoder, "in_proj"):
-        raise RuntimeError(
-            "Model does not expose speaker_encoder.in_proj; cannot upgrade speaker_patch_size."
-        )
-    target = speaker_encoder.in_proj.weight
-    expected_out = int(target.shape[0])
-    expected_in_new = int(target.shape[1])
-    expected_in_old = expected_in_new // factor
-    if tuple(old_weight.shape) != (expected_out, expected_in_old):
-        raise ValueError(
-            f"Checkpoint {SPEAKER_IN_PROJ_WEIGHT_KEY!r} has shape {tuple(old_weight.shape)}, "
-            f"expected ({expected_out}, {expected_in_old}) for patch upgrade "
-            f"{old_patch}->{new_patch}."
-        )
-    new_weight = old_weight.to(dtype=target.dtype).repeat(1, factor).contiguous() / float(factor)
-    with torch.no_grad():
-        target.data.copy_(new_weight.to(device=target.device))
-    if is_main_process:
-        print(
-            f"Upgraded speaker_patch_size {old_patch}->{new_patch}: "
-            f"reinitialized {SPEAKER_IN_PROJ_WEIGHT_KEY} by tiling old weight x{factor} "
-            f"and scaling by 1/{factor}."
-        )
-
-
 def _canonical_parameter_key(key: str) -> str:
     prefix = "base_model.model."
     if key.startswith(prefix):
@@ -1520,13 +1461,23 @@ def _apply_base_initialization(
             raw_model.load_state_dict(init_state, strict=True)
 
         if upgrade_speaker_patch:
-            _upgrade_speaker_in_proj(
-                raw_model,
-                init_state,
-                old_patch=int(checkpoint_speaker_patch),
-                new_patch=int(model_cfg.speaker_patch_size),
-                is_main_process=is_main_process,
+            old_speaker_projection = init_state.get(SPEAKER_IN_PROJ_WEIGHT_KEY)
+            if old_speaker_projection is None:
+                raise ValueError(
+                    f"Checkpoint is missing {SPEAKER_IN_PROJ_WEIGHT_KEY!r}; cannot upgrade "
+                    "speaker_patch_size."
+                )
+            raw_model.speaker_encoder.upgrade_patch_projection(
+                old_speaker_projection,
+                old_patch_size=int(checkpoint_speaker_patch),
+                new_patch_size=int(model_cfg.speaker_patch_size),
             )
+            if is_main_process:
+                print(
+                    f"Upgraded speaker_patch_size {checkpoint_speaker_patch}->"
+                    f"{model_cfg.speaker_patch_size}: reinitialized "
+                    f"{SPEAKER_IN_PROJ_WEIGHT_KEY} from the previous projection."
+                )
 
         if upgrade_caption and not model_cfg.use_pretrained_text_encoder:
             if distributed:
@@ -3235,10 +3186,12 @@ def main() -> None:
             ref_min_frames=ref_min_frames_cfg,
             ref_max_frames=ref_max_frames_cfg,
         )
-    drop_last = len(train_dataset) >= train_cfg.batch_size
+    effective_batch_size = train_cfg.batch_size * (world_size if distributed else 1)
+    drop_last = len(train_dataset) >= effective_batch_size
     if not drop_last and is_main_process:
         print(
-            f"warning: dataset size ({len(train_dataset)}) is smaller than batch_size ({train_cfg.batch_size}). "
+            f"warning: dataset size ({len(train_dataset)}) is smaller than effective batch_size "
+            f"({effective_batch_size}). "
             "Using drop_last=False to avoid empty dataloader."
         )
     collator = TTSCollator(

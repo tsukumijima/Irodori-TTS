@@ -231,8 +231,9 @@ def _append_param_group(
     weight_decay: float,
     learning_rate: float,
     group_name: str,
-) -> None:
+) -> int | None:
     if params:
+        group_index = len(groups)
         groups.append(
             {
                 "params": params,
@@ -241,6 +242,8 @@ def _append_param_group(
                 "group_name": group_name,
             }
         )
+        return group_index
+    return None
 
 
 def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
@@ -262,14 +265,14 @@ def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
             learning_rate=cfg.learning_rate,
             group_name="main_no_decay",
         )
-        _append_param_group(
+        pretrained_decay_group_index = _append_param_group(
             param_groups,
             partitions.pretrained_decay,
             weight_decay=cfg.weight_decay,
             learning_rate=cfg.pretrained_text_encoder_learning_rate,
             group_name="pretrained_text_encoder_decay",
         )
-        _append_param_group(
+        pretrained_no_decay_group_index = _append_param_group(
             param_groups,
             partitions.pretrained_no_decay,
             weight_decay=0.0,
@@ -285,13 +288,10 @@ def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
         )
         optimizer_state = cast(Any, optimizer)
         optimizer_state.main_group_index = 0 if partitions.decay or partitions.no_decay else None
-        pretrained_group_index = len(param_groups) - sum(
-            bool(group) for group in (partitions.pretrained_decay, partitions.pretrained_no_decay)
-        )
         optimizer_state.pretrained_text_encoder_group_index = (
-            pretrained_group_index
-            if partitions.pretrained_decay or partitions.pretrained_no_decay
-            else None
+            pretrained_decay_group_index
+            if pretrained_decay_group_index is not None
+            else pretrained_no_decay_group_index
         )
         return optimizer
     if opt_name == "muon":
@@ -348,14 +348,14 @@ def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
             learning_rate=cfg.learning_rate,
             group_name="main_aux_no_decay",
         )
-        _append_param_group(
+        pretrained_decay_group_index = _append_param_group(
             aux_param_groups,
             partitions.pretrained_decay,
             weight_decay=cfg.weight_decay,
             learning_rate=cfg.pretrained_text_encoder_learning_rate,
             group_name="pretrained_text_encoder_decay",
         )
-        _append_param_group(
+        pretrained_no_decay_group_index = _append_param_group(
             aux_param_groups,
             partitions.pretrained_no_decay,
             weight_decay=0.0,
@@ -371,17 +371,14 @@ def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
                 eps=cfg.adam_eps,
             )
         optimizer = MuonWithAuxAdamW(muon_opt=muon_opt, aux_opt=aux_opt)
-        pretrained_group_index = (
-            len(muon_param_groups)
-            + len(aux_param_groups)
-            - sum(
-                bool(group)
-                for group in (partitions.pretrained_decay, partitions.pretrained_no_decay)
-            )
+        pretrained_aux_group_index = (
+            pretrained_decay_group_index
+            if pretrained_decay_group_index is not None
+            else pretrained_no_decay_group_index
         )
         optimizer.pretrained_text_encoder_group_index = (
-            pretrained_group_index
-            if partitions.pretrained_decay or partitions.pretrained_no_decay
+            len(muon_param_groups) + pretrained_aux_group_index
+            if pretrained_aux_group_index is not None
             else None
         )
         return optimizer

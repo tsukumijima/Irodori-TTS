@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -367,13 +368,21 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
                         ref_latent = self._build_ref_latent(ref_indices)
                         has_speaker = True
                 if ref_latent is None:
-                    candidate_pos = group_start + random.randrange(group_size - 1)
-                    ref_sample_index = int(self.speaker_group_indices[candidate_pos])
-                    if ref_sample_index == self._sample_index(index):
-                        ref_sample_index = int(self.speaker_group_indices[group_end - 1])
-                    ref_item = self._read_item_by_sample_index(ref_sample_index)
-                    ref_latent = self._load_ref_latent(ref_item["latent_path"])
-                    has_speaker = True
+                    target_sample_index = self._sample_index(index)
+                    # 重複 index を含むグループを巡回し、現在サンプルと異なる最初の参照を使う
+                    candidate_offset = random.randrange(group_size)
+                    ref_sample_index = target_sample_index
+                    for retry_offset in range(group_size):
+                        candidate_position = (
+                            group_start + (candidate_offset + retry_offset) % group_size
+                        )
+                        ref_sample_index = int(self.speaker_group_indices[candidate_position])
+                        if ref_sample_index != target_sample_index:
+                            break
+                    if ref_sample_index != target_sample_index:
+                        ref_item = self._read_item_by_sample_index(ref_sample_index)
+                        ref_latent = self._load_ref_latent(ref_item["latent_path"])
+                        has_speaker = True
 
         if ref_latent is None:
             ref_latent = latent
@@ -511,6 +520,12 @@ class _ManifestIndex:
         caption_key = str(caption_key)
         cached = cls._load_cache(manifest_path, caption_key)
         if cached is not None:
+            if bool((cached.num_frames > 0).any()) is False:
+                warnings.warn(
+                    "Manifest has no positive num_frames values; reference concatenation will "
+                    f"be skipped: {manifest_path}",
+                    stacklevel=2,
+                )
             if show_progress:
                 print(f"Loaded manifest index cache: {cls._cache_path(manifest_path, caption_key)}")
             return cached
@@ -521,6 +536,7 @@ class _ManifestIndex:
         speakers: list[str] = []
         has_caption: list[bool] = []
         num_frames: list[int] = []
+        has_valid_num_frames = False
         total_bytes = manifest_path.stat().st_size
         if progress_desc is None:
             progress_desc = f"Index Manifest ({manifest_path.name})"
@@ -561,11 +577,19 @@ class _ManifestIndex:
                             speakers.append(speaker_id)
                         speaker_codes.append(int(speaker_code))
                     has_caption.append(_has_caption(item.get(caption_key)))
-                    num_frames.append(max(0, int(item.get("num_frames", 0) or 0)))
+                    manifest_num_frames = max(0, int(item.get("num_frames", 0) or 0))
+                    num_frames.append(manifest_num_frames)
+                    has_valid_num_frames = has_valid_num_frames or manifest_num_frames > 0
             finally:
                 pbar.close()
         if not offsets:
             raise ValueError(f"No valid samples in manifest: {manifest_path}")
+        if has_valid_num_frames is False:
+            warnings.warn(
+                "Manifest has no positive num_frames values; reference concatenation will be "
+                f"skipped: {manifest_path}",
+                stacklevel=2,
+            )
         index = cls(
             offsets=torch.tensor(offsets, dtype=torch.int64),
             speaker_codes=torch.tensor(speaker_codes, dtype=torch.int64),
