@@ -32,7 +32,7 @@ from irodori_tts.config import (
     load_config_yaml,
     merge_dataclass_overrides,
 )
-from irodori_tts.dataset import LatentTextDataset, TTSCollator, _ManifestIndex
+from irodori_tts.dataset import LatentTextDataset, TTSCollator, build_manifest_index
 from irodori_tts.duration import set_duration_has_speaker_feature
 from irodori_tts.lora import (
     LORA_METADATA_NAME,
@@ -2708,21 +2708,22 @@ def main() -> None:
     resume_train_cfg = None
     resume_base_init = None
     resume_text_encoder_config = None
+    resume_payload: dict[str, Any] | None = None
     if args.resume is not None:
-        resume_meta = _load_checkpoint_payload(resume_path, map_location="cpu")
-        raw_resume_model_cfg = resume_meta.get("model_config")
+        resume_payload = _load_checkpoint_payload(resume_path, map_location="cpu")
+        raw_resume_model_cfg = resume_payload.get("model_config")
         if raw_resume_model_cfg is not None and not isinstance(raw_resume_model_cfg, dict):
             raise ValueError("Resume checkpoint model_config must be a dictionary when present.")
         resume_model_cfg = raw_resume_model_cfg
-        raw_resume_train_cfg = resume_meta.get("train_config")
+        raw_resume_train_cfg = resume_payload.get("train_config")
         if raw_resume_train_cfg is not None and not isinstance(raw_resume_train_cfg, dict):
             raise ValueError("Resume checkpoint train_config must be a dictionary when present.")
         resume_train_cfg = raw_resume_train_cfg
-        raw_resume_base_init = resume_meta.get("base_init")
+        raw_resume_base_init = resume_payload.get("base_init")
         if raw_resume_base_init is not None and not isinstance(raw_resume_base_init, dict):
             raise ValueError("Resume checkpoint base_init must be a dictionary when present.")
         resume_base_init = raw_resume_base_init
-        raw_resume_text_encoder_config = resume_meta.get("text_encoder_config")
+        raw_resume_text_encoder_config = resume_payload.get("text_encoder_config")
         if raw_resume_text_encoder_config is not None and not isinstance(
             raw_resume_text_encoder_config, dict
         ):
@@ -2737,7 +2738,6 @@ def main() -> None:
             raw_argv=raw_argv,
             exp_cfg=exp_cfg,
         )
-        del resume_meta
 
     if cli_provided(raw_argv, "--latent-dim"):
         model_cfg = replace(model_cfg, latent_dim=args.latent_dim)
@@ -2745,26 +2745,6 @@ def main() -> None:
         model_cfg = replace(model_cfg, latent_patch_size=args.latent_patch_size)
 
     set_seed(train_cfg.seed + rank)
-    pretrained_projector_type = str(model_cfg.pretrained_projector_type).strip().lower()
-    if pretrained_projector_type not in {"linear", "residual_mlp"}:
-        raise ValueError(
-            "model.pretrained_projector_type must be 'linear' or 'residual_mlp', "
-            f"got {model_cfg.pretrained_projector_type!r}."
-        )
-    if model_cfg.pretrained_projector_hidden_ratio <= 0:
-        raise ValueError(
-            "model.pretrained_projector_hidden_ratio must be > 0, got "
-            f"{model_cfg.pretrained_projector_hidden_ratio}."
-        )
-    if not 0.0 <= model_cfg.pretrained_projector_dropout <= 1.0:
-        raise ValueError(
-            "model.pretrained_projector_dropout must be in [0, 1], got "
-            f"{model_cfg.pretrained_projector_dropout}."
-        )
-    model_cfg = replace(
-        model_cfg,
-        pretrained_projector_type=pretrained_projector_type,
-    )
     if train_cfg.pretrained_text_encoder_learning_rate <= 0:
         raise ValueError(
             "pretrained_text_encoder_learning_rate must be > 0, got "
@@ -3164,11 +3144,22 @@ def main() -> None:
                 f"Caption tokenizer={model_cfg.caption_tokenizer_repo_resolved} vocab={caption_tokenizer.vocab_size} add_bos={model_cfg.caption_add_bos_resolved} padding_side=right "
                 f"(pretrained hidden_size={caption_hidden_size})."
             )
-    manifest_index = _ManifestIndex.build(
-        manifest_path=Path(train_cfg.manifest_path),
-        show_progress=bool(train_cfg.progress and is_main_process),
-        progress_desc="Index Manifest",
-    )
+    # 共有キャッシュへの書き込みは rank 0 に限定し、他 rank は完成後のキャッシュを読む
+    manifest_index = None
+    if is_main_process:
+        manifest_index = build_manifest_index(
+            manifest_path=Path(train_cfg.manifest_path),
+            show_progress=bool(train_cfg.progress),
+            progress_desc="Index Manifest",
+        )
+    if distributed:
+        dist.barrier()
+    if manifest_index is None:
+        manifest_index = build_manifest_index(
+            manifest_path=Path(train_cfg.manifest_path),
+            show_progress=False,
+            progress_desc="Index Manifest",
+        )
     ref_min_frames_cfg: int | None = None
     ref_max_frames_cfg: int | None = None
     if model_cfg.use_speaker_condition_resolved and train_cfg.ref_max_seconds > 0.0:
@@ -3658,9 +3649,12 @@ def main() -> None:
     step = 0
     resume_epoch = 0
     resume_loader_state_loaded = False
+    epoch_step_offset = 0
     progress: TrainProgress | None = None
     if args.resume is not None:
-        ckpt = _load_checkpoint_payload(resume_path, map_location="cpu")
+        if resume_payload is None:
+            raise RuntimeError("Resume checkpoint payload is unavailable.")
+        ckpt = resume_payload
         if not train_config_uses_lora(train_cfg):
             raw_model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
@@ -3674,6 +3668,7 @@ def main() -> None:
         runtime_state = ckpt.get(RUNTIME_STATE_KEY)
         if isinstance(runtime_state, dict):
             resume_epoch = int(runtime_state.get("sampler_epoch", 0))
+            epoch_step_offset = int(runtime_state.get("epoch_step", 0))
         dataloader_state = _select_dataloader_state_for_rank(
             ckpt,
             distributed=distributed,
@@ -3746,13 +3741,8 @@ def main() -> None:
             dtype=torch.float64,
         )
         epoch = resume_epoch
-        epoch_step_offset = int(
-            ckpt.get(RUNTIME_STATE_KEY, {}).get("epoch_step", 0)
-            if args.resume is not None
-            and resume_loader_state_loaded
-            and isinstance(ckpt.get(RUNTIME_STATE_KEY), dict)
-            else 0
-        )
+        if resume_loader_state_loaded is False:
+            epoch_step_offset = 0
         last_epoch_step = epoch_step_offset
         while step < train_cfg.max_steps:
             if train_sampler is not None and not resume_loader_state_loaded:
@@ -3760,6 +3750,8 @@ def main() -> None:
             epoch += 1
             current_epoch_step_offset = epoch_step_offset if resume_loader_state_loaded else 0
             epoch_step_offset = 0
+            # 復元済みローダーの状態は、この epoch のイテレーター生成時だけ有効にする
+            resume_loader_state_loaded = False
             train_batches = cuda_prefetch_batches(
                 loader,
                 device=device,
@@ -3768,7 +3760,6 @@ def main() -> None:
             for raw_epoch_step, batch in enumerate(train_batches, start=1):
                 epoch_step = raw_epoch_step + current_epoch_step_offset
                 last_epoch_step = epoch_step
-                resume_loader_state_loaded = False
                 accum_micro_steps += 1
                 text_ids = batch["text_ids"].to(device, non_blocking=True)
                 text_mask = batch["text_mask"].to(device, non_blocking=True)

@@ -62,6 +62,23 @@ class ModelConfig:
                 f"got {self.text_encoder_type!r}"
             )
         self.text_encoder_type = text_encoder_type
+        pretrained_projector_type = str(self.pretrained_projector_type).strip().lower()
+        if pretrained_projector_type not in {"linear", "residual_mlp"}:
+            raise ValueError(
+                "pretrained_projector_type must be either 'linear' or 'residual_mlp': "
+                f"got {self.pretrained_projector_type!r}"
+            )
+        if self.pretrained_projector_hidden_ratio <= 0:
+            raise ValueError(
+                "pretrained_projector_hidden_ratio must be > 0: "
+                f"got {self.pretrained_projector_hidden_ratio}"
+            )
+        if not 0.0 <= self.pretrained_projector_dropout <= 1.0:
+            raise ValueError(
+                "pretrained_projector_dropout must be in [0, 1]: "
+                f"got {self.pretrained_projector_dropout}"
+            )
+        self.pretrained_projector_type = pretrained_projector_type
 
     @property
     def patched_latent_dim(self) -> int:

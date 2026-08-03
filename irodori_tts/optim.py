@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import torch
 
@@ -21,6 +21,8 @@ class MuonWithAuxAdamW:
         self.param_groups = list(muon_opt.param_groups)
         if aux_opt is not None:
             self.param_groups.extend(aux_opt.param_groups)
+        self.main_group_index = 0
+        self.pretrained_text_encoder_group_index: int | None = None
 
     def zero_grad(self, set_to_none: bool = True) -> None:
         self.muon_opt.zero_grad(set_to_none=set_to_none)
@@ -266,13 +268,24 @@ def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
             learning_rate=cfg.pretrained_text_encoder_learning_rate,
             group_name="pretrained_text_encoder_no_decay",
         )
-        return torch.optim.AdamW(
+        optimizer = torch.optim.AdamW(
             param_groups if param_groups else model.parameters(),
             lr=cfg.learning_rate,
             weight_decay=0.0,
             betas=(cfg.adam_beta1, cfg.adam_beta2),
             eps=cfg.adam_eps,
         )
+        optimizer_state = cast(Any, optimizer)
+        optimizer_state.main_group_index = 0
+        pretrained_group_index = len(param_groups) - sum(
+            bool(group) for group in (partitions.pretrained_decay, partitions.pretrained_no_decay)
+        )
+        optimizer_state.pretrained_text_encoder_group_index = (
+            pretrained_group_index
+            if partitions.pretrained_decay or partitions.pretrained_no_decay
+            else None
+        )
+        return optimizer
     if opt_name == "muon":
         if not hasattr(torch.optim, "Muon"):
             raise RuntimeError(
@@ -349,7 +362,21 @@ def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
                 betas=(cfg.adam_beta1, cfg.adam_beta2),
                 eps=cfg.adam_eps,
             )
-        return MuonWithAuxAdamW(muon_opt=muon_opt, aux_opt=aux_opt)
+        optimizer = MuonWithAuxAdamW(muon_opt=muon_opt, aux_opt=aux_opt)
+        pretrained_group_index = (
+            len(muon_param_groups)
+            + len(aux_param_groups)
+            - sum(
+                bool(group)
+                for group in (partitions.pretrained_decay, partitions.pretrained_no_decay)
+            )
+        )
+        optimizer.pretrained_text_encoder_group_index = (
+            pretrained_group_index
+            if partitions.pretrained_decay or partitions.pretrained_no_decay
+            else None
+        )
+        return optimizer
 
     raise ValueError(f"Unsupported optimizer: {cfg.optimizer}")
 
@@ -393,11 +420,15 @@ def current_lr(optimizer) -> float:
     for group in optimizer.param_groups:
         if str(group.get("group_name", "")).startswith("main_"):
             return float(group["lr"])
-    return float(optimizer.param_groups[0]["lr"])
+    group_index = int(getattr(optimizer, "main_group_index", 0))
+    return float(optimizer.param_groups[group_index]["lr"])
 
 
 def current_pretrained_text_encoder_lr(optimizer) -> float | None:
     for group in optimizer.param_groups:
         if str(group.get("group_name", "")).startswith("pretrained_text_encoder_"):
             return float(group["lr"])
-    return None
+    group_index = getattr(optimizer, "pretrained_text_encoder_group_index", None)
+    if group_index is None:
+        return None
+    return float(optimizer.param_groups[int(group_index)]["lr"])

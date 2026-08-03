@@ -216,13 +216,17 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
 
     def _load_ref_latent(self, latent_path_raw: str) -> torch.Tensor:
         """
-        Load a latent for reference use. Does not apply ``max_latent_steps`` clamp
-        (that limit is a target-side constraint; reference latents may be longer,
-        e.g., for 120s concat).
+        参照用 latent を設定済みの参照長上限へ収めて読み込む。
         """
         latent_path = self._resolve_latent_path(latent_path_raw)
         latent = torch.load(latent_path, map_location="cpu", weights_only=True)
-        return _coerce_latent_shape(latent, self.latent_dim).float()
+        latent = _coerce_latent_shape(latent, self.latent_dim).float()
+        reference_limit = self.ref_max_frames
+        if reference_limit is None:
+            reference_limit = self.max_latent_steps
+        if reference_limit is not None:
+            latent = latent[:reference_limit]
+        return latent
 
     def _sample_ref_concat_indices(
         self,
@@ -558,6 +562,34 @@ class _ManifestIndex:
         return index
 
 
+def build_manifest_index(
+    manifest_path: Path,
+    *,
+    caption_key: str = "caption",
+    show_progress: bool = False,
+    progress_desc: str | None = None,
+) -> _ManifestIndex:
+    """
+    マニフェストのランダムアクセス用インデックスを構築する。
+
+    Args:
+        manifest_path (Path): 読み込む JSONL マニフェスト
+        caption_key (str): キャプション判定に使うフィールド名
+        show_progress (bool): 構築進捗を表示するか
+        progress_desc (str | None): 進捗表示へ使う説明
+
+    Returns:
+        _ManifestIndex: キャッシュを再利用できるマニフェストインデックス
+    """
+
+    return _ManifestIndex.build(
+        manifest_path=manifest_path,
+        caption_key=caption_key,
+        show_progress=show_progress,
+        progress_desc=progress_desc,
+    )
+
+
 @dataclass
 class TTSCollator:
     tokenizer: PretrainedTextTokenizer
@@ -616,11 +648,10 @@ class TTSCollator:
             latent_mask.fill_(True)
 
         max_ref_t = max(x.shape[0] for x in ref_latents)
-        if self.fixed_target_latent_steps is None:
-            bucket_size = int(self.latent_length_bucket_size)
-            if bucket_size > 0:
-                bucket_size = _round_up_to_multiple(bucket_size, self.latent_patch_size)
-                max_ref_t = _round_up_to_multiple(max_ref_t, bucket_size)
+        bucket_size = int(self.latent_length_bucket_size)
+        if bucket_size > 0:
+            bucket_size = _round_up_to_multiple(bucket_size, self.latent_patch_size)
+            max_ref_t = _round_up_to_multiple(max_ref_t, bucket_size)
         ref_batch = torch.zeros((bsz, max_ref_t, self.latent_dim), dtype=torch.float32)
         ref_mask = torch.zeros((bsz, max_ref_t), dtype=torch.bool)
         for i, ref_latent in enumerate(ref_latents):
