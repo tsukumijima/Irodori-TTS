@@ -1544,7 +1544,6 @@ class InferenceRuntime:
         self,
         *,
         req: SamplingRequest,
-        lora_adapter: str | None,
         cache_key: _ReferenceCacheKey | None,
         ref_latent: torch.Tensor | None,
         ref_mask: torch.Tensor | None,
@@ -2281,7 +2280,6 @@ class InferenceRuntime:
                     cached_speaker_mask,
                 ) = self._load_cached_speaker_condition(
                     req=req,
-                    lora_adapter=lora_adapter,
                     cache_key=speaker_cache_key,
                     ref_latent=None,
                     ref_mask=None,
@@ -2300,7 +2298,6 @@ class InferenceRuntime:
                         cached_speaker_mask,
                     ) = self._load_cached_speaker_condition(
                         req=req,
-                        lora_adapter=lora_adapter,
                         cache_key=speaker_cache_key,
                         ref_latent=ref_latent,
                         ref_mask=ref_mask,
@@ -2800,10 +2797,16 @@ def load_audio(path: str | Path) -> tuple[torch.Tensor, int]:
 
 def save_wav(path: str | Path, audio: torch.Tensor, sample_rate: int) -> Path:
     out_path = Path(path)
+    # PCM subtype と互換性を確認済みのコンテナだけを保存対象にする
+    output_subtypes = {".flac": "PCM_24", ".wav": "PCM_16"}
+    output_subtype = output_subtypes.get(out_path.suffix.lower())
+    if output_subtype is None:
+        raise ValueError(
+            f"Unsupported audio output extension {out_path.suffix!r}; expected .flac or .wav."
+        )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     audio_cpu = audio.detach().to(device="cpu", dtype=torch.float32)
     audio_np = audio_cpu.squeeze(0).numpy() if audio_cpu.shape[0] == 1 else audio_cpu.T.numpy()
     # Torchaudio の既定と揃え、FLAC は PCM24、WAV は libsndfile 既定の PCM16 で保存する
-    output_subtype = "PCM_24" if out_path.suffix.lower() == ".flac" else "PCM_16"
     sf.write(str(out_path), audio_np, sample_rate, subtype=output_subtype)
     return out_path

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 import soundfile as sf
 import torch
 
@@ -39,3 +40,10 @@ def test_save_wav_preserves_previous_default_subtypes(tmp_path: Path) -> None:
 
     assert sf.info(wav_path).subtype == "PCM_16"
     assert sf.info(flac_path).subtype == "PCM_24"
+
+
+def test_save_wav_rejects_unsupported_output_extension(tmp_path: Path) -> None:
+    waveform = torch.zeros((1, 480), dtype=torch.float32)
+
+    with pytest.raises(ValueError, match=r"expected \.flac or \.wav"):
+        save_wav(tmp_path / "output.ogg", waveform, 48000)

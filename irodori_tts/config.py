@@ -246,7 +246,7 @@ class TrainConfig:
                 "ref_min_seconds and ref_max_seconds must be non-negative, "
                 f"got {self.ref_min_seconds} and {self.ref_max_seconds}."
             )
-        if self.ref_min_seconds > self.ref_max_seconds:
+        if self.ref_max_seconds > 0.0 and self.ref_min_seconds > self.ref_max_seconds:
             raise ValueError(
                 "ref_min_seconds must be less than or equal to ref_max_seconds, "
                 f"got {self.ref_min_seconds} > {self.ref_max_seconds}."

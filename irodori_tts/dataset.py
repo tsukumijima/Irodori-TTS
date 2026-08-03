@@ -368,7 +368,6 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
                         ref_latent = self._build_ref_latent(ref_indices)
                         has_speaker = True
                 if ref_latent is None:
-                    target_sample_index = self._sample_index(index)
                     # 重複 index を含むグループを巡回し、現在サンプルと異なる最初の参照を使う
                     candidate_offset = random.randrange(group_size)
                     ref_sample_index = target_sample_index
