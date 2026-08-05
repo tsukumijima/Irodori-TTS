@@ -303,6 +303,10 @@ def sample_euler_rf_cfg(
     ``initial_noise`` alike. Shared chunk noise must be passed unscaled because
     pre-scaled input would apply the factor twice.
 
+    ``velocity_field_guidance`` adds target and opposite model evaluations at
+    every enabled full ODE step. CFG may add further model evaluations, while
+    WaveEx Taylor steps do not evaluate the model.
+
     Returns:
       latent sequence in patched space, shape (B, sequence_length, patched_latent_dim)
     """
@@ -458,6 +462,26 @@ def sample_euler_rf_cfg(
             speaker_uncond_mode=speaker_uncond_mode,
         )
     else:
+        # キャッシュ済み条件と生の条件を混在させると、片方が無視されて呼び出しミスが隠れる
+        raw_condition_names = [
+            name
+            for name, value in (
+                ("speaker_state_override", speaker_state_override),
+                ("speaker_mask_override", speaker_mask_override),
+                ("caption_state_override", caption_state_override),
+                ("caption_mask_override", caption_mask_override),
+                ("caption_input_ids", caption_input_ids),
+                ("caption_mask", caption_mask),
+                ("ref_latent", ref_latent),
+                ("ref_mask", ref_mask),
+            )
+            if value is not None
+        ]
+        if raw_condition_names:
+            raise ValueError(
+                "encoded_conditions cannot be combined with raw conditioning arguments: "
+                + ", ".join(raw_condition_names)
+            )
         (
             text_state_cond,
             text_mask_cond,
@@ -466,11 +490,73 @@ def sample_euler_rf_cfg(
             caption_state_cond,
             caption_mask_cond,
         ) = encoded_conditions
-        if text_state_cond.shape[0] != batch_size:
-            raise ValueError(
-                "encoded_conditions text_state batch size mismatch: "
-                f"expected {batch_size}, got {text_state_cond.shape[0]}."
-            )
+
+        def validate_cached_condition(
+            state: torch.Tensor | None,
+            mask: torch.Tensor | None,
+            *,
+            name: str,
+            is_required: bool,
+        ) -> None:
+            """
+            キャッシュ済み条件がサンプラーの Tensor 契約を満たすか検証する。
+
+            Args:
+                state (torch.Tensor | None): 条件状態
+                mask (torch.Tensor | None): 条件マスク
+                name (str): エラーメッセージへ使う条件名
+                is_required (bool): state と mask の省略を許可するか
+
+            Raises:
+                ValueError: 条件の存在、形状、デバイス、または dtype が不正な場合
+            """
+
+            if state is None or mask is None:
+                if is_required is True or state is not None or mask is not None:
+                    raise ValueError(
+                        f"encoded_conditions {name}_state and {name}_mask must be provided together."
+                    )
+                return
+            if state.ndim != 3 or mask.ndim != 2 or state.shape[:2] != mask.shape:
+                raise ValueError(
+                    f"encoded_conditions {name} shape mismatch: "
+                    f"state={tuple(state.shape)}, mask={tuple(mask.shape)}."
+                )
+            if state.shape[0] != batch_size:
+                raise ValueError(
+                    f"encoded_conditions {name}_state batch size mismatch: "
+                    f"expected {batch_size}, got {state.shape[0]}."
+                )
+            if state.device != device or mask.device != device:
+                raise ValueError(
+                    f"encoded_conditions {name} device mismatch: expected {device}, "
+                    f"got state={state.device}, mask={mask.device}."
+                )
+            if state.dtype != dtype or mask.dtype != torch.bool:
+                raise ValueError(
+                    f"encoded_conditions {name} dtype mismatch: expected state={dtype}, "
+                    f"mask={torch.bool}, got state={state.dtype}, mask={mask.dtype}."
+                )
+
+        # モデル内部へ渡す前に、状態とマスクを一つの条件として検証する
+        validate_cached_condition(
+            text_state_cond,
+            text_mask_cond,
+            name="text",
+            is_required=True,
+        )
+        validate_cached_condition(
+            speaker_state_cond,
+            speaker_mask_cond,
+            name="speaker",
+            is_required=model.cfg.use_speaker_condition_resolved,
+        )
+        validate_cached_condition(
+            caption_state_cond,
+            caption_mask_cond,
+            name="caption",
+            is_required=model.cfg.use_caption_condition,
+        )
     text_state_uncond = torch.zeros_like(text_state_cond)
     text_mask_uncond = torch.zeros_like(text_mask_cond)
     speaker_state_uncond = None

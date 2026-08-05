@@ -73,6 +73,71 @@ class TrajectoryObserverTest(unittest.TestCase):
 
         self.assertIs(request.trajectory_observer, observer)
 
+    def _sample_encoded_conditions(
+        self,
+        encoded_conditions: EncodedConditions,
+        *,
+        caption_input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        キャッシュ済み条件を指定して最小の RF サンプリングを実行する。
+
+        Args:
+            encoded_conditions (EncodedConditions): 検証対象の条件一式
+            caption_input_ids (torch.Tensor | None): 同時指定を検証する caption ID
+
+        Returns:
+            torch.Tensor: サンプリング後の潜在
+        """
+
+        return sample_euler_rf_cfg(
+            model=cast(Any, ConstantVelocityModel()),
+            text_input_ids=torch.ones((1, 1), dtype=torch.long),
+            text_mask=torch.ones((1, 1), dtype=torch.bool),
+            ref_latent=None,
+            ref_mask=None,
+            sequence_length=2,
+            encoded_conditions=encoded_conditions,
+            caption_input_ids=caption_input_ids,
+            num_steps=2,
+            cfg_scale_text=0.0,
+            cfg_scale_caption=1.0,
+            cfg_scale_speaker=0.0,
+            use_context_kv_cache=False,
+            initial_noise=torch.ones((1, 2, 1), dtype=torch.float32),
+        )
+
+    def test_encoded_conditions_reject_raw_condition_overrides(self) -> None:
+        """
+        キャッシュ済み条件と生の条件を同時に指定した呼び出しを拒否する。
+        """
+
+        encoded_conditions = ConstantVelocityModel().encode_conditions()
+
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            self._sample_encoded_conditions(
+                encoded_conditions,
+                caption_input_ids=torch.ones((1, 1), dtype=torch.long),
+            )
+
+    def test_encoded_conditions_reject_state_mask_shape_mismatch(self) -> None:
+        """
+        キャッシュ済み状態とマスクの系列長不一致をモデル呼び出し前に拒否する。
+        """
+
+        encoded_conditions = ConstantVelocityModel().encode_conditions()
+        encoded_conditions = EncodedConditions(
+            text_state=encoded_conditions.text_state,
+            text_mask=encoded_conditions.text_mask,
+            ref_state=None,
+            ref_mask=None,
+            caption_state=encoded_conditions.caption_state,
+            caption_mask=torch.ones((1, 2), dtype=torch.bool),
+        )
+
+        with self.assertRaisesRegex(ValueError, "caption shape mismatch"):
+            self._sample_encoded_conditions(encoded_conditions)
+
     def _sample(
         self,
         observer: TrajectoryObserver | None,
