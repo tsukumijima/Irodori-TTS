@@ -5,6 +5,7 @@
 #     --checkpoint path/to/Irodori-TTS-v4-Small/model.safetensors \
 #     --ref-wavs path/to/reference_1.wav path/to/reference_2.wav \
 #     --max-ref-seconds 120 \
+#     --expected-local-tokens 750 \
 #     --output path/to/name.speaker-base.safetensors
 #
 # Usage:
@@ -21,6 +22,9 @@
 #     --ref-embed outputs/speaker_inversion/name/checkpoint_final.speaker.safetensors \
 #     --text "読み上げるテキスト" \
 #     --caption "声質やスタイルの記述"
+#
+# The reference inputs must contain at least 120 seconds of audio. The preparation
+# command truncates them to 120 seconds and verifies the 750 local tokens required here.
 
 model:
   latent_dim: 32
@@ -66,7 +70,7 @@ model:
 train:
   train_mode: rf
   speaker_inversion_enabled: true
-  # 120 seconds produce 750 local tokens and one recomputed mean token.
+  # The base preparation command must verify 750 local tokens before this recipe is used.
   speaker_inversion_tokens: 751
   speaker_inversion_init_std: 0.02
   speaker_inversion_init_embedding:

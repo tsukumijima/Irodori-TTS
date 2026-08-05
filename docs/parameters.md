@@ -432,14 +432,11 @@ embedding tokens. The output is a `.speaker.safetensors` file used at inference 
 
 Use the recipe that matches the frozen base checkpoint: `train_500m_v3_speaker_inversion.yaml` for the caption-free v3 model, `train_500m_v3_voice_design_speaker_inversion.yaml` for v3-VoiceDesign, and `train_v4_small_speaker_inversion.yaml` for v4-Small. The v3 filenames retain the established `500m` recipe prefix even though the released VoiceDesign checkpoint is named Irodori-TTS-600M-v3-VoiceDesign. These model families have different condition encoders and duration-predictor architectures, so their recipes are intentionally separate.
 
-The v3-VoiceDesign and v4-Small reference-initialized recipes start from local pre-normalization Speaker Encoder tokens produced by an ordinary reference. A zero residual therefore exports the normalized local tokens and a recomputed mean token. The v3-VoiceDesign recipe uses 750 local tokens from 30 seconds, while the v4-Small recipe uses 750 local tokens from 120 seconds; both export 751 tokens after prepending the recomputed mean. The base file and configured token count must match exactly.
+The v3-VoiceDesign and v4-Small reference-initialized recipes start from local pre-normalization Speaker Encoder tokens produced by an ordinary reference. A zero residual therefore exports the normalized local tokens and a recomputed mean token. The v3-VoiceDesign recipe requires at least 30 seconds of reference audio, while the v4-Small recipe requires at least 120 seconds. Pass `--expected-local-tokens 750` when preparing either base so insufficient reference audio fails before training. Both recipes export 751 tokens after prepending the recomputed mean.
 
 Create the fixed base with `prepare_speaker_inversion_base.py` before starting training. Its `--max-ref-seconds` controls the base reference independently of the training manifest. For example, the v4-Small recipe uses `--max-ref-seconds 120` and writes a `.speaker-base.safetensors` file that is passed to `--speaker-inversion-base-embedding`.
 
-Each periodic and final embedding is accompanied by a `.speaker.trainer.pt` sidecar. Pass
-that sidecar to `--resume` to restore the embedding, optimizer, scheduler, step, random-number
-generators, and dataloader position. The sidecar also records the frozen base checkpoint, so
-`--init-checkpoint` is not required when resuming on the same filesystem.
+Each periodic and final embedding is accompanied by a `.speaker.trainer.pt` sidecar. Pass that sidecar to `--resume` with the same config and manifest to restore the embedding, optimizer, scheduler, step, random-number generators, and dataloader position. Exact data-order continuation also requires the same distributed world size. The sidecar records the frozen base checkpoint, so `--init-checkpoint` is not required when resuming while that checkpoint remains available at its recorded path.
 
 | Parameter / Field | Default in dataclass | Notes |
 |-------------------|----------------------|-------|

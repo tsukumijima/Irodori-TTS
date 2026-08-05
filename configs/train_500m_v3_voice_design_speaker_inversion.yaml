@@ -6,6 +6,7 @@
 #     --checkpoint path/to/Irodori-TTS-600M-v3-VoiceDesign/model.safetensors \
 #     --ref-wav path/to/reference.wav \
 #     --max-ref-seconds 30 \
+#     --expected-local-tokens 750 \
 #     --output path/to/name.speaker-base.safetensors
 #
 # Usage:
@@ -16,9 +17,9 @@
 #     --speaker-inversion-base-embedding path/to/name.speaker-base.safetensors \
 #     --output-dir outputs/speaker_inversion/name
 #
-# A 30-second reference produces 750 local Speaker Encoder tokens because
-# v3-VoiceDesign uses speaker_patch_size=1. The exported embedding prepends a
-# recomputed mean token, for 751 total speaker tokens.
+# The reference inputs must contain at least 30 seconds of audio. The preparation
+# command truncates them to 30 seconds and verifies the 750 local Speaker Encoder
+# tokens required by this recipe. Export recomputes the mean token for 751 total tokens.
 
 model:
   latent_dim: 32

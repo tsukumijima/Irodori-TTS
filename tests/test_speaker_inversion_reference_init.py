@@ -10,6 +10,7 @@ from irodori_tts.speaker_inversion import (
     SpeakerInversionEmbedding,
     load_speaker_inversion_base_payload,
     save_speaker_inversion_base_safetensors,
+    speaker_inversion_checkpoint_sha256,
     speaker_inversion_state_dict,
 )
 
@@ -104,13 +105,16 @@ def test_reference_base_rejects_different_checkpoint(tmp_path: Path) -> None:
     """Reject a base extracted from weights other than the frozen training checkpoint."""
 
     checkpoint = tmp_path / "model.safetensors"
-    checkpoint.touch()
+    other_checkpoint = tmp_path / "other.safetensors"
+    checkpoint.write_bytes(b"original checkpoint")
+    other_checkpoint.write_bytes(b"different checkpoint")
     path = tmp_path / "voice.speaker-base.safetensors"
     save_speaker_inversion_base_safetensors(
         path,
         torch.randn(5, 8),
         metadata={
             "checkpoint": str(checkpoint.resolve()),
+            "checkpoint_sha256": speaker_inversion_checkpoint_sha256(checkpoint),
             "speaker_patch_size": "4",
         },
     )
@@ -118,7 +122,35 @@ def test_reference_base_rejects_different_checkpoint(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="checkpoint mismatch"):
         load_speaker_inversion_base_payload(
             path,
-            expected_checkpoint=tmp_path / "other.safetensors",
+            expected_checkpoint=other_checkpoint,
             expected_speaker_dim=8,
             expected_speaker_patch_size=4,
         )
+
+
+def test_reference_base_accepts_relocated_checkpoint(tmp_path: Path) -> None:
+    """Identify the frozen checkpoint by content instead of its filesystem location."""
+
+    original_checkpoint = tmp_path / "original.safetensors"
+    relocated_checkpoint = tmp_path / "relocated.safetensors"
+    original_checkpoint.write_bytes(b"same checkpoint contents")
+    relocated_checkpoint.write_bytes(original_checkpoint.read_bytes())
+    path = tmp_path / "voice.speaker-base.safetensors"
+    save_speaker_inversion_base_safetensors(
+        path,
+        torch.randn(5, 8),
+        metadata={
+            "checkpoint": str(original_checkpoint.resolve()),
+            "checkpoint_sha256": speaker_inversion_checkpoint_sha256(original_checkpoint),
+            "speaker_patch_size": "4",
+        },
+    )
+
+    payload = load_speaker_inversion_base_payload(
+        path,
+        expected_checkpoint=relocated_checkpoint,
+        expected_speaker_dim=8,
+        expected_speaker_patch_size=4,
+    )
+
+    assert payload[SPEAKER_PRE_NORM_EMBEDDING_KEY].shape == (5, 8)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -15,7 +16,27 @@ SPEAKER_INVERSION_SAFETENSORS_SUFFIX = ".speaker.safetensors"
 SPEAKER_INVERSION_BASE_SAFETENSORS_SUFFIX = ".speaker-base.safetensors"
 SPEAKER_EMBEDDING_KEY = "speaker_embedding"
 SPEAKER_PRE_NORM_EMBEDDING_KEY = "speaker_pre_norm_embedding"
-SPEAKER_INVERSION_BASE_FORMAT_VERSION = "1"
+SPEAKER_INVERSION_BASE_FORMAT_VERSION = "2"
+
+
+def speaker_inversion_checkpoint_sha256(path: str | Path) -> str:
+    """
+    Speaker Inversion の基準状態を生成した checkpoint の SHA-256 を計算する。
+
+    Args:
+        path (str | Path): ハッシュを計算する checkpoint のパス
+
+    Returns:
+        str: 16進表記の SHA-256
+    """
+
+    source = Path(path).expanduser()
+    hasher = hashlib.sha256()
+    # Checkpoint paths are portable, but their bytes define the encoder that produced the base.
+    with source.open("rb") as checkpoint_file:
+        while chunk := checkpoint_file.read(1024 * 1024):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 class SpeakerConditionComposer(Protocol):
@@ -274,12 +295,13 @@ def load_speaker_inversion_base_payload(
             "Speaker Inversion base file has an unsupported or missing format_version."
         )
     if expected_checkpoint is not None:
-        actual_checkpoint = metadata.get("checkpoint")
         expected_checkpoint_path = Path(expected_checkpoint).expanduser().resolve()
-        if actual_checkpoint != str(expected_checkpoint_path):
+        actual_fingerprint = metadata.get("checkpoint_sha256")
+        expected_fingerprint = speaker_inversion_checkpoint_sha256(expected_checkpoint_path)
+        if actual_fingerprint != expected_fingerprint:
             raise ValueError(
                 "Speaker Inversion base checkpoint mismatch: "
-                f"expected {expected_checkpoint_path}, got {actual_checkpoint!r}."
+                f"expected SHA-256 {expected_fingerprint}, got {actual_fingerprint!r}."
             )
     if expected_speaker_dim is not None and metadata.get("speaker_dim") != str(
         int(expected_speaker_dim)

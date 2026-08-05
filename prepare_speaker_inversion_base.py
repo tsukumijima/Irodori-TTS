@@ -11,7 +11,10 @@ from irodori_tts.inference_runtime import (
     default_runtime_device,
     download_hf_checkpoint,
 )
-from irodori_tts.speaker_inversion import save_speaker_inversion_base_safetensors
+from irodori_tts.speaker_inversion import (
+    save_speaker_inversion_base_safetensors,
+    speaker_inversion_checkpoint_sha256,
+)
 
 
 def main() -> None:
@@ -33,6 +36,7 @@ def main() -> None:
     reference_group.add_argument("--ref-latents", nargs="+", default=None, metavar="PATH")
     parser.add_argument("--output", required=True)
     parser.add_argument("--max-ref-seconds", type=float, default=None)
+    parser.add_argument("--expected-local-tokens", type=int, default=None)
     parser.add_argument("--ref-normalize-db", type=float, default=-16.0)
     parser.add_argument("--model-device", default=default_runtime_device())
     parser.add_argument("--model-precision", choices=["fp32", "bf16", "fp16"], default="fp32")
@@ -43,6 +47,11 @@ def main() -> None:
         default="Aratako/Semantic-DACVAE-Japanese-32dim",
     )
     args = parser.parse_args()
+    if args.expected_local_tokens is not None and int(args.expected_local_tokens) <= 0:
+        raise ValueError(
+            "--expected-local-tokens must be > 0 when provided, "
+            f"got {int(args.expected_local_tokens)}."
+        )
 
     # Resolve remote checkpoints before runtime construction so provenance has one local path.
     if args.checkpoint is not None:
@@ -76,6 +85,13 @@ def main() -> None:
         ),
         log_fn=print,
     )
+    if args.expected_local_tokens is not None and int(condition.state.shape[1]) != int(
+        args.expected_local_tokens
+    ):
+        raise ValueError(
+            "Reference length produced an unexpected number of local speaker tokens: "
+            f"expected {int(args.expected_local_tokens)}, got {int(condition.state.shape[1])}."
+        )
     # Persist only the fixed base because the learned residual belongs to training checkpoints.
     output_path = Path(str(args.output)).expanduser()
     save_speaker_inversion_base_safetensors(
@@ -83,6 +99,7 @@ def main() -> None:
         condition.state,
         metadata={
             "checkpoint": str(checkpoint_path.resolve()),
+            "checkpoint_sha256": speaker_inversion_checkpoint_sha256(checkpoint_path),
             "speaker_patch_size": str(int(runtime.model_cfg.speaker_patch_size)),
             "codec_repo": str(args.codec_repo),
             "max_ref_seconds": (
