@@ -138,6 +138,7 @@ include = [
     "gradio_app.py",
     "gradio_app_voicedesign.py",
     "prepare_manifest.py",
+    "prepare_speaker_inversion_base.py",
 ]
 # 除外するパス
 exclude = [
