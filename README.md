@@ -1,8 +1,7 @@
 # Irodori-TTS
 
 > [!NOTE]
-> このフォークでは README の内容を更新しておらず、以下の記述が現行の `pyproject.toml` や実装と一致していることは保証されません。  
-> 依存関係の正本は `pyproject.toml` や `uv.lock` を参照してください。
+> このフォークの依存関係は upstream と異なります。現行の依存関係は `pyproject.toml` と `uv.lock` を参照してください。
 
 ---
 
