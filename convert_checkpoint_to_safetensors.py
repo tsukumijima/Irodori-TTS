@@ -475,6 +475,63 @@ def _validate_checkpoint_upgrade_partial_load(
         )
 
 
+def _condition_encoder_compatibility_mismatches(
+    base_cfg: ModelConfig,
+    resolved_model_cfg: ModelConfig,
+) -> list[str]:
+    """
+    LoRA 結合前に base と adapter のテキスト・caption エンコーダ契約差分を列挙する。
+
+    Args:
+        base_cfg (ModelConfig): 結合先 base checkpoint のモデル設定
+        resolved_model_cfg (ModelConfig): adapter 側の解決済みモデル設定
+
+    Returns:
+        list[str]: 不一致フィールド名。空なら結合可能
+    """
+
+    # text_add_bos はトークン列の先頭契約を変えるため、次元一致だけでは検出できない
+    compatibility_fields = (
+        "text_encoder_type",
+        "text_tokenizer_repo",
+        "text_encoder_revision",
+        "text_dim",
+        "text_layers",
+        "text_heads",
+        "text_mlp_ratio_resolved",
+        "text_add_bos",
+    )
+    mismatches = [
+        field
+        for field in compatibility_fields
+        if getattr(base_cfg, field) != getattr(resolved_model_cfg, field)
+    ]
+    if base_cfg.use_pretrained_text_encoder != resolved_model_cfg.use_pretrained_text_encoder:
+        mismatches.append("use_pretrained_text_encoder")
+
+    # caption が両方に存在するときだけ、学習済み重みを解釈する入力契約を比較する
+    ## caption 追加を許す既存の upgrade 経路は、この比較から除外する
+    if base_cfg.use_caption_condition and resolved_model_cfg.use_caption_condition:
+        caption_fields = (
+            "caption_tokenizer_repo_resolved",
+            "caption_add_bos_resolved",
+            "caption_dim_resolved",
+        )
+        if base_cfg.use_pretrained_text_encoder is False:
+            caption_fields += (
+                "caption_vocab_size_resolved",
+                "caption_layers_resolved",
+                "caption_heads_resolved",
+                "caption_mlp_ratio_resolved",
+            )
+        mismatches.extend(
+            field
+            for field in caption_fields
+            if getattr(base_cfg, field) != getattr(resolved_model_cfg, field)
+        )
+    return mismatches
+
+
 def _load_adapter_checkpoint(
     adapter_dir: Path,
     *,
@@ -510,22 +567,7 @@ def _load_adapter_checkpoint(
         base_model_cfg,
         section="base checkpoint model config",
     )
-    compatibility_fields = (
-        "text_encoder_type",
-        "text_tokenizer_repo",
-        "text_encoder_revision",
-        "text_dim",
-        "text_layers",
-        "text_heads",
-        "text_mlp_ratio_resolved",
-    )
-    mismatches = [
-        field
-        for field in compatibility_fields
-        if getattr(base_cfg, field) != getattr(resolved_model_cfg, field)
-    ]
-    if base_cfg.use_pretrained_text_encoder != resolved_model_cfg.use_pretrained_text_encoder:
-        mismatches.append("use_pretrained_text_encoder")
+    mismatches = _condition_encoder_compatibility_mismatches(base_cfg, resolved_model_cfg)
     if mismatches:
         raise ValueError(
             "LoRA adapter text encoder configuration does not match the base checkpoint: "
