@@ -10,6 +10,7 @@ import gradio as gr
 from irodori_tts.gradio_emoji_palette import EMOJI_PALETTE_CSS, build_emoji_palette
 from irodori_tts.gradio_reference_files import (
     LONG_REFERENCE_TIP_MARKDOWN,
+    filter_gradio_reference_wavs,
     resolve_gradio_reference_wavs,
 )
 from irodori_tts.inference_runtime import (
@@ -274,16 +275,14 @@ def _run_generation(
         )
     ref_wav_paths = resolve_gradio_reference_wavs(ref_wavs)
     notifications: list[str] = []
-    effective_no_ref = not ref_wav_paths or not runtime.model_cfg.use_speaker_condition_resolved
-    if effective_no_ref:
-        if ref_wav_paths and not runtime.model_cfg.use_speaker_condition_resolved:
-            notification = (
-                "[gradio-caption] uploaded reference audio was ignored because this checkpoint "
-                "does not support speaker conditioning."
-            )
-            stdout_log(notification)
-            notifications.append(notification)
-        ref_wav_paths = []
+    ref_wav_paths, reference_notification = filter_gradio_reference_wavs(
+        ref_wav_paths,
+        supports_speaker_condition=runtime.model_cfg.use_speaker_condition_resolved,
+    )
+    if reference_notification is not None:
+        stdout_log(reference_notification)
+        notifications.append(reference_notification)
+    effective_no_ref = not ref_wav_paths
 
     stdout_log(f"[gradio-caption] runtime: {'reloaded' if reloaded else 'reused'}")
     stdout_log(

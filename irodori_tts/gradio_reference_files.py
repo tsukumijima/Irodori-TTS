@@ -10,7 +10,15 @@ LONG_REFERENCE_TIP_MARKDOWN = (
 
 
 def coerce_gradio_file_path(value: object) -> str | None:
-    """Normalize a Gradio upload value to a non-empty file path."""
+    """
+    Gradio のアップロード値から空でないファイルパスを取得する。
+
+    Args:
+        value (object): Gradio が返す文字列、辞書、またはファイルオブジェクト
+
+    Returns:
+        str | None: 前後の空白を除いたパス。パスを取得できない場合は None
+    """
 
     if value is None:
         return None
@@ -35,10 +43,42 @@ def coerce_gradio_file_path(value: object) -> str | None:
 
 
 def resolve_gradio_reference_wavs(uploaded_audio: object) -> list[str]:
-    """Normalize single or multiple Gradio audio uploads to file paths."""
+    """
+    Gradio の単一または複数の参照音声を順序付きパスへ変換する。
+
+    Args:
+        uploaded_audio (object): Gradio が返す単一または複数のアップロード値
+
+    Returns:
+        list[str]: 有効な参照音声パス
+    """
 
     if uploaded_audio is None:
         return []
     values = uploaded_audio if isinstance(uploaded_audio, (list, tuple)) else [uploaded_audio]
     paths = [coerce_gradio_file_path(value) for value in values]
     return [path for path in paths if path is not None]
+
+
+def filter_gradio_reference_wavs(
+    reference_wavs: list[str],
+    *,
+    supports_speaker_condition: bool,
+) -> tuple[list[str], str | None]:
+    """
+    checkpoint が利用できる参照音声だけを残す。
+
+    Args:
+        reference_wavs (list[str]): アップロード順を保持した参照音声パス
+        supports_speaker_condition (bool): checkpoint が話者条件を利用できるか
+
+    Returns:
+        tuple[list[str], str | None]: 利用する参照音声と、無視した場合の通知文
+    """
+
+    if reference_wavs and supports_speaker_condition is False:
+        return [], (
+            "[gradio-caption] uploaded reference audio was ignored because this checkpoint "
+            "does not support speaker conditioning."
+        )
+    return reference_wavs, None
