@@ -9,7 +9,7 @@ from typing import Any, cast
 import torch
 
 from irodori_tts.inference_runtime import InferenceRuntime, SamplingRequest
-from irodori_tts.model import TextToLatentRFDiT
+from irodori_tts.model import EncodedConditions, TextToLatentRFDiT
 
 
 class RecordingCaptionEncoder:
@@ -17,6 +17,7 @@ class RecordingCaptionEncoder:
 
     def __init__(self) -> None:
         self.backbone: object | None = None
+        self.mask: torch.Tensor | None = None
 
     def __call__(
         self,
@@ -25,6 +26,7 @@ class RecordingCaptionEncoder:
         mask: torch.Tensor,
     ) -> torch.Tensor:
         self.backbone = backbone
+        self.mask = mask.clone()
         return input_ids.unsqueeze(-1).to(dtype=torch.float32) * mask.unsqueeze(-1)
 
 
@@ -48,6 +50,63 @@ class RecordingCaptionModel:
             input_ids=input_ids,
             mask=mask,
         )
+
+
+class RecordingConditionDropoutModel:
+    """
+    pretrained backbone を使う条件 dropout の入出力を記録するテスト用モデル。
+    """
+
+    def __init__(self) -> None:
+        """
+        text と caption で共有するテスト用 backbone と projector を初期化する。
+        """
+
+        self.cfg = SimpleNamespace(
+            use_caption_condition=True,
+            use_speaker_condition_resolved=False,
+        )
+        self.pretrained_text_backbone = object()
+        self.text_encoder = RecordingCaptionEncoder()
+        self.caption_encoder = RecordingCaptionEncoder()
+        self.text_norm = torch.nn.Identity()
+        self.caption_norm = torch.nn.Identity()
+
+    def encode_caption_condition(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        製品モデルと同じ公開メソッドで caption 条件をエンコードする。
+
+        Args:
+            input_ids (torch.Tensor): caption のトークン ID
+            mask (torch.Tensor): caption の有効トークンマスク
+
+        Returns:
+            torch.Tensor: エンコード済み caption 条件
+        """
+
+        return TextToLatentRFDiT.encode_caption_condition(
+            cast(Any, self),
+            input_ids=input_ids,
+            mask=mask,
+        )
+
+    def encode_conditions(self, **kwargs: Any) -> EncodedConditions:
+        """
+        製品モデルと同じ公開メソッドで条件一式をエンコードする。
+
+        Args:
+            **kwargs (Any): `TextToLatentRFDiT.encode_conditions()` へ渡す引数
+
+        Returns:
+            EncodedConditions: エンコード済み条件一式
+        """
+
+        return TextToLatentRFDiT.encode_conditions(cast(Any, self), **kwargs)
 
 
 class RecordingCaptionTokenizer:
@@ -199,6 +258,42 @@ class CaptionConditionOverrideTest(unittest.TestCase):
         self.assertIs(encoder.backbone, backbone)
         self.assertEqual(tuple(condition.state.shape), (1, 2, 1))
         torch.testing.assert_close(condition.mask, torch.tensor([[True, True]]))
+
+    def test_pretrained_condition_dropout_keeps_backbone_masks_valid(self) -> None:
+        """
+        dropout 対象行も backbone 実行中は有効マスクを保ち、出力後に条件から除外する。
+        """
+
+        model = RecordingConditionDropoutModel()
+        input_ids = torch.tensor([[1, 2], [3, 4]], dtype=torch.long)
+        input_mask = torch.ones((2, 2), dtype=torch.bool)
+        dropout = torch.tensor([True, False])
+
+        conditions = model.encode_conditions(
+            text_input_ids=input_ids,
+            text_mask=input_mask,
+            ref_latent=None,
+            ref_mask=None,
+            caption_input_ids=input_ids,
+            caption_mask=input_mask,
+            text_condition_dropout=dropout,
+            caption_condition_dropout=dropout,
+        )
+        caption_mask = conditions.caption_mask
+        caption_state = conditions.caption_state
+        self.assertIsNotNone(caption_mask)
+        self.assertIsNotNone(caption_state)
+        assert caption_mask is not None
+        assert caption_state is not None
+
+        torch.testing.assert_close(model.text_encoder.mask, input_mask)
+        torch.testing.assert_close(model.caption_encoder.mask, input_mask)
+        self.assertFalse(conditions.text_mask[0].any().item())
+        self.assertFalse(caption_mask[0].any().item())
+        self.assertTrue(conditions.text_state[0].eq(0).all().item())
+        self.assertTrue(caption_state[0].eq(0).all().item())
+        torch.testing.assert_close(conditions.text_state[1], input_ids[1, :, None].float())
+        torch.testing.assert_close(caption_state[1], input_ids[1, :, None].float())
 
 
 if __name__ == "__main__":

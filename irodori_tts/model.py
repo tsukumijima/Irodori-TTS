@@ -1835,6 +1835,7 @@ class TextToLatentRFDiT(nn.Module):
             EncodedConditions: Encoded model conditions.
         """
 
+        text_encoder_mask = text_mask
         if text_condition_dropout is not None:
             text_mask = text_mask.clone()
             text_mask[text_condition_dropout] = False
@@ -1857,6 +1858,7 @@ class TextToLatentRFDiT(nn.Module):
             raise ValueError(
                 "speaker_state_override was provided but speaker conditioning is disabled."
             )
+        caption_encoder_mask: torch.Tensor | None = None
         if self.cfg.use_caption_condition:
             if self.caption_encoder is None or self.caption_norm is None:
                 raise RuntimeError(
@@ -1881,6 +1883,7 @@ class TextToLatentRFDiT(nn.Module):
                 device=text_input_ids.device,
                 dtype=torch.bool,
             )
+            caption_encoder_mask = resolved_caption_mask
             if caption_condition_dropout is not None:
                 resolved_caption_mask = resolved_caption_mask.clone()
                 resolved_caption_mask[caption_condition_dropout] = False
@@ -1893,7 +1896,16 @@ class TextToLatentRFDiT(nn.Module):
         if self.pretrained_text_backbone is None:
             text_state = self.text_encoder(text_input_ids, text_mask)
         else:
-            text_state = self.text_encoder(self.pretrained_text_backbone, text_input_ids, text_mask)
+            # dropout 対象行も backbone 実行中は元の有効マスクを保ち、全マスク行を渡さない
+            ## 下流の条件からは、エンコード後に状態とマスクをまとめて除外する
+            text_state = self.text_encoder(
+                self.pretrained_text_backbone,
+                text_input_ids,
+                text_encoder_mask,
+            )
+            if text_condition_dropout is not None:
+                text_state = text_state.clone()
+                text_state[text_condition_dropout] = 0
         text_state = self.text_norm(text_state)
         ref_state = None
         if self.cfg.use_speaker_condition_resolved:
@@ -1917,7 +1929,12 @@ class TextToLatentRFDiT(nn.Module):
                     )
                 caption_state = self.encode_caption_condition(
                     input_ids=caption_input_ids,
-                    mask=caption_mask,
+                    mask=(
+                        caption_encoder_mask
+                        if self.pretrained_text_backbone is not None
+                        and caption_encoder_mask is not None
+                        else caption_mask
+                    ),
                 )
             else:
                 caption_state, caption_mask = self._expand_condition_batch(
@@ -1930,6 +1947,9 @@ class TextToLatentRFDiT(nn.Module):
                 )
                 caption_state = caption_state.to(device=text_state.device, dtype=text_state.dtype)
                 caption_mask = caption_mask.to(device=text_state.device, dtype=torch.bool)
+            if caption_condition_dropout is not None:
+                caption_state = caption_state.clone()
+                caption_state[caption_condition_dropout] = 0
         return EncodedConditions(
             text_state=text_state,
             text_mask=text_mask,
