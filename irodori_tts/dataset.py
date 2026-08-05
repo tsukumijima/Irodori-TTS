@@ -519,7 +519,8 @@ class _ManifestIndex:
         caption_key = str(caption_key)
         cached = cls._load_cache(manifest_path, caption_key)
         if cached is not None:
-            if show_progress and bool((cached.num_frames > 0).any()) is False:
+            # 進捗表示の有無に関わらず、参照結合が無効になる品質問題は常に警告する
+            if not bool((cached.num_frames > 0).any()):
                 warnings.warn(
                     "Manifest has no positive num_frames values; reference concatenation will "
                     f"be skipped: {manifest_path}",
