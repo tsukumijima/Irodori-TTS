@@ -269,6 +269,67 @@ def _speaker_inversion_trainer_state_path(path: str | Path) -> Path:
     return embedding_path.with_name(f"{stem}{SPEAKER_INVERSION_TRAINER_STATE_SUFFIX}")
 
 
+def restore_speaker_inversion_training_state(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None,
+    payload: dict[str, Any],
+    *,
+    distributed: bool,
+    rank: int,
+    world_size: int,
+) -> int:
+    """
+    Speaker Inversion の学習再開に必要な更新状態を復元する。
+
+    Args:
+        model (torch.nn.Module): Speaker Inversion モジュールを持つ学習モデル
+        optimizer (torch.optim.Optimizer): 状態を復元する optimizer
+        scheduler (torch.optim.lr_scheduler.LRScheduler | None): 状態を復元する scheduler
+        payload (dict[str, Any]): `.speaker.trainer.pt` から読み込んだ保存状態
+        distributed (bool): 分散学習として再開するか
+        rank (int): 現在の分散 rank
+        world_size (int): 現在の分散プロセス数
+
+    Returns:
+        int: 再開する学習 step
+
+    Raises:
+        ValueError: Speaker Inversion モジュールまたは保存状態が不正な場合
+    """
+
+    speaker_inversion = getattr(model, "speaker_inversion", None)
+    if not isinstance(speaker_inversion, SpeakerInversionEmbedding):
+        raise ValueError("Speaker Inversion resume requires an initialized embedding module.")
+    module_state = payload.get(SPEAKER_INVERSION_MODULE_STATE_KEY)
+    if not isinstance(module_state, dict):
+        raise ValueError("Speaker Inversion resume requires its saved module state.")
+
+    # 埋め込み本体と optimizer を同じ保存時点へ戻し、更新量の食い違いを防ぐ
+    speaker_inversion.load_state_dict(module_state)
+    optimizer.load_state_dict(payload["optimizer"])
+    step = int(payload["step"])
+
+    # scheduler が保存されている場合は内部カウンタも同じ時点へ戻す
+    if scheduler is not None:
+        scheduler_state = payload.get("scheduler")
+        if scheduler_state is not None:
+            scheduler.load_state_dict(scheduler_state)
+        elif step > 0:
+            scheduler.last_step = step
+
+    # 乱数状態は次のミニバッチ更新より前に復元する
+    rng_state = _select_rng_state_for_rank(
+        payload,
+        distributed=distributed,
+        rank=rank,
+        world_size=world_size,
+    )
+    if rng_state is not None:
+        _restore_rng_state(rng_state)
+    return step
+
+
 def echo_style_masked_mse(
     pred: torch.Tensor,
     target: torch.Tensor,
@@ -4002,8 +4063,6 @@ def main() -> None:
             base_pre_norm_embedding=base_pre_norm_embedding,
             max_relative_residual_norm=(train_cfg.speaker_inversion_max_relative_residual_norm),
         )
-        if resume_module_state is not None:
-            speaker_inversion.load_state_dict(resume_module_state)
         speaker_inversion.to(device)
         if is_main_process:
             print(
@@ -4108,16 +4167,27 @@ def main() -> None:
         if resume_payload is None:
             raise RuntimeError("Resume checkpoint payload is unavailable.")
         ckpt = resume_payload
-        if not train_config_uses_lora(train_cfg) and not train_cfg.speaker_inversion_enabled:
-            raw_model.load_state_dict(ckpt["model"])
-        optimizer.load_state_dict(ckpt["optimizer"])
-        step = int(ckpt["step"])
-        if scheduler is not None:
-            scheduler_state = ckpt.get("scheduler")
-            if scheduler_state is not None:
-                scheduler.load_state_dict(scheduler_state)
-            elif step > 0:
-                scheduler.last_step = step
+        if train_cfg.speaker_inversion_enabled:
+            step = restore_speaker_inversion_training_state(
+                raw_model,
+                optimizer,
+                scheduler,
+                ckpt,
+                distributed=distributed,
+                rank=rank,
+                world_size=world_size,
+            )
+        else:
+            if not train_config_uses_lora(train_cfg):
+                raw_model.load_state_dict(ckpt["model"])
+            optimizer.load_state_dict(ckpt["optimizer"])
+            step = int(ckpt["step"])
+            if scheduler is not None:
+                scheduler_state = ckpt.get("scheduler")
+                if scheduler_state is not None:
+                    scheduler.load_state_dict(scheduler_state)
+                elif step > 0:
+                    scheduler.last_step = step
         runtime_state = ckpt.get(RUNTIME_STATE_KEY)
         if isinstance(runtime_state, dict):
             resume_epoch = int(runtime_state.get("sampler_epoch", 0))
@@ -4133,14 +4203,15 @@ def main() -> None:
                 train_sampler.set_epoch(resume_epoch)
             loader.load_state_dict(dataloader_state)
             resume_loader_state_loaded = True
-        rng_state = _select_rng_state_for_rank(
-            ckpt,
-            distributed=distributed,
-            rank=rank,
-            world_size=world_size,
-        )
-        if rng_state is not None:
-            _restore_rng_state(rng_state)
+        if train_cfg.speaker_inversion_enabled is False:
+            rng_state = _select_rng_state_for_rank(
+                ckpt,
+                distributed=distributed,
+                rank=rank,
+                world_size=world_size,
+            )
+            if rng_state is not None:
+                _restore_rng_state(rng_state)
         if is_main_process:
             print(f"Resumed from step={step}")
             if dataloader_state is None:

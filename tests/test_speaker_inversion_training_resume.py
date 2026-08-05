@@ -25,6 +25,7 @@ from train import (
     _speaker_inversion_trainer_state_path,
     build_speaker_inversion_resume_contract,
     enforce_periodic_checkpoint_limit,
+    restore_speaker_inversion_training_state,
     save_checkpoint,
     set_seed,
     validate_speaker_inversion_resume_contract,
@@ -383,24 +384,29 @@ def test_speaker_inversion_resume_matches_uninterrupted_updates(
         ),
     )
 
-    # 新しいプロセス相当のモデルと optimizer へ sidecar の全状態を復元する
+    # 新しいプロセス相当のモデルと optimizer へ本番と同じ経路で全状態を復元する
     payload = torch.load(
         _speaker_inversion_trainer_state_path(embedding_path),
         map_location="cpu",
         weights_only=True,
     )
     resumed_model = SpeakerInversionCheckpointModel()
-    with torch.no_grad():
-        resumed_model.speaker_inversion.embedding.copy_(payload[SPEAKER_EMBEDDING_KEY])
     resumed_optimizer = torch.optim.AdamW(resumed_model.parameters(), lr=0.01)
-    resumed_optimizer.load_state_dict(payload["optimizer"])
     resumed_scheduler = torch.optim.lr_scheduler.StepLR(
         resumed_optimizer,
         step_size=1,
         gamma=0.9,
     )
-    resumed_scheduler.load_state_dict(payload["scheduler"])
-    _restore_rng_state(payload[RNG_STATE_KEY])
+    resumed_step = restore_speaker_inversion_training_state(
+        resumed_model,
+        resumed_optimizer,
+        resumed_scheduler,
+        payload,
+        distributed=False,
+        rank=0,
+        world_size=1,
+    )
+    assert resumed_step == 2
     for _ in range(2):
         run_update(resumed_model, resumed_optimizer, resumed_scheduler)
 
