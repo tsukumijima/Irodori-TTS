@@ -92,6 +92,7 @@ DATALOADER_STATE_KEY = "dataloader_state"
 RUNTIME_STATE_KEY = "runtime_state"
 RNG_STATE_KEY = "rng_state"
 SPEAKER_INVERSION_MODULE_STATE_KEY = "speaker_inversion_module_state"
+SPEAKER_INVERSION_RESUME_CONTRACT_KEY = "speaker_inversion_resume_contract"
 SPEAKER_INVERSION_TRAINER_STATE_SUFFIX = ".speaker.trainer.pt"
 SAFETENSORS_CONFIG_META_KEY = "config_json"
 SAFETENSORS_TEXT_ENCODER_CONFIG_META_KEY = "text_encoder_config_json"
@@ -112,6 +113,23 @@ DURATION_CONDITION_GROUPS = (
     "no_speaker_no_caption",
 )
 DURATION_CONDITION_GROUP_TOTAL_SIZE = len(DURATION_CONDITION_GROUPS) * 3
+SPEAKER_INVERSION_RESUME_MUTABLE_TRAIN_FIELDS = {
+    "checkpoint_best_n",
+    "log_every",
+    "max_steps",
+    "output_dir",
+    "progress",
+    "progress_all_ranks",
+    "save_every",
+    "speaker_inversion_base_embedding",
+    "speaker_inversion_init_embedding",
+    "valid_every",
+    "wandb_enabled",
+    "wandb_entity",
+    "wandb_mode",
+    "wandb_project",
+    "wandb_run_name",
+}
 
 
 def set_seed(seed: int) -> None:
@@ -329,6 +347,98 @@ def sha256_file(path: str | Path) -> str:
     return hasher.hexdigest()
 
 
+def build_speaker_inversion_resume_contract(
+    train_cfg: TrainConfig,
+    *,
+    world_size: int,
+) -> dict[str, Any]:
+    """
+    Speaker Inversion の学習を同じ条件で再開するための契約を作る。
+
+    Args:
+        train_cfg (TrainConfig): 保存対象の学習設定
+        world_size (int): 保存時の分散プロセス数
+
+    Returns:
+        dict[str, Any]: sidecar へ保存する再開条件
+    """
+
+    # 保存間隔や出力先は更新結果を変えないため、再開後の変更を許可する
+    train_contract = {
+        field: value
+        for field, value in asdict(train_cfg).items()
+        if field not in SPEAKER_INVERSION_RESUME_MUTABLE_TRAIN_FIELDS and field != "manifest_path"
+    }
+    manifest_path = None
+    manifest_sha256 = None
+    if train_cfg.manifest_path is not None and str(train_cfg.manifest_path).strip() != "":
+        manifest_path = str(Path(train_cfg.manifest_path).expanduser().resolve())
+        manifest_sha256 = sha256_file(manifest_path)
+    return {
+        "manifest_path": manifest_path,
+        "manifest_sha256": manifest_sha256,
+        "train_config": train_contract,
+        "world_size": int(world_size),
+    }
+
+
+def validate_speaker_inversion_resume_contract(
+    payload: dict[str, Any],
+    *,
+    train_cfg: TrainConfig,
+    world_size: int,
+) -> None:
+    """
+    Speaker Inversion の sidecar と現在の学習条件が一致することを検査する。
+
+    Args:
+        payload (dict[str, Any]): 読み込んだ sidecar の内容
+        train_cfg (TrainConfig): 現在の学習設定
+        world_size (int): 現在の分散プロセス数
+
+    Raises:
+        ValueError: sidecar に契約がない場合、または再現性に関わる条件が異なる場合
+    """
+
+    saved_contract = payload.get(SPEAKER_INVERSION_RESUME_CONTRACT_KEY)
+    if not isinstance(saved_contract, dict):
+        raise ValueError(
+            "Speaker Inversion resume checkpoint is missing its exact-resume contract."
+        )
+    current_contract = build_speaker_inversion_resume_contract(
+        train_cfg,
+        world_size=world_size,
+    )
+    if saved_contract.get("world_size") != current_contract["world_size"]:
+        raise ValueError(
+            "Speaker Inversion resume world_size mismatch: "
+            f"expected {saved_contract.get('world_size')!r}, "
+            f"got {current_contract['world_size']!r}."
+        )
+    if saved_contract.get("manifest_sha256") != current_contract["manifest_sha256"]:
+        raise ValueError(
+            "Speaker Inversion resume manifest mismatch: "
+            f"saved path {saved_contract.get('manifest_path')!r}, "
+            f"current path {current_contract['manifest_path']!r}."
+        )
+    saved_train_config = saved_contract.get("train_config")
+    if not isinstance(saved_train_config, dict):
+        raise ValueError("Speaker Inversion resume contract has no train_config dictionary.")
+    current_train_config = current_contract["train_config"]
+    mismatches = [
+        field
+        for field in sorted(set(saved_train_config) | set(current_train_config))
+        if saved_train_config.get(field) != current_train_config.get(field)
+    ]
+    if mismatches:
+        details = ", ".join(
+            f"{field}: saved={saved_train_config.get(field)!r} "
+            f"current={current_train_config.get(field)!r}"
+            for field in mismatches
+        )
+        raise ValueError(f"Speaker Inversion resume train config mismatch: {details}.")
+
+
 def load_optional_json(path: str | Path | None) -> dict[str, Any]:
     """
     LoRA metadata に埋め込む任意の JSON ファイルを読み込む。
@@ -395,9 +505,12 @@ def save_checkpoint(
     dataloader_state: dict[str, Any] | None = None,
     runtime_state: dict[str, Any] | None = None,
     rng_state: dict[str, Any] | None = None,
+    speaker_inversion_resume_contract: dict[str, Any] | None = None,
 ) -> None:
     path = Path(path)
     if train_cfg.speaker_inversion_enabled:
+        if speaker_inversion_resume_contract is None:
+            raise ValueError("Speaker Inversion checkpoints require an exact-resume contract.")
         save_speaker_inversion_checkpoint(path, model=model)
         speaker_inversion_module = getattr(model, "speaker_inversion", None)
         if not isinstance(speaker_inversion_module, SpeakerInversionEmbedding):
@@ -429,6 +542,7 @@ def save_checkpoint(
                 DATALOADER_STATE_KEY: dataloader_state,
                 RUNTIME_STATE_KEY: runtime_state,
                 RNG_STATE_KEY: saved_rng_state,
+                SPEAKER_INVERSION_RESUME_CONTRACT_KEY: speaker_inversion_resume_contract,
             },
             temporary_trainer_state_path,
         )
@@ -646,6 +760,7 @@ def maybe_save_best_val_loss_checkpoint(
     dataloader_state: dict | None,
     runtime_state: dict | None,
     rng_state: dict | None = None,
+    speaker_inversion_resume_contract: dict[str, Any] | None = None,
 ) -> tuple[list[tuple[float, int, Path]], Path | None]:
     if keep_best_n <= 0:
         return checkpoints, None
@@ -680,6 +795,7 @@ def maybe_save_best_val_loss_checkpoint(
         dataloader_state=dataloader_state,
         runtime_state=runtime_state,
         rng_state=rng_state,
+        speaker_inversion_resume_contract=speaker_inversion_resume_contract,
     )
     checkpoints.append((float(val_loss), int(step), path))
     checkpoints = prune_best_val_loss_checkpoints(checkpoints, keep_best_n)
@@ -3330,6 +3446,20 @@ def main() -> None:
         dist.barrier()
     if is_main_process and distributed:
         print(f"DDP enabled: world_size={world_size} (local_rank={local_rank})")
+    speaker_inversion_resume_contract = None
+    if train_cfg.speaker_inversion_enabled:
+        speaker_inversion_resume_contract = build_speaker_inversion_resume_contract(
+            train_cfg,
+            world_size=world_size,
+        )
+        if args.resume is not None:
+            if resume_payload is None:
+                raise RuntimeError("Speaker Inversion resume payload is unavailable.")
+            validate_speaker_inversion_resume_contract(
+                resume_payload,
+                train_cfg=train_cfg,
+                world_size=world_size,
+            )
     wandb_run = None
     if train_cfg.wandb_enabled and is_main_process:
         try:
@@ -4520,6 +4650,7 @@ def main() -> None:
                             dataloader_state=dataloader_state,
                             runtime_state=runtime_state,
                             rng_state=rng_state,
+                            speaker_inversion_resume_contract=(speaker_inversion_resume_contract),
                         )
                         enforce_periodic_checkpoint_limit(
                             output_dir=output_dir,
@@ -4622,6 +4753,7 @@ def main() -> None:
                             dataloader_state=best_dataloader_state,
                             runtime_state=best_runtime_state,
                             rng_state=best_rng_state,
+                            speaker_inversion_resume_contract=(speaker_inversion_resume_contract),
                         )
                         if best_path is not None:
                             progress.write(
@@ -4728,6 +4860,7 @@ def main() -> None:
                     dataloader_state=final_best_dataloader_state,
                     runtime_state=final_best_runtime_state,
                     rng_state=final_best_rng_state,
+                    speaker_inversion_resume_contract=speaker_inversion_resume_contract,
                 )
                 if best_path is not None:
                     progress.write(
@@ -4766,6 +4899,7 @@ def main() -> None:
                 dataloader_state=final_dataloader_state,
                 runtime_state=final_runtime_state,
                 rng_state=final_rng_state,
+                speaker_inversion_resume_contract=speaker_inversion_resume_contract,
             )
             if wandb_run is not None:
                 wandb_run.summary["train/final_step"] = step

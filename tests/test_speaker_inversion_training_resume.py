@@ -18,13 +18,16 @@ from train import (
     RUNTIME_STATE_KEY,
     SPEAKER_EMBEDDING_KEY,
     SPEAKER_INVERSION_MODULE_STATE_KEY,
+    SPEAKER_INVERSION_RESUME_CONTRACT_KEY,
     _capture_rng_state,
     _restore_resume_speaker_inversion_config,
     _restore_rng_state,
     _speaker_inversion_trainer_state_path,
+    build_speaker_inversion_resume_contract,
     enforce_periodic_checkpoint_limit,
     save_checkpoint,
     set_seed,
+    validate_speaker_inversion_resume_contract,
 )
 
 
@@ -91,6 +94,99 @@ def test_resume_rejects_changed_speaker_inversion_training_contract() -> None:
         )
 
 
+def test_exact_resume_contract_rejects_manifest_and_training_changes(tmp_path: Path) -> None:
+    """Reject changed data and update settings before restoring training state."""
+
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text('{"audio_path":"sample.flac"}\n', encoding="utf-8")
+    saved_train_cfg = TrainConfig(
+        speaker_inversion_enabled=True,
+        manifest_path=str(manifest_path),
+        batch_size=4,
+    )
+    payload = {
+        SPEAKER_INVERSION_RESUME_CONTRACT_KEY: build_speaker_inversion_resume_contract(
+            saved_train_cfg,
+            world_size=1,
+        )
+    }
+
+    validate_speaker_inversion_resume_contract(
+        payload,
+        train_cfg=saved_train_cfg,
+        world_size=1,
+    )
+    manifest_path.write_text('{"audio_path":"replacement.flac"}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="manifest mismatch"):
+        validate_speaker_inversion_resume_contract(
+            payload,
+            train_cfg=saved_train_cfg,
+            world_size=1,
+        )
+    manifest_path.write_text('{"audio_path":"sample.flac"}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="batch_size"):
+        validate_speaker_inversion_resume_contract(
+            payload,
+            train_cfg=TrainConfig(
+                speaker_inversion_enabled=True,
+                manifest_path=str(manifest_path),
+                batch_size=8,
+            ),
+            world_size=1,
+        )
+
+
+def test_exact_resume_contract_allows_operational_changes(tmp_path: Path) -> None:
+    """Allow output, logging, retention, and training-length changes after resume."""
+
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text('{"audio_path":"sample.flac"}\n', encoding="utf-8")
+    saved_train_cfg = TrainConfig(
+        speaker_inversion_enabled=True,
+        manifest_path=str(manifest_path),
+        max_steps=1000,
+        output_dir="outputs/original",
+    )
+    payload = {
+        SPEAKER_INVERSION_RESUME_CONTRACT_KEY: build_speaker_inversion_resume_contract(
+            saved_train_cfg,
+            world_size=1,
+        )
+    }
+
+    validate_speaker_inversion_resume_contract(
+        payload,
+        train_cfg=TrainConfig(
+            speaker_inversion_enabled=True,
+            manifest_path=str(manifest_path),
+            max_steps=1500,
+            output_dir="outputs/resumed",
+            log_every=5,
+            save_every=50,
+        ),
+        world_size=1,
+    )
+
+
+def test_exact_resume_contract_rejects_world_size_change() -> None:
+    """Reject a process-count change that would alter data order and random streams."""
+
+    train_cfg = TrainConfig(speaker_inversion_enabled=True)
+    payload = {
+        SPEAKER_INVERSION_RESUME_CONTRACT_KEY: build_speaker_inversion_resume_contract(
+            train_cfg,
+            world_size=2,
+        )
+    }
+
+    with pytest.raises(ValueError, match="world_size mismatch"):
+        validate_speaker_inversion_resume_contract(
+            payload,
+            train_cfg=train_cfg,
+            world_size=1,
+        )
+
+
 def test_speaker_inversion_checkpoint_saves_inference_and_trainer_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -117,6 +213,10 @@ def test_speaker_inversion_checkpoint_saves_inference_and_trainer_state(
         base_init={"mode": "checkpoint", "checkpoint_path": "/base/model.safetensors"},
         dataloader_state=dataloader_state,
         runtime_state=runtime_state,
+        speaker_inversion_resume_contract=build_speaker_inversion_resume_contract(
+            TrainConfig(speaker_inversion_enabled=True),
+            world_size=1,
+        ),
     )
 
     trainer_path = _speaker_inversion_trainer_state_path(embedding_path)
@@ -129,6 +229,7 @@ def test_speaker_inversion_checkpoint_saves_inference_and_trainer_state(
     assert payload["optimizer"]["state"]
     assert RNG_STATE_KEY in payload
     assert SPEAKER_INVERSION_MODULE_STATE_KEY in payload
+    assert SPEAKER_INVERSION_RESUME_CONTRACT_KEY in payload
     torch.testing.assert_close(
         payload[SPEAKER_EMBEDDING_KEY],
         model.speaker_inversion.embedding.detach(),
@@ -276,6 +377,10 @@ def test_speaker_inversion_resume_matches_uninterrupted_updates(
         model_cfg=ModelConfig(speaker_dim=4),
         train_cfg=TrainConfig(speaker_inversion_enabled=True),
         base_init={"mode": "checkpoint", "checkpoint_path": "/base/model.safetensors"},
+        speaker_inversion_resume_contract=build_speaker_inversion_resume_contract(
+            TrainConfig(speaker_inversion_enabled=True),
+            world_size=1,
+        ),
     )
 
     # 新しいプロセス相当のモデルと optimizer へ sidecar の全状態を復元する
