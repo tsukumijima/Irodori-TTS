@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import warnings
+from filecmp import cmp
 from pathlib import Path
 
 
@@ -29,6 +30,25 @@ class CheckpointPublisher:
         return destination
 
     @staticmethod
+    def _directories_match(left: Path, right: Path) -> bool:
+        """
+        2つの tokenizer ディレクトリが同じファイル内容を持つか確認する。
+
+        Args:
+            left (Path): 比較元のディレクトリ
+            right (Path): 比較先のディレクトリ
+
+        Returns:
+            bool: 相対パスと全ファイル内容が一致する場合は True
+        """
+
+        left_files = sorted(path.relative_to(left) for path in left.rglob("*") if path.is_file())
+        right_files = sorted(path.relative_to(right) for path in right.rglob("*") if path.is_file())
+        if left_files != right_files:
+            return False
+        return all(cmp(left / path, right / path, shallow=False) for path in left_files)
+
+    @staticmethod
     def publish(
         *,
         staged_checkpoint: Path,
@@ -54,12 +74,23 @@ class CheckpointPublisher:
         """
 
         tokenizer_directory = output_checkpoint.parent / "tokenizer"
+        is_reusing_tokenizer = False
+        if (
+            staged_tokenizer is not None
+            and tokenizer_directory.exists()
+            and force is False
+            and CheckpointPublisher._directories_match(staged_tokenizer, tokenizer_directory)
+        ):
+            # 同じ tokenizer は共有資産として再利用し、別名 checkpoint の出力を許可する
+            staged_tokenizer = None
+            is_reusing_tokenizer = True
         if staged_tokenizer is None and tokenizer_directory.exists():
-            warnings.warn(
-                "The existing tokenizer was retained because this export did not stage one; "
-                f"verify that it matches the new checkpoint: {tokenizer_directory}",
-                stacklevel=2,
-            )
+            if is_reusing_tokenizer is False:
+                warnings.warn(
+                    "The existing tokenizer was retained because this export did not stage one; "
+                    f"verify that it matches the new checkpoint: {tokenizer_directory}",
+                    stacklevel=2,
+                )
         if tokenizer_directory.exists() and staged_tokenizer is not None and force is False:
             raise FileExistsError(
                 f"Tokenizer already exists: {tokenizer_directory} (use --force to overwrite)"
@@ -87,4 +118,4 @@ class CheckpointPublisher:
                         f"Original publication error: {publish_ex}"
                     ) from restore_ex
             raise
-        return tokenizer_directory if staged_tokenizer is not None else None
+        return tokenizer_directory if staged_tokenizer is not None or is_reusing_tokenizer else None
