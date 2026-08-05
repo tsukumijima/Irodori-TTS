@@ -219,7 +219,7 @@ override YAML values when explicitly provided.
 | `--manifest` | required | JSONL manifest produced by `prepare_manifest.py`. Each row must include `text` and `latent_path`; `speaker_id` and `caption` are optional depending on the model. `caption` may be either a string or a list of strings; list captions are sampled randomly each time the row is loaded. |
 | `--output-dir` | `outputs/irodori_tts` | Directory for checkpoints, trainer state, configs, and logs. |
 | `--init-checkpoint` | `None` | Initializes model weights from a `.pt` or `.safetensors` checkpoint, then starts optimizer/scheduler state from scratch. |
-| `--resume` | `None` | Restores full training state from a training checkpoint. Use `.pt` for full-model runs and checkpoint directories for LoRA runs. |
+| `--resume` | `None` | Restores full training state from a training checkpoint. Use `.pt` for full-model runs, checkpoint directories for LoRA runs, and `.speaker.trainer.pt` sidecars for Speaker Inversion runs. |
 
 Use `--init-checkpoint` for fine-tuning from released inference weights. Use `--resume`
 only to continue an interrupted training run.
@@ -430,12 +430,26 @@ embedding tokens. The output is a `.speaker.safetensors` file used at inference 
 `--ref-embed`. An example config is provided at
 `configs/train_v4_small_speaker_inversion.yaml`.
 
+Use the recipe that matches the frozen base checkpoint: `train_500m_v3_speaker_inversion.yaml` for the caption-free v3 model, `train_500m_v3_voice_design_speaker_inversion.yaml` for v3-VoiceDesign, and `train_v4_small_speaker_inversion.yaml` for v4-Small. The v3 filenames retain the established `500m` recipe prefix even though the released VoiceDesign checkpoint is named Irodori-TTS-600M-v3-VoiceDesign. These model families have different condition encoders and duration-predictor architectures, so their recipes are intentionally separate.
+
+The v3-VoiceDesign and v4-Small reference-initialized recipes start from local pre-normalization Speaker Encoder tokens produced by an ordinary reference. A zero residual therefore exports the normalized local tokens and a recomputed mean token. The v3-VoiceDesign recipe uses 750 local tokens from 30 seconds, while the v4-Small recipe uses 750 local tokens from 120 seconds; both export 751 tokens after prepending the recomputed mean. The base file and configured token count must match exactly.
+
+Create the fixed base with `prepare_speaker_inversion_base.py` before starting training. Its `--max-ref-seconds` controls the base reference independently of the training manifest. For example, the v4-Small recipe uses `--max-ref-seconds 120` and writes a `.speaker-base.safetensors` file that is passed to `--speaker-inversion-base-embedding`.
+
+Each periodic and final embedding is accompanied by a `.speaker.trainer.pt` sidecar. Pass
+that sidecar to `--resume` to restore the embedding, optimizer, scheduler, step, random-number
+generators, and dataloader position. The sidecar also records the frozen base checkpoint, so
+`--init-checkpoint` is not required when resuming on the same filesystem.
+
 | Parameter / Field | Default in dataclass | Notes |
 |-------------------|----------------------|-------|
 | `speaker_inversion_enabled` / `--speaker-inversion` | `False` | Enables Speaker Inversion mode. All model parameters are frozen; only the speaker embedding tokens receive gradients. |
 | `speaker_inversion_tokens` / `--speaker-inversion-tokens` | `16` | Number of learned speaker embedding tokens. |
 | `speaker_inversion_init_std` / `--speaker-inversion-init-std` | `0.02` | Standard deviation for random initialization of the embedding tokens. |
-| `speaker_inversion_init_embedding` / `--speaker-inversion-init-embedding` | `None` | Path to an existing `.speaker.safetensors` to resume from or warm-start a new optimization. |
+| `speaker_inversion_init_embedding` / `--speaker-inversion-init-embedding` | `None` | Path to an existing `.speaker.safetensors` to warm-start a new optimization with fresh optimizer and data-iteration state. Use `--resume` for an exact continuation. |
+| `speaker_inversion_base_embedding` / `--speaker-inversion-base-embedding` | `None` | Path to a `.speaker-base.safetensors` containing fixed pre-normalization local Speaker Encoder tokens. Training starts with a zero residual around this reference-derived state. |
+| `speaker_inversion_residual_regularization_weight` / `--speaker-inversion-residual-regularization-weight` | `0.0` | Weight applied to residual squared energy normalized by the fixed base energy. It requires `speaker_inversion_base_embedding`. |
+| `speaker_inversion_max_relative_residual_norm` / `--speaker-inversion-max-relative-residual-norm` | `None` | Optional hard limit on residual Frobenius norm relative to the fixed base norm. It requires `speaker_inversion_base_embedding`. |
 
 Use `--init-checkpoint` with the base model weights and `--manifest` with audio from the
 target speaker. All condition dropout values should be set to `0.0` so the embedding
@@ -481,7 +495,6 @@ manifest consumed by `train.py`.
 | `--output-manifest` | required | Output JSONL path. |
 | `--latent-dir` | required | Directory where `.pt` latent files are written. |
 | `--normalize-db` | `-16.0` | Loudness normalization before codec encode. Use `none` to disable. |
-| `--target-sample-rate` | `None` | Optional decode sample rate. |
 | `--min-sample-rate` | `0` | Skips decoded samples below this sample rate. |
 | `--max-seconds` | `None` | Trims source audio before encode. |
 | `--max-samples` | `None` | Maximum number of accepted samples to write per rank. |

@@ -1,56 +1,54 @@
-# Reference-initialized Speaker Inversion training for Irodori-TTS-v4-Small.
+# Reference-initialized Speaker Inversion training for Irodori-TTS-600M-v3-VoiceDesign.
+# The 500m filename follows the established v3 recipe naming convention.
 #
-# Prepare the fixed 120-second reference base first:
+# Prepare the fixed 30-second reference base first:
 #   uv run prepare_speaker_inversion_base.py \
-#     --checkpoint path/to/Irodori-TTS-v4-Small/model.safetensors \
-#     --ref-wavs path/to/reference_1.wav path/to/reference_2.wav \
-#     --max-ref-seconds 120 \
+#     --checkpoint path/to/Irodori-TTS-600M-v3-VoiceDesign/model.safetensors \
+#     --ref-wav path/to/reference.wav \
+#     --max-ref-seconds 30 \
 #     --output path/to/name.speaker-base.safetensors
 #
 # Usage:
 #   uv run train.py \
-#     --config configs/train_v4_small_speaker_inversion.yaml \
+#     --config configs/train_500m_v3_voice_design_speaker_inversion.yaml \
 #     --manifest path/to/manifest.jsonl \
-#     --init-checkpoint path/to/Irodori-TTS-v4-Small/model.safetensors \
+#     --init-checkpoint path/to/Irodori-TTS-600M-v3-VoiceDesign/model.safetensors \
 #     --speaker-inversion-base-embedding path/to/name.speaker-base.safetensors \
 #     --output-dir outputs/speaker_inversion/name
 #
-# The saved embedding can be used with:
-#   uv run infer.py \
-#     --checkpoint path/to/Irodori-TTS-v4-Small/model.safetensors \
-#     --ref-embed outputs/speaker_inversion/name/checkpoint_final.speaker.safetensors \
-#     --text "読み上げるテキスト" \
-#     --caption "声質やスタイルの記述"
+# A 30-second reference produces 750 local Speaker Encoder tokens because
+# v3-VoiceDesign uses speaker_patch_size=1. The exported embedding prepends a
+# recomputed mean token, for 751 total speaker tokens.
 
 model:
   latent_dim: 32
   latent_patch_size: 1
-  text_vocab_size: 102400
-  text_tokenizer_repo: sbintuitions/modernbert-ja-310m
-  text_encoder_revision: 77675fc96a7e445e982e2ba90246b816efc74ec6
-  text_encoder_type: pretrained
-  text_add_bos: true
-  pretrained_projector_type: residual_mlp
-  pretrained_projector_hidden_ratio: 2.0
-  pretrained_projector_dropout: 0.0
+  text_vocab_size: 99574
+  text_tokenizer_repo: llm-jp/llm-jp-3-150m
   model_dim: 1280
   num_layers: 12
   num_heads: 20
   mlp_ratio: 2.875
+  text_mlp_ratio: 2.6
   speaker_mlp_ratio: 2.6
   text_dim: 512
+  text_layers: 10
+  text_heads: 8
   speaker_dim: 768
   speaker_layers: 8
   speaker_heads: 12
-  speaker_patch_size: 4
+  speaker_patch_size: 1
   timestep_embed_dim: 512
   adaln_rank: 192
   use_caption_condition: true
   use_speaker_condition: true
-  caption_vocab_size: 102400
-  caption_tokenizer_repo: sbintuitions/modernbert-ja-310m
+  caption_vocab_size: 99574
+  caption_tokenizer_repo: llm-jp/llm-jp-3-150m
   caption_add_bos: true
   caption_dim: 512
+  caption_layers: 10
+  caption_heads: 8
+  caption_mlp_ratio: 2.6
   use_duration_predictor: true
   duration_aux_dim: 14
   duration_hidden_dim: 1024
@@ -66,7 +64,6 @@ model:
 train:
   train_mode: rf
   speaker_inversion_enabled: true
-  # 120 seconds produce 750 local tokens and one recomputed mean token.
   speaker_inversion_tokens: 751
   speaker_inversion_init_std: 0.02
   speaker_inversion_init_embedding:
@@ -100,7 +97,7 @@ train:
   timestep_stratified: true
   max_latent_steps: 750
   ref_min_seconds: 1.0
-  ref_max_seconds: 120.0
+  ref_max_seconds: 30.0
   fixed_target_latent_steps:
   fixed_target_full_mask: false
   rf_loss_mode: utterance_mean
