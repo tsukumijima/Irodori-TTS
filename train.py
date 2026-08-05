@@ -15,6 +15,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -68,8 +69,12 @@ from irodori_tts.rf import (
 from irodori_tts.speaker_inversion import (
     SPEAKER_EMBEDDING_KEY,
     SPEAKER_INVERSION_SAFETENSORS_SUFFIX,
+    SPEAKER_PRE_NORM_EMBEDDING_KEY,
+    SpeakerInversionEmbedding,
+    load_speaker_inversion_base_payload,
     load_speaker_inversion_payload,
     save_speaker_inversion_checkpoint,
+    speaker_inversion_state_dict,
 )
 from irodori_tts.tokenizer import PretrainedTextTokenizer
 
@@ -85,6 +90,9 @@ CHECKPOINT_BEST_VAL_LOSS_RE = re.compile(
 )
 DATALOADER_STATE_KEY = "dataloader_state"
 RUNTIME_STATE_KEY = "runtime_state"
+RNG_STATE_KEY = "rng_state"
+SPEAKER_INVERSION_MODULE_STATE_KEY = "speaker_inversion_module_state"
+SPEAKER_INVERSION_TRAINER_STATE_SUFFIX = ".speaker.trainer.pt"
 SAFETENSORS_CONFIG_META_KEY = "config_json"
 SAFETENSORS_TEXT_ENCODER_CONFIG_META_KEY = "text_encoder_config_json"
 SAFETENSORS_INFERENCE_CONFIG_KEYS = {
@@ -108,8 +116,139 @@ DURATION_CONDITION_GROUP_TOTAL_SIZE = len(DURATION_CONDITION_GROUPS) * 3
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def _capture_rng_state() -> dict[str, Any]:
+    """Capture random-number generator states needed for exact training resume."""
+
+    numpy_state = np.random.get_state()
+    return {
+        "python": random.getstate(),
+        # weights_only=True で安全に読める基本型と Tensor だけへ変換する
+        "numpy": {
+            "bit_generator": numpy_state[0],
+            "state": torch.from_numpy(numpy_state[1].copy()),
+            "position": int(numpy_state[2]),
+            "has_gauss": int(numpy_state[3]),
+            "cached_gaussian": float(numpy_state[4]),
+        },
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+
+
+def _restore_rng_state(payload: dict[str, Any]) -> None:
+    """Restore random-number generator states from a training checkpoint."""
+
+    random.setstate(payload["python"])
+    numpy_state = payload["numpy"]
+    if not isinstance(numpy_state, dict):
+        raise ValueError("Checkpoint NumPy rng_state must be a dictionary.")
+    np.random.set_state(
+        (
+            str(numpy_state["bit_generator"]),
+            numpy_state["state"].cpu().numpy(),
+            int(numpy_state["position"]),
+            int(numpy_state["has_gauss"]),
+            float(numpy_state["cached_gaussian"]),
+        )
+    )
+    torch.set_rng_state(payload["torch"])
+    cuda_state = payload["cuda"]
+    if cuda_state is not None and torch.cuda.is_available():
+        # 保存時と現在の CUDA デバイス数が違うと set_rng_state_all が失敗するためスキップする
+        saved_device_count = len(cuda_state)
+        current_device_count = int(torch.cuda.device_count())
+        if saved_device_count != current_device_count:
+            warnings.warn(
+                "Skipping CUDA RNG restore because device count changed: "
+                f"checkpoint={saved_device_count} current={current_device_count}",
+                stacklevel=2,
+            )
+        else:
+            torch.cuda.set_rng_state_all(cuda_state)
+
+
+def _collect_rng_state(
+    *,
+    distributed: bool,
+    rank: int,
+    world_size: int,
+) -> dict[str, Any]:
+    """Gather per-rank RNG states so distributed resume keeps rank-local randomness."""
+
+    local_state = _capture_rng_state()
+    if not distributed:
+        return {
+            "version": 1,
+            "world_size": 1,
+            "rank_states": [local_state],
+        }
+
+    rank_states: list[dict[str, Any] | None] = [None for _ in range(world_size)]
+    dist.all_gather_object(rank_states, local_state)
+    return {
+        "version": 1,
+        "world_size": int(world_size),
+        "rank_states": rank_states,
+        "saved_by_rank": int(rank),
+    }
+
+
+def _select_rng_state_for_rank(
+    payload: dict[str, Any],
+    *,
+    distributed: bool,
+    rank: int,
+    world_size: int,
+) -> dict[str, Any] | None:
+    """
+    Select the RNG payload for the current rank.
+
+    Legacy checkpoints store a flat RNG dict captured on rank 0. Newer checkpoints
+    store per-rank states under ``rank_states``, matching dataloader resume.
+    """
+
+    state = payload.get(RNG_STATE_KEY)
+    if state is None:
+        return None
+    if not isinstance(state, dict):
+        raise ValueError("Checkpoint rng_state must be a dictionary when present.")
+
+    # 旧形式は rank 0 の単一状態だけを持つため、全 rank が同じ状態を復元する
+    if "rank_states" not in state and "torch" in state:
+        return state
+
+    rank_states = state.get("rank_states")
+    if not isinstance(rank_states, list):
+        raise ValueError("Checkpoint rng_state.rank_states must be a list.")
+    saved_world_size = int(state.get("world_size", len(rank_states)))
+    expected_world_size = int(world_size) if distributed else 1
+    if saved_world_size != expected_world_size or len(rank_states) != expected_world_size:
+        warnings.warn(
+            "Discarding rng_state because world_size changed: "
+            f"checkpoint={saved_world_size} current={expected_world_size}"
+        )
+        return None
+    state_rank = int(rank) if distributed else 0
+    rank_state = rank_states[state_rank]
+    if rank_state is not None and not isinstance(rank_state, dict):
+        raise ValueError(f"Checkpoint rng_state for rank {state_rank} must be a dictionary.")
+    return rank_state
+
+
+def _speaker_inversion_trainer_state_path(path: str | Path) -> Path:
+    """Return the trainer-state sidecar path for a Speaker Inversion embedding."""
+
+    embedding_path = Path(path)
+    suffix = SPEAKER_INVERSION_SAFETENSORS_SUFFIX
+    if not embedding_path.name.endswith(suffix):
+        raise ValueError(f"Speaker Inversion checkpoint must end with {suffix}: {embedding_path}")
+    stem = embedding_path.name[: -len(suffix)]
+    return embedding_path.with_name(f"{stem}{SPEAKER_INVERSION_TRAINER_STATE_SUFFIX}")
 
 
 def echo_style_masked_mse(
@@ -255,10 +394,46 @@ def save_checkpoint(
     lora_metadata: dict[str, Any] | None = None,
     dataloader_state: dict[str, Any] | None = None,
     runtime_state: dict[str, Any] | None = None,
+    rng_state: dict[str, Any] | None = None,
 ) -> None:
     path = Path(path)
     if train_cfg.speaker_inversion_enabled:
         save_speaker_inversion_checkpoint(path, model=model)
+        speaker_inversion_module = getattr(model, "speaker_inversion", None)
+        if not isinstance(speaker_inversion_module, SpeakerInversionEmbedding):
+            raise RuntimeError("Speaker Inversion checkpoint requires an enabled embedding module.")
+        text_encoder_config = None
+        pretrained_backbone = getattr(model, "pretrained_text_backbone", None)
+        if pretrained_backbone is not None:
+            raw_config = getattr(pretrained_backbone, "config_dict", None)
+            if isinstance(raw_config, dict):
+                text_encoder_config = dict(raw_config)
+        # 推論用埋め込みと分離し、再開に必要な学習状態だけを軽量 sidecar へ保存する
+        trainer_state_path = _speaker_inversion_trainer_state_path(path)
+        temporary_trainer_state_path = trainer_state_path.with_name(
+            f".{trainer_state_path.name}.tmp"
+        )
+        # 呼び出し側が集約済み状態を渡さない単体テストでは、現在 rank の状態だけを保存する
+        saved_rng_state = rng_state if rng_state is not None else _capture_rng_state()
+        torch.save(
+            {
+                "step": step,
+                SPEAKER_EMBEDDING_KEY: speaker_inversion_state_dict(model)[SPEAKER_EMBEDDING_KEY],
+                SPEAKER_INVERSION_MODULE_STATE_KEY: speaker_inversion_module.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": None if scheduler is None else scheduler.state_dict(),
+                "model_config": asdict(model_cfg),
+                "train_config": asdict(train_cfg),
+                "text_encoder_config": text_encoder_config,
+                "base_init": base_init,
+                DATALOADER_STATE_KEY: dataloader_state,
+                RUNTIME_STATE_KEY: runtime_state,
+                RNG_STATE_KEY: saved_rng_state,
+            },
+            temporary_trainer_state_path,
+        )
+        # 書き込み途中の sidecar を再開候補として拾わないよう、完成後に公開する
+        temporary_trainer_state_path.replace(trainer_state_path)
         return
 
     if train_config_uses_lora(train_cfg):
@@ -422,6 +597,8 @@ def enforce_periodic_checkpoint_limit(output_dir: Path, keep_count: int) -> None
     checkpoints = list_periodic_checkpoints(output_dir)
     for _, stale_path in checkpoints[keep_count:]:
         _safe_unlink(stale_path)
+        if stale_path.name.endswith(SPEAKER_INVERSION_SAFETENSORS_SUFFIX):
+            _safe_unlink(_speaker_inversion_trainer_state_path(stale_path))
 
 
 def list_best_val_loss_checkpoints(output_dir: Path) -> list[tuple[float, int, Path]]:
@@ -447,6 +624,8 @@ def prune_best_val_loss_checkpoints(
     while len(checkpoints) > keep_best_n:
         _, _, stale_path = checkpoints.pop()
         _safe_unlink(stale_path)
+        if stale_path.name.endswith(SPEAKER_INVERSION_SAFETENSORS_SUFFIX):
+            _safe_unlink(_speaker_inversion_trainer_state_path(stale_path))
     return checkpoints
 
 
@@ -466,6 +645,7 @@ def maybe_save_best_val_loss_checkpoint(
     lora_metadata: dict[str, Any] | None,
     dataloader_state: dict | None,
     runtime_state: dict | None,
+    rng_state: dict | None = None,
 ) -> tuple[list[tuple[float, int, Path]], Path | None]:
     if keep_best_n <= 0:
         return checkpoints, None
@@ -480,6 +660,8 @@ def maybe_save_best_val_loss_checkpoint(
     for score, saved_step, path in checkpoints:
         if saved_step == step:
             _safe_unlink(path)
+            if path.name.endswith(SPEAKER_INVERSION_SAFETENSORS_SUFFIX):
+                _safe_unlink(_speaker_inversion_trainer_state_path(path))
             continue
         kept.append((score, saved_step, path))
     checkpoints = kept
@@ -497,6 +679,7 @@ def maybe_save_best_val_loss_checkpoint(
         lora_metadata=lora_metadata,
         dataloader_state=dataloader_state,
         runtime_state=runtime_state,
+        rng_state=rng_state,
     )
     checkpoints.append((float(val_loss), int(step), path))
     checkpoints = prune_best_val_loss_checkpoints(checkpoints, keep_best_n)
@@ -1261,6 +1444,43 @@ def _restore_resume_lora_config(
                 raise ValueError(
                     f"Resume checkpoint expects train.{field}={resume_value!r}, "
                     f"but current config requests {current_value!r}."
+                )
+            continue
+        updates[field] = resume_value
+
+    if updates:
+        train_cfg = replace(train_cfg, **updates)
+    return train_cfg
+
+
+def _restore_resume_speaker_inversion_config(
+    train_cfg: TrainConfig,
+    *,
+    resume_train_cfg: dict | None,
+    raw_argv: list[str],
+) -> TrainConfig:
+    if not isinstance(resume_train_cfg, dict):
+        return train_cfg
+
+    fields = (
+        "speaker_inversion_enabled",
+        "speaker_inversion_tokens",
+        "speaker_inversion_init_std",
+        "speaker_inversion_residual_regularization_weight",
+        "speaker_inversion_max_relative_residual_norm",
+    )
+    updates: dict[str, object] = {}
+    for field in fields:
+        if field not in resume_train_cfg:
+            continue
+        resume_value = resume_train_cfg[field]
+        flag = "--" + field.replace("_", "-")
+        if cli_provided(raw_argv, flag):
+            current_value = getattr(train_cfg, field)
+            if current_value != resume_value:
+                raise ValueError(
+                    f"Resume checkpoint expects train.{field}={resume_value!r}, "
+                    f"but the command line requests {current_value!r}."
                 )
             continue
         updates[field] = resume_value
@@ -2340,7 +2560,28 @@ def main() -> None:
     parser.add_argument(
         "--speaker-inversion-init-embedding",
         default=None,
-        help=("Optional existing Speaker Inversion .speaker.safetensors file to continue from."),
+        help=(
+            "Optional existing Speaker Inversion .speaker.safetensors file used to "
+            "warm-start a new optimization. Use --resume with .speaker.trainer.pt "
+            "for exact continuation."
+        ),
+    )
+    parser.add_argument(
+        "--speaker-inversion-base-embedding",
+        default=None,
+        help="Reference-derived .speaker-base.safetensors used for residual inversion.",
+    )
+    parser.add_argument(
+        "--speaker-inversion-residual-regularization-weight",
+        type=float,
+        default=None,
+        help="Weight for residual energy relative to the fixed reference-derived base.",
+    )
+    parser.add_argument(
+        "--speaker-inversion-max-relative-residual-norm",
+        type=float,
+        default=None,
+        help="Optional hard limit on residual norm relative to the fixed base norm.",
     )
     parser.add_argument(
         "--timestep-stratified",
@@ -2483,7 +2724,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.resume is not None and Path(args.resume).suffix.lower() == ".safetensors":
         raise ValueError(
-            "--resume expects a training checkpoint (.pt or LoRA checkpoint dir). "
+            "--resume expects a training checkpoint (.pt, LoRA checkpoint dir, or "
+            ".speaker.trainer.pt). "
             "Use --init-checkpoint for inference-only .safetensors weights."
         )
 
@@ -2589,6 +2831,25 @@ def main() -> None:
         train_cfg = replace(
             train_cfg,
             speaker_inversion_init_embedding=args.speaker_inversion_init_embedding,
+        )
+    if cli_provided(raw_argv, "--speaker-inversion-base-embedding"):
+        train_cfg = replace(
+            train_cfg,
+            speaker_inversion_base_embedding=args.speaker_inversion_base_embedding,
+        )
+    if cli_provided(raw_argv, "--speaker-inversion-residual-regularization-weight"):
+        train_cfg = replace(
+            train_cfg,
+            speaker_inversion_residual_regularization_weight=(
+                args.speaker_inversion_residual_regularization_weight
+            ),
+        )
+    if cli_provided(raw_argv, "--speaker-inversion-max-relative-residual-norm"):
+        train_cfg = replace(
+            train_cfg,
+            speaker_inversion_max_relative_residual_norm=(
+                args.speaker_inversion_max_relative_residual_norm
+            ),
         )
     if cli_provided(raw_argv, "--timestep-stratified"):
         train_cfg = replace(train_cfg, timestep_stratified=True)
@@ -2698,6 +2959,11 @@ def main() -> None:
             raw_argv=raw_argv,
             exp_cfg=exp_cfg,
         )
+        train_cfg = _restore_resume_speaker_inversion_config(
+            train_cfg,
+            resume_train_cfg=resume_train_cfg,
+            raw_argv=raw_argv,
+        )
 
     if cli_provided(raw_argv, "--latent-dim"):
         model_cfg = replace(model_cfg, latent_dim=args.latent_dim)
@@ -2763,17 +3029,20 @@ def main() -> None:
             raise ValueError(
                 "speaker_inversion_enabled=True requires a speaker-conditioned model config."
             )
-        if args.init_checkpoint is None:
+        if args.init_checkpoint is None and args.resume is None:
             raise ValueError(
-                "speaker_inversion_enabled=True requires --init-checkpoint so the frozen "
-                "base TTS model is initialized from trained weights."
+                "speaker_inversion_enabled=True requires --init-checkpoint for a new run "
+                "or --resume for a saved Speaker Inversion trainer state."
             )
         if args.resume is not None:
-            raise ValueError(
-                "speaker_inversion_enabled=True saves embedding-only checkpoints; "
-                "--resume full trainer state is not supported. Use "
-                "speaker_inversion_init_embedding to continue from a saved embedding."
-            )
+            if resume_payload is None or SPEAKER_EMBEDDING_KEY not in resume_payload:
+                raise ValueError(
+                    "Speaker Inversion resume checkpoint is missing the saved embedding."
+                )
+            if resume_base_init is None:
+                raise ValueError(
+                    "Speaker Inversion resume checkpoint is missing base_init metadata."
+                )
         if train_config_uses_lora(train_cfg):
             raise ValueError("speaker_inversion_enabled=True does not support LoRA training.")
         if train_cfg.train_mode != "rf":
@@ -2788,6 +3057,38 @@ def main() -> None:
             raise ValueError(
                 "speaker_inversion_init_std must be >= 0, "
                 f"got {train_cfg.speaker_inversion_init_std}"
+            )
+        if (
+            train_cfg.speaker_inversion_init_embedding is not None
+            and train_cfg.speaker_inversion_base_embedding is not None
+        ):
+            raise ValueError(
+                "speaker_inversion_init_embedding and speaker_inversion_base_embedding "
+                "cannot be used together."
+            )
+        if train_cfg.speaker_inversion_residual_regularization_weight < 0.0:
+            raise ValueError(
+                "speaker_inversion_residual_regularization_weight must be >= 0, got "
+                f"{train_cfg.speaker_inversion_residual_regularization_weight}"
+            )
+        if (
+            train_cfg.speaker_inversion_max_relative_residual_norm is not None
+            and train_cfg.speaker_inversion_max_relative_residual_norm <= 0.0
+        ):
+            raise ValueError(
+                "speaker_inversion_max_relative_residual_norm must be > 0 when provided, got "
+                f"{train_cfg.speaker_inversion_max_relative_residual_norm}"
+            )
+        if (
+            train_cfg.speaker_inversion_base_embedding is None
+            and (
+                train_cfg.speaker_inversion_residual_regularization_weight > 0.0
+                or train_cfg.speaker_inversion_max_relative_residual_norm is not None
+            )
+            and args.resume is None
+        ):
+            raise ValueError(
+                "Residual regularization and projection require speaker_inversion_base_embedding."
             )
         optimizer_explicit = cli_provided(raw_argv, "--optimizer") or (
             isinstance(exp_cfg.get("train"), dict) and "optimizer" in exp_cfg.get("train", {})
@@ -3436,6 +3737,12 @@ def main() -> None:
                     )
                     checkpoint_uses_pretrained = checkpoint_cfg.use_pretrained_text_encoder
                 if checkpoint_uses_pretrained:
+                    # resume 経路と同じく、保存済み構成が無い pretrained checkpoint は拒否する
+                    if init_text_encoder_config is None:
+                        raise ValueError(
+                            "Init checkpoint with a pretrained text encoder requires "
+                            "text_encoder_config in the checkpoint."
+                        )
                     load_pretrained_backbone_weights = False
                     pretrained_backbone_config = init_text_encoder_config
 
@@ -3463,6 +3770,15 @@ def main() -> None:
             raise ValueError("LoRA resume expects an adapter checkpoint directory.")
         raw_model = load_lora_adapter(raw_model, resume_path, is_trainable=True)
         lora_wrapped = True
+    elif args.resume is not None and train_cfg.speaker_inversion_enabled:
+        base_init = resume_base_init
+        _apply_base_initialization(
+            raw_model,
+            model_cfg=model_cfg,
+            base_init=base_init,
+            distributed=distributed,
+            is_main_process=is_main_process,
+        )
     elif args.resume is None and args.init_checkpoint is None:
         _apply_base_initialization(
             raw_model,
@@ -3507,7 +3823,26 @@ def main() -> None:
     )
     if train_cfg.speaker_inversion_enabled:
         init_embedding = None
-        if train_cfg.speaker_inversion_init_embedding is not None:
+        base_pre_norm_embedding = None
+        resume_module_state: dict[str, torch.Tensor] | None = None
+        if args.resume is not None:
+            if resume_payload is None:
+                raise RuntimeError("Speaker Inversion resume payload is unavailable.")
+            raw_module_state = resume_payload.get(SPEAKER_INVERSION_MODULE_STATE_KEY)
+            if raw_module_state is not None:
+                if not isinstance(raw_module_state, dict):
+                    raise ValueError("Speaker Inversion module state must be a dictionary.")
+                resume_module_state = raw_module_state
+                saved_base = resume_module_state.get("base_pre_norm_embedding")
+                if isinstance(saved_base, torch.Tensor):
+                    base_pre_norm_embedding = saved_base
+                else:
+                    init_embedding = resume_payload[SPEAKER_EMBEDDING_KEY]
+            else:
+                init_embedding = resume_payload[SPEAKER_EMBEDDING_KEY]
+            if is_main_process:
+                print(f"Loaded Speaker Inversion trainer state: {args.resume}")
+        elif train_cfg.speaker_inversion_init_embedding is not None:
             init_payload = load_speaker_inversion_payload(
                 train_cfg.speaker_inversion_init_embedding,
             )
@@ -3517,11 +3852,25 @@ def main() -> None:
                     "Loaded Speaker Inversion init embedding: "
                     f"{train_cfg.speaker_inversion_init_embedding}"
                 )
+        elif train_cfg.speaker_inversion_base_embedding is not None:
+            base_payload = load_speaker_inversion_base_payload(
+                train_cfg.speaker_inversion_base_embedding,
+            )
+            base_pre_norm_embedding = base_payload[SPEAKER_PRE_NORM_EMBEDDING_KEY]
+            if is_main_process:
+                print(
+                    "Loaded reference-derived Speaker Inversion base: "
+                    f"{train_cfg.speaker_inversion_base_embedding}"
+                )
         speaker_inversion = raw_model.enable_speaker_inversion(
             num_tokens=train_cfg.speaker_inversion_tokens,
             init_std=train_cfg.speaker_inversion_init_std,
             init_embedding=init_embedding,
+            base_pre_norm_embedding=base_pre_norm_embedding,
+            max_relative_residual_norm=(train_cfg.speaker_inversion_max_relative_residual_norm),
         )
+        if resume_module_state is not None:
+            speaker_inversion.load_state_dict(resume_module_state)
         speaker_inversion.to(device)
         if is_main_process:
             print(
@@ -3626,7 +3975,7 @@ def main() -> None:
         if resume_payload is None:
             raise RuntimeError("Resume checkpoint payload is unavailable.")
         ckpt = resume_payload
-        if not train_config_uses_lora(train_cfg):
+        if not train_config_uses_lora(train_cfg) and not train_cfg.speaker_inversion_enabled:
             raw_model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         step = int(ckpt["step"])
@@ -3651,6 +4000,14 @@ def main() -> None:
                 train_sampler.set_epoch(resume_epoch)
             loader.load_state_dict(dataloader_state)
             resume_loader_state_loaded = True
+        rng_state = _select_rng_state_for_rank(
+            ckpt,
+            distributed=distributed,
+            rank=rank,
+            world_size=world_size,
+        )
+        if rng_state is not None:
+            _restore_rng_state(rng_state)
         if is_main_process:
             print(f"Resumed from step={step}")
             if dataloader_state is None:
@@ -3660,6 +4017,10 @@ def main() -> None:
                 )
             else:
                 print("Restored dataloader state for mid-epoch resume.")
+            if rng_state is None:
+                print("warning: resume checkpoint has no rng_state; random state was reseeded.")
+            else:
+                print("Restored random-number generator states.")
 
     progress = TrainProgress(
         max_steps=train_cfg.max_steps,
@@ -3956,6 +4317,20 @@ def main() -> None:
                         loss = duration_loss
                     else:
                         loss = rf_loss + (float(train_cfg.duration_loss_weight) * duration_loss)
+                    speaker_inversion_module = getattr(raw_model, "speaker_inversion", None)
+                    residual_regularization_weight = float(
+                        train_cfg.speaker_inversion_residual_regularization_weight
+                    )
+                    # 重み0のときは計算グラフへ余計なノードを足さない
+                    if (
+                        isinstance(speaker_inversion_module, SpeakerInversionEmbedding)
+                        and speaker_inversion_module.uses_pre_norm_residual
+                        and residual_regularization_weight > 0.0
+                    ):
+                        loss = loss + (
+                            residual_regularization_weight
+                            * speaker_inversion_module.residual_regularization_loss()
+                        )
                     (loss / float(accum_steps)).backward()
                     if pretrained_projector_warmup_active:
                         clear_non_pretrained_projector_grads(raw_model)
@@ -3983,6 +4358,9 @@ def main() -> None:
                 accum_duration_group_totals.zero_()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip_norm)
                 optimizer.step()
+                speaker_inversion_module = getattr(raw_model, "speaker_inversion", None)
+                if isinstance(speaker_inversion_module, SpeakerInversionEmbedding):
+                    speaker_inversion_module.project_residual_()
                 optimizer.zero_grad(set_to_none=True)
                 if scheduler is not None:
                     scheduler.step()
@@ -4028,6 +4406,16 @@ def main() -> None:
                         "rf": rf_loss_value,
                         "lr": lr_value,
                     }
+                    residual_norm_value: float | None = None
+                    speaker_inversion_module = getattr(raw_model, "speaker_inversion", None)
+                    if (
+                        isinstance(speaker_inversion_module, SpeakerInversionEmbedding)
+                        and speaker_inversion_module.uses_pre_norm_residual
+                    ):
+                        residual_norm_value = float(
+                            speaker_inversion_module.relative_residual_norm().detach().cpu()
+                        )
+                        progress_metrics["residual_norm"] = residual_norm_value
                     if pretrained_lr_value is not None:
                         progress_metrics["text_lr"] = pretrained_lr_value
                     if raw_model.cfg.use_duration_predictor:
@@ -4067,6 +4455,8 @@ def main() -> None:
                                 )
                                 if group_suffix:
                                     message += f" {group_suffix}"
+                            if residual_norm_value is not None:
+                                message += f" residual_norm={residual_norm_value:.6f}"
                             progress.write(f"{message} lr={lr_value:.3e}")
                         else:
                             progress.write(
@@ -4081,6 +4471,10 @@ def main() -> None:
                             }
                             if pretrained_lr_value is not None:
                                 metrics["train/pretrained_text_encoder_lr"] = pretrained_lr_value
+                            if residual_norm_value is not None:
+                                metrics["train/speaker_inversion_relative_residual_norm"] = (
+                                    residual_norm_value
+                                )
                             if raw_model.cfg.use_duration_predictor:
                                 metrics["train/duration_loss"] = duration_loss_value
                                 metrics["train/duration_mae_frames"] = duration_mae_frames_value
@@ -4096,6 +4490,11 @@ def main() -> None:
                 if step % train_cfg.save_every == 0:
                     dataloader_state = _collect_dataloader_state(
                         loader,
+                        distributed=distributed,
+                        rank=rank,
+                        world_size=world_size,
+                    )
+                    rng_state = _collect_rng_state(
                         distributed=distributed,
                         rank=rank,
                         world_size=world_size,
@@ -4117,6 +4516,7 @@ def main() -> None:
                             lora_metadata=lora_metadata,
                             dataloader_state=dataloader_state,
                             runtime_state=runtime_state,
+                            rng_state=rng_state,
                         )
                         enforce_periodic_checkpoint_limit(
                             output_dir=output_dir,
@@ -4138,9 +4538,15 @@ def main() -> None:
                     )
                     best_dataloader_state = None
                     best_runtime_state = None
+                    best_rng_state = None
                     if checkpoint_retention_enabled:
                         best_dataloader_state = _collect_dataloader_state(
                             loader,
+                            distributed=distributed,
+                            rank=rank,
+                            world_size=world_size,
+                        )
+                        best_rng_state = _collect_rng_state(
                             distributed=distributed,
                             rank=rank,
                             world_size=world_size,
@@ -4212,6 +4618,7 @@ def main() -> None:
                             lora_metadata=lora_metadata,
                             dataloader_state=best_dataloader_state,
                             runtime_state=best_runtime_state,
+                            rng_state=best_rng_state,
                         )
                         if best_path is not None:
                             progress.write(
@@ -4239,9 +4646,15 @@ def main() -> None:
             )
             final_best_dataloader_state = None
             final_best_runtime_state = None
+            final_best_rng_state = None
             if checkpoint_retention_enabled:
                 final_best_dataloader_state = _collect_dataloader_state(
                     loader,
+                    distributed=distributed,
+                    rank=rank,
+                    world_size=world_size,
+                )
+                final_best_rng_state = _collect_rng_state(
                     distributed=distributed,
                     rank=rank,
                     world_size=world_size,
@@ -4311,6 +4724,7 @@ def main() -> None:
                     lora_metadata=lora_metadata,
                     dataloader_state=final_best_dataloader_state,
                     runtime_state=final_best_runtime_state,
+                    rng_state=final_best_rng_state,
                 )
                 if best_path is not None:
                     progress.write(
@@ -4322,6 +4736,11 @@ def main() -> None:
 
         final_dataloader_state = _collect_dataloader_state(
             loader,
+            distributed=distributed,
+            rank=rank,
+            world_size=world_size,
+        )
+        final_rng_state = _collect_rng_state(
             distributed=distributed,
             rank=rank,
             world_size=world_size,
@@ -4343,6 +4762,7 @@ def main() -> None:
                 lora_metadata=lora_metadata,
                 dataloader_state=final_dataloader_state,
                 runtime_state=final_runtime_state,
+                rng_state=final_rng_state,
             )
             if wandb_run is not None:
                 wandb_run.summary["train/final_step"] = step

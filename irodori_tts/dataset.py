@@ -43,11 +43,11 @@ def _has_caption(raw: Any) -> bool:
     return bool(_caption_candidates(raw))
 
 
-def _select_caption(raw: Any) -> str:
+def _select_caption(raw: Any, random_generator: random.Random) -> str:
     candidates = _caption_candidates(raw)
     if not candidates:
         return ""
-    return random.choice(candidates)
+    return random_generator.choice(candidates)
 
 
 def _coerce_latent_shape(latent: torch.Tensor, latent_dim: int) -> torch.Tensor:
@@ -122,6 +122,9 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
             self.ref_max_frames = None
         self._manifest_fp = None
         self._manifest_fp_pid: int | None = None
+        # StatefulDataLoader の再開位置と参照抽選を一致させるため、ワーカー単位で乱数状態を保持する
+        self._random_generator = random.Random()
+        self._random_generator_pid: int | None = None
         subset_index_tensor: torch.Tensor | None = None
         if subset_indices is not None:
             if isinstance(subset_indices, torch.Tensor):
@@ -255,14 +258,15 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
         candidate_count = int(group_end - group_start)
         if candidate_count <= 1:
             return []
-        target_frames = random.uniform(float(ref_min_frames), float(ref_max_frames))
+        random_generator = self._worker_random_generator()
+        target_frames = random_generator.uniform(float(ref_min_frames), float(ref_max_frames))
         chosen: list[int] = []
         total = 0
         remaining_positions = candidate_count
         swapped_positions: dict[int, int] = {}
         while remaining_positions > 0:
             # 部分 Fisher-Yates で必要な候補だけを引き、話者グループ全体のリスト化を避ける
-            random_position = random.randrange(remaining_positions)
+            random_position = random_generator.randrange(remaining_positions)
             candidate_position = swapped_positions.get(random_position, random_position)
             remaining_positions -= 1
             swapped_positions[random_position] = swapped_positions.get(
@@ -312,6 +316,42 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
             self._manifest_fp = self.manifest_path.open("r", encoding="utf-8")
             self._manifest_fp_pid = current_pid
         return self._manifest_fp
+
+    def _worker_random_generator(self) -> random.Random:
+        """
+        現在のプロセスが所有する乱数生成器を返す。
+
+        Returns:
+            random.Random: DataLoader のワーカー seed から初期化した乱数生成器。
+        """
+
+        current_pid = os.getpid()
+        if self._random_generator_pid != current_pid:
+            # DataLoader が各ワーカーへ割り当てた決定論的な seed を参照抽選にも使う
+            self._random_generator.seed(torch.initial_seed())
+            self._random_generator_pid = current_pid
+        return self._random_generator
+
+    def state_dict(self) -> dict[str, Any]:
+        """
+        ワーカー単位の参照抽選状態を直列化する。
+
+        Returns:
+            dict[str, Any]: StatefulDataLoader が厳密再開時に復元する状態。
+        """
+
+        return {"random_state": self._worker_random_generator().getstate()}
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """
+        ワーカー単位の参照抽選状態を復元する。
+
+        Args:
+            state_dict (dict[str, Any]): state_dict() が返した状態。
+        """
+
+        self._random_generator.setstate(state_dict["random_state"])
+        self._random_generator_pid = os.getpid()
 
     def _read_item(self, index: int) -> dict[str, Any]:
         return self._read_item_by_sample_index(self._sample_index(index))
@@ -369,7 +409,7 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
                         has_speaker = True
                 if ref_latent is None:
                     # 重複 index を含むグループを巡回し、現在サンプルと異なる最初の参照を使う
-                    candidate_offset = random.randrange(group_size)
+                    candidate_offset = self._worker_random_generator().randrange(group_size)
                     ref_sample_index = target_sample_index
                     for retry_offset in range(group_size):
                         candidate_position = (
@@ -388,7 +428,9 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
         manifest_num_frames = int(item.get("num_frames", latent.shape[0]))
         num_frames = min(manifest_num_frames, int(latent.shape[0]))
         caption = (
-            _select_caption(item.get(self.caption_key)) if self.enable_caption_condition else ""
+            _select_caption(item.get(self.caption_key), self._worker_random_generator())
+            if self.enable_caption_condition
+            else ""
         )
 
         return {
