@@ -265,15 +265,20 @@ def quantize_model(
     if not selected:
         raise ValueError(f"Quantization profile {normalized_profile!r} selected no modules.")
 
+    resolved_target_device = (
+        next(model.parameters()).device if target_device is None else target_device
+    )
     quantize_, quantization_config = _build_torchao_config(
         quantization_type,
-        target_device=next(model.parameters()).device if target_device is None else target_device,
+        target_device=resolved_target_device,
         int4_group_size=int4_group_size,
     )
+    # 設定構築と同じデバイスへ移してから量子化し、CPU 上の遅い変換を避ける
     quantize_(
         model,
         quantization_config,
         filter_fn=filter_fn,
+        device=resolved_target_device,
     )
     quantized = [
         fqn
