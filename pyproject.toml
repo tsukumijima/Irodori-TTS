@@ -33,7 +33,7 @@ dev = [
     "silentcipher @ git+https://github.com/SesameAILabs/silentcipher.git@d46d7d0893a583d8968ab3a6626e2289faec9152",
     "taskipy>=1.14.0,<2.0.0",
     "torchao>=0.17.0,<0.18.0",
-    "torchcodec>=0.10.0,<0.11.0",
+    "torchcodec>=0.15.0,<0.16.0",
     "tqdm>=4.67.3",
     "wandb>=0.17.0",
     "torchdata>=0.11.0",
@@ -75,6 +75,9 @@ source-exclude = [
 dacvae = { git = "https://github.com/tsukumijima/dacvae", rev = "d165f907b9cf91d9e05a744f2a5adceaa815b039" }
 # Windows x64・Linux x64: CUDA 13.0 版 / macOS・その他: PyPI から CPU 版
 torch = [
+    { index = "pytorch-cu130", marker = "(sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')" },
+]
+torchcodec = [
     { index = "pytorch-cu130", marker = "(sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')" },
 ]
 
@@ -131,6 +134,10 @@ pythonPlatform = "All"
 include = [
     "irodori_tts/",
     "tests/",
+    "infer.py",
+    "gradio_app.py",
+    "gradio_app_voicedesign.py",
+    "prepare_manifest.py",
 ]
 # 除外するパス
 exclude = [

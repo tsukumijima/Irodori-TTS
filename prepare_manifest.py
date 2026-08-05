@@ -13,11 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from queue import Queue
 from threading import Event, Thread
-from typing import Any
+from typing import Any, TextIO
 
 import torch
 import torch.multiprocessing as mp
-from datasets import Audio, load_dataset
+from datasets import Audio, Dataset, IterableDataset, load_dataset
 from tqdm import tqdm
 
 from irodori_tts.codec import DACVAECodec
@@ -180,7 +180,14 @@ class _PreparedItem:
     error: str | None = None
 
 
-_END = object()
+@dataclass(frozen=True)
+class _EndMarker:
+    """
+    prefetch キューの終端を型で識別する。
+    """
+
+
+_END = _EndMarker()
 
 
 def _prepare_example(
@@ -259,8 +266,8 @@ def _prepare_example(
 def _start_prefetch(
     iterator: Iterable[_PreparedItem | tuple[int, dict[str, Any]]],
     args: argparse.Namespace,
-) -> tuple[Queue, Event, Thread]:
-    queue: Queue = Queue(maxsize=max(1, args.prefetch))
+) -> tuple[Queue[_PreparedItem | _EndMarker], Event, Thread]:
+    queue: Queue[_PreparedItem | _EndMarker] = Queue(maxsize=max(1, args.prefetch))
     stop_event = Event()
     worker_count = max(1, int(getattr(args, "prefetch_workers", 1)))
     if worker_count == 1:
@@ -291,7 +298,9 @@ def _start_prefetch(
         thread.start()
         return queue, stop_event, thread
 
-    raw_queue: Queue = Queue(maxsize=max(1, args.prefetch * worker_count))
+    raw_queue: Queue[tuple[int, dict[str, Any]] | _EndMarker] = Queue(
+        maxsize=max(1, args.prefetch * worker_count)
+    )
 
     def _reader() -> None:
         try:
@@ -318,7 +327,7 @@ def _start_prefetch(
     def _worker() -> None:
         while True:
             item = raw_queue.get()
-            if item is _END:
+            if isinstance(item, _EndMarker):
                 break
             idx, sample = item
             if stop_event.is_set():
@@ -356,7 +365,10 @@ def _count_rank_items_contiguous(start: int, end: int, rank: int, world_size: in
     return max(0, shard_end - shard_start)
 
 
-def _is_map_style_dataset(dataset, args: argparse.Namespace) -> bool:
+def _is_map_style_dataset(
+    dataset: Dataset | IterableDataset,
+    args: argparse.Namespace,
+) -> bool:
     return not args.streaming and hasattr(dataset, "__len__") and hasattr(dataset, "__getitem__")
 
 
@@ -368,7 +380,7 @@ def _resolve_shard_strategy(args: argparse.Namespace, *, is_map_style: bool) -> 
 
 
 def _iter_rank_examples(
-    dataset,
+    dataset: Dataset | IterableDataset,
     *,
     args: argparse.Namespace,
     rank: int,
@@ -517,11 +529,6 @@ def _run_worker(
                 f"speaker column(s) not found: {missing_speaker_columns}; available={ds.column_names}"
             )
 
-    if args.target_sample_rate is not None:
-        ds = ds.cast_column(args.audio_column, Audio(sampling_rate=args.target_sample_rate))
-    else:
-        ds = ds.cast_column(args.audio_column, Audio())
-
     if args.normalize_db is not None:
         try:
             from audiotools import AudioSignal
@@ -539,6 +546,8 @@ def _run_worker(
         deterministic_decode=bool(args.codec_deterministic_decode),
         normalize_db=args.normalize_db,
     )
+    # codec と同じサンプルレートで1回だけデコードし、encode 内の再変換を避ける
+    ds = ds.cast_column(args.audio_column, Audio(sampling_rate=codec.sample_rate))
 
     start = max(0, int(args.skip_samples))
     total: int | None = None
@@ -618,7 +627,7 @@ def _run_worker(
         else:
             print(message)
 
-    def _handle_item(item: _PreparedItem, *, stop_requested: bool, out_f) -> None:
+    def _handle_item(item: _PreparedItem, *, stop_requested: bool, out_f: TextIO) -> None:
         nonlocal seen, written
         seen += 1
         if show_progress:
@@ -686,7 +695,7 @@ def _run_worker(
                 end_needed = max(1, int(getattr(args, "prefetch_workers", 1)))
                 while True:
                     queued = queue.get()
-                    if queued is _END:
+                    if isinstance(queued, _EndMarker):
                         end_needed -= 1
                         if end_needed <= 0:
                             break
@@ -854,12 +863,6 @@ def main() -> None:
         "--streaming",
         action="store_true",
         help="Load dataset in streaming mode.",
-    )
-    parser.add_argument(
-        "--target-sample-rate",
-        type=int,
-        default=None,
-        help="Optional decode sample rate",
     )
     parser.add_argument(
         "--min-sample-rate",
