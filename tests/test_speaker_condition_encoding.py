@@ -50,6 +50,38 @@ class RecordingSpeakerModel:
             torch.ones(batch_size, 3, dtype=torch.bool, device=device),
         )
 
+    def encode_speaker_condition_pre_norm(
+        self,
+        *,
+        ref_latent: torch.Tensor,
+        ref_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return fixed pre-normalization tokens while recording the reference latent."""
+
+        self.ref_latent = ref_latent
+        return torch.full((1, 3, 4), 2.0), ref_mask[:, :3]
+
+    def compose_speaker_condition_pre_norm(
+        self,
+        *,
+        state: torch.Tensor,
+        mask: torch.Tensor,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the test pre-normalization tokens with a synthetic mean token."""
+
+        state = state.to(device=device, dtype=dtype).expand(batch_size, -1, -1)
+        mask = mask.to(device=device).expand(batch_size, -1)
+        return (
+            torch.cat([state.mean(dim=1, keepdim=True), state], dim=1),
+            torch.cat(
+                [torch.ones((batch_size, 1), dtype=torch.bool, device=device), mask],
+                dim=1,
+            ),
+        )
+
 
 class RecordingReferenceCodec:
     """参照音声の符号化前サンプル数を記録するテスト用 codec。"""
@@ -157,6 +189,32 @@ def test_encode_reference_condition_accepts_multiple_waveforms() -> None:
 
     torch.testing.assert_close(condition.latent, expected_latent)
     torch.testing.assert_close(condition.mask, expected_mask)
+
+
+def test_encode_speaker_inversion_base_uses_public_pre_norm_model_api() -> None:
+    """Expose reference-derived local tokens without reaching into model internals."""
+
+    runtime = cast(Any, InferenceRuntime.__new__(InferenceRuntime))
+    runtime.model_cfg = SimpleNamespace(use_speaker_condition_resolved=True)
+    runtime.model_device = torch.device("cpu")
+    runtime._model_dtype = torch.float32
+    runtime._infer_lock = threading.Lock()
+    runtime.model = RecordingSpeakerModel()
+    runtime._resolve_lora_adapter_path = lambda _path: None
+    runtime._load_reference_latent = lambda **_kwargs: (
+        torch.zeros(1, 5, 6),
+        torch.ones(1, 5, dtype=torch.bool),
+    )
+
+    condition = runtime.encode_speaker_inversion_base(
+        SamplingRequest(text="", ref_wav="reference.wav"),
+    )
+
+    assert condition.state.shape == (1, 3, 4)
+    assert condition.mask.shape == (1, 3)
+    assert condition.state.eq(2.0).all().item()
+    assert condition.condition_state.shape == (1, 4, 4)
+    assert condition.condition_mask.shape == (1, 4)
 
 
 def test_multiple_reference_waveforms_trim_each_clip_to_remaining_budget(

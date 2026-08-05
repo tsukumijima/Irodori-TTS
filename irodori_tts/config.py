@@ -209,6 +209,9 @@ class TrainConfig:
     speaker_inversion_tokens: int = 16
     speaker_inversion_init_std: float = 0.02
     speaker_inversion_init_embedding: str | None = None
+    speaker_inversion_base_embedding: str | None = None
+    speaker_inversion_residual_regularization_weight: float = 0.0
+    speaker_inversion_max_relative_residual_norm: float | None = None
     max_latent_steps: int = 750
     ref_min_seconds: float = 1.0
     ref_max_seconds: float = 120.0

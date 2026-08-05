@@ -6,6 +6,7 @@ from .inference_runtime import (
     CaptionCondition,
     ReferenceCondition,
     SpeakerCondition,
+    SpeakerInversionBaseCondition,
     load_checkpoint_for_inference,
 )
 from .lora import LORA_TARGET_PRESETS
@@ -21,6 +22,7 @@ __all__ = [
     "PretrainedTextTokenizer",
     "ReferenceCondition",
     "SpeakerCondition",
+    "SpeakerInversionBaseCondition",
     "TextToLatentRFDiT",
     "TrainConfig",
     "build_manifest_index",

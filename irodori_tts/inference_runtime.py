@@ -301,6 +301,16 @@ class ReferenceCondition:
 
 
 @dataclass(frozen=True)
+class SpeakerInversionBaseCondition:
+    """Reference-derived local speaker tokens before speaker normalization."""
+
+    state: torch.Tensor
+    mask: torch.Tensor
+    condition_state: torch.Tensor
+    condition_mask: torch.Tensor
+
+
+@dataclass(frozen=True)
 class CaptionCondition:
     """Caption condition state and its valid token range.
 
@@ -1481,6 +1491,63 @@ class InferenceRuntime:
             for message in messages:
                 log_fn(message)
         return SpeakerCondition(state=state.detach(), mask=mask.detach())
+
+    def encode_speaker_inversion_base(
+        self,
+        request: SamplingRequest,
+        *,
+        log_fn: Callable[[str], None] | None = None,
+    ) -> SpeakerInversionBaseCondition:
+        """Encode an ordinary reference into pre-normalization Speaker Encoder tokens."""
+
+        if request.no_ref is True or request.ref_embed is not None:
+            raise ValueError(
+                "Speaker Inversion base encoding requires waveform or latent references."
+            )
+        if (
+            request.ref_wav is None
+            and not request.ref_wavs
+            and request.ref_latent is None
+            and not request.ref_latents
+        ):
+            raise ValueError(
+                "Speaker Inversion base encoding requires ref_wav, ref_wavs, ref_latent, or ref_latents."
+            )
+        if self.model_cfg.use_speaker_condition_resolved is False:
+            raise RuntimeError("Speaker conditioning is disabled for this checkpoint.")
+
+        lora_adapter = self._resolve_lora_adapter_path(request.lora_adapter)
+        messages: list[str] = []
+        with self._infer_lock, torch.inference_mode():
+            ref_latent, ref_mask = self._load_reference_latent(
+                req=request,
+                lora_adapter=lora_adapter,
+                batch_size=1,
+                messages=messages,
+            )
+            if ref_latent is None or ref_mask is None:
+                raise RuntimeError("Failed to load the Speaker Inversion base reference.")
+            state, mask = self.model.encode_speaker_condition_pre_norm(
+                ref_latent=ref_latent,
+                ref_mask=ref_mask,
+            )
+            condition_state, condition_mask = self.model.compose_speaker_condition_pre_norm(
+                state=state,
+                mask=mask,
+                batch_size=1,
+                dtype=self._model_dtype,
+                device=self.model_device,
+            )
+
+        if log_fn is not None:
+            for message in messages:
+                log_fn(message)
+        return SpeakerInversionBaseCondition(
+            state=state.detach(),
+            mask=mask.detach(),
+            condition_state=condition_state.detach(),
+            condition_mask=condition_mask.detach(),
+        )
 
     def encode_caption_condition(
         self,
