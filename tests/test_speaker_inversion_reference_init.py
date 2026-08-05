@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import torch
 from torch import nn
 
@@ -97,3 +98,27 @@ def test_reference_base_safetensors_round_trip(tmp_path: Path) -> None:
     payload = load_speaker_inversion_base_payload(path)
 
     torch.testing.assert_close(payload[SPEAKER_PRE_NORM_EMBEDDING_KEY], base)
+
+
+def test_reference_base_rejects_different_checkpoint(tmp_path: Path) -> None:
+    """Reject a base extracted from weights other than the frozen training checkpoint."""
+
+    checkpoint = tmp_path / "model.safetensors"
+    checkpoint.touch()
+    path = tmp_path / "voice.speaker-base.safetensors"
+    save_speaker_inversion_base_safetensors(
+        path,
+        torch.randn(5, 8),
+        metadata={
+            "checkpoint": str(checkpoint.resolve()),
+            "speaker_patch_size": "4",
+        },
+    )
+
+    with pytest.raises(ValueError, match="checkpoint mismatch"):
+        load_speaker_inversion_base_payload(
+            path,
+            expected_checkpoint=tmp_path / "other.safetensors",
+            expected_speaker_dim=8,
+            expected_speaker_patch_size=4,
+        )

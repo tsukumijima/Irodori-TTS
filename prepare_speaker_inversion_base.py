@@ -71,16 +71,27 @@ def main() -> None:
             ref_wavs=args.ref_wavs,
             ref_latent=args.ref_latent,
             ref_latents=args.ref_latents,
-            max_ref_seconds=(
-                None if args.max_ref_seconds is None else float(args.max_ref_seconds)
-            ),
+            max_ref_seconds=(None if args.max_ref_seconds is None else float(args.max_ref_seconds)),
             ref_normalize_db=float(args.ref_normalize_db),
         ),
         log_fn=print,
     )
     # Persist only the fixed base because the learned residual belongs to training checkpoints.
     output_path = Path(str(args.output)).expanduser()
-    save_speaker_inversion_base_safetensors(output_path, condition.state)
+    save_speaker_inversion_base_safetensors(
+        output_path,
+        condition.state,
+        metadata={
+            "checkpoint": str(checkpoint_path.resolve()),
+            "speaker_patch_size": str(int(runtime.model_cfg.speaker_patch_size)),
+            "codec_repo": str(args.codec_repo),
+            "max_ref_seconds": (
+                "checkpoint_default"
+                if args.max_ref_seconds is None
+                else str(float(args.max_ref_seconds))
+            ),
+        },
+    )
     print(
         f"Saved Speaker Inversion base: {output_path} "
         f"local_tokens={condition.state.shape[1]} "

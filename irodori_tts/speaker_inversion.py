@@ -5,6 +5,7 @@ from typing import Protocol, cast
 
 import torch
 import torch.nn as nn
+from safetensors import safe_open
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as save_safetensors_file
 
@@ -14,6 +15,7 @@ SPEAKER_INVERSION_SAFETENSORS_SUFFIX = ".speaker.safetensors"
 SPEAKER_INVERSION_BASE_SAFETENSORS_SUFFIX = ".speaker-base.safetensors"
 SPEAKER_EMBEDDING_KEY = "speaker_embedding"
 SPEAKER_PRE_NORM_EMBEDDING_KEY = "speaker_pre_norm_embedding"
+SPEAKER_INVERSION_BASE_FORMAT_VERSION = "1"
 
 
 class SpeakerConditionComposer(Protocol):
@@ -252,6 +254,10 @@ def load_speaker_inversion_payload(
 
 def load_speaker_inversion_base_payload(
     path: str | Path,
+    *,
+    expected_checkpoint: str | Path | None = None,
+    expected_speaker_dim: int | None = None,
+    expected_speaker_patch_size: int | None = None,
 ) -> dict[str, torch.Tensor]:
     """Load a pre-normalization speaker state extracted from an ordinary reference."""
 
@@ -261,6 +267,36 @@ def load_speaker_inversion_base_payload(
             "Speaker Inversion base embeddings must use the "
             f"{SPEAKER_INVERSION_BASE_SAFETENSORS_SUFFIX!r} suffix: {source}"
         )
+    with safe_open(str(source), framework="pt", device="cpu") as handle:
+        metadata = handle.metadata()
+    if metadata.get("format_version") != SPEAKER_INVERSION_BASE_FORMAT_VERSION:
+        raise ValueError(
+            "Speaker Inversion base file has an unsupported or missing format_version."
+        )
+    if expected_checkpoint is not None:
+        actual_checkpoint = metadata.get("checkpoint")
+        expected_checkpoint_path = Path(expected_checkpoint).expanduser().resolve()
+        if actual_checkpoint != str(expected_checkpoint_path):
+            raise ValueError(
+                "Speaker Inversion base checkpoint mismatch: "
+                f"expected {expected_checkpoint_path}, got {actual_checkpoint!r}."
+            )
+    if expected_speaker_dim is not None and metadata.get("speaker_dim") != str(
+        int(expected_speaker_dim)
+    ):
+        raise ValueError(
+            "Speaker Inversion base speaker_dim mismatch: "
+            f"expected {int(expected_speaker_dim)}, got {metadata.get('speaker_dim')!r}."
+        )
+    if expected_speaker_patch_size is not None and metadata.get("speaker_patch_size") != str(
+        int(expected_speaker_patch_size)
+    ):
+        raise ValueError(
+            "Speaker Inversion base speaker_patch_size mismatch: "
+            f"expected {int(expected_speaker_patch_size)}, "
+            f"got {metadata.get('speaker_patch_size')!r}."
+        )
+
     raw = load_safetensors_file(source, device="cpu")
     if SPEAKER_PRE_NORM_EMBEDDING_KEY not in raw:
         raise ValueError(
@@ -286,6 +322,7 @@ def save_speaker_inversion_base_safetensors(
     pre_norm_embedding: torch.Tensor,
     *,
     dtype: torch.dtype = torch.float32,
+    metadata: dict[str, str] | None = None,
 ) -> None:
     """Save a reference-derived pre-normalization state for residual inversion."""
 
@@ -306,10 +343,17 @@ def save_speaker_inversion_base_safetensors(
         field_name=SPEAKER_PRE_NORM_EMBEDDING_KEY,
     )
     target.parent.mkdir(parents=True, exist_ok=True)
+    file_metadata = {
+        "format_version": SPEAKER_INVERSION_BASE_FORMAT_VERSION,
+        "local_tokens": str(int(normalized.shape[0])),
+        "speaker_dim": str(int(normalized.shape[1])),
+    }
+    if metadata is not None:
+        file_metadata.update(metadata)
     save_safetensors_file(
         {SPEAKER_PRE_NORM_EMBEDDING_KEY: normalized.to(dtype=dtype)},
         str(target),
-        metadata={},
+        metadata=file_metadata,
     )
 
 

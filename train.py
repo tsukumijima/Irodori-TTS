@@ -3855,6 +3855,9 @@ def main() -> None:
         elif train_cfg.speaker_inversion_base_embedding is not None:
             base_payload = load_speaker_inversion_base_payload(
                 train_cfg.speaker_inversion_base_embedding,
+                expected_checkpoint=args.init_checkpoint,
+                expected_speaker_dim=model_cfg.speaker_dim,
+                expected_speaker_patch_size=model_cfg.speaker_patch_size,
             )
             base_pre_norm_embedding = base_payload[SPEAKER_PRE_NORM_EMBEDDING_KEY]
             if is_main_process:
