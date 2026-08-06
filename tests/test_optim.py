@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-import torch
 from torch import nn
 
 from irodori_tts.config import TrainConfig
-from irodori_tts.optim import _partition_adamw_params, _partition_muon_params, build_optimizer
+from irodori_tts.optim import (
+    _partition_adamw_params,
+    _partition_muon_params,
+    build_optimizer,
+    current_lr,
+)
 
 
 class DummyOptimizerModel(nn.Module):
@@ -77,6 +82,18 @@ def _pretrained_groups(optimizer: Any) -> list[dict[str, Any]]:
     ]
 
 
+def test_current_lr_uses_pretrained_group_when_main_group_is_absent() -> None:
+    """
+    事前学習済みバックボーンだけを更新する構成でも実際の学習率を報告する。
+    """
+
+    optimizer = SimpleNamespace(
+        param_groups=[{"group_name": "pretrained_text_encoder_decay", "lr": 2e-5}],
+    )
+
+    assert current_lr(optimizer) == pytest.approx(2e-5)
+
+
 def test_build_optimizer_adamw_applies_pretrained_learning_rate() -> None:
     """
     公開経路 build_optimizer が事前学習済みバックボーンへ専用学習率を載せる。
@@ -107,9 +124,6 @@ def test_build_optimizer_muon_places_pretrained_in_auxiliary_adamw() -> None:
     """
     Muon 経路でも事前学習済みバックボーンが補助 AdamW の専用学習率を受け取る。
     """
-
-    if not hasattr(torch.optim, "Muon"):
-        pytest.skip("torch.optim.Muon is unavailable in this environment.")
 
     model = DummyOptimizerModel()
     train_cfg = TrainConfig(

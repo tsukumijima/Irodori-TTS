@@ -427,10 +427,10 @@ def current_lr(optimizer) -> float:
     for group in optimizer.param_groups:
         if str(group.get("group_name", "")).startswith("main_"):
             return float(group["lr"])
-    group_index = getattr(optimizer, "main_group_index", 0)
-    if group_index is None:
-        return 0.0
-    return float(optimizer.param_groups[int(group_index)]["lr"])
+    for group in optimizer.param_groups:
+        if str(group.get("group_name", "")).startswith("pretrained_text_encoder_"):
+            return float(group["lr"])
+    return 0.0
 
 
 def current_pretrained_text_encoder_lr(optimizer) -> float | None:
