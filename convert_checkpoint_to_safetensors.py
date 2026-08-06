@@ -638,11 +638,11 @@ def _load_adapter_checkpoint(
     base_inference_values = (
         _extract_inference_values(base_inference_cfg) if base_inference_cfg is not None else {}
     )
+    if base_inference_values:
+        flat_config.update(base_inference_values)
     if adapter_inference_cfg:
         flat_config.update(adapter_inference_cfg)
-    elif base_inference_values:
-        flat_config.update(base_inference_values)
-    else:
+    if not base_inference_values and not adapter_inference_cfg:
         raise ValueError(
             "LoRA integration requires inference metadata from either the adapter or base checkpoint."
         )
