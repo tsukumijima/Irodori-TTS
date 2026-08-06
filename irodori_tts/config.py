@@ -257,28 +257,6 @@ class TrainConfig:
             )
 
 
-@dataclass
-class SamplingConfig:
-    num_steps: int = 40
-    cfg_scale_text: float = 3.0
-    cfg_scale_caption: float = 3.0
-    cfg_scale_speaker: float = 5.0
-    cfg_guidance_mode: str = "independent"
-    cfg_scale: float | None = None
-    cfg_min_t: float = 0.5
-    cfg_max_t: float = 1.0
-    truncation_factor: float | None = None
-    rescale_k: float | None = None
-    rescale_sigma: float | None = None
-    context_kv_cache: bool = True
-    speaker_kv_scale: float | None = None
-    speaker_kv_min_t: float | None = 0.9
-    speaker_kv_max_layers: int | None = None
-    # Deprecated: inference length is derived from --seconds and codec hop_length.
-    sequence_length: int | None = None
-    seed: int = 0
-
-
 def save_json(path: str | Path, payload: dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
