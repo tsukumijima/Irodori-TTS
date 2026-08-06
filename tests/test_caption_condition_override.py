@@ -5,6 +5,7 @@ import unittest
 from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import patch
 
 import torch
 
@@ -79,7 +80,7 @@ class RecordingConditionDropoutModel:
         mask: torch.Tensor,
     ) -> torch.Tensor:
         """
-        製品モデルと同じ公開メソッドで caption 条件をエンコードする。
+        公開メソッドで caption 条件をエンコードする。
 
         Args:
             input_ids (torch.Tensor): caption のトークン ID
@@ -97,7 +98,7 @@ class RecordingConditionDropoutModel:
 
     def encode_conditions(self, **kwargs: Any) -> EncodedConditions:
         """
-        製品モデルと同じ公開メソッドで条件一式をエンコードする。
+        公開メソッドで条件一式をエンコードする。
 
         Args:
             **kwargs (Any): `TextToLatentRFDiT.encode_conditions()` へ渡す引数
@@ -216,6 +217,54 @@ class CaptionConditionOverrideTest(unittest.TestCase):
                 ),
                 batch_size=1,
             )
+
+    def test_empty_caption_override_enables_caption_conditioning(self) -> None:
+        """
+        caption 本文が空でも事前計算済み条件を CFG と Duration Predictor へ渡す。
+        """
+
+        runtime = self._runtime()
+        runtime.key = cast(
+            Any,
+            SimpleNamespace(
+                model_device="cpu",
+                model_precision="fp32",
+                codec_device="cpu",
+                codec_precision="fp32",
+            ),
+        )
+        runtime.watermarker = None
+        runtime.default_text_max_len = 16
+        runtime.model_cfg = cast(
+            Any,
+            SimpleNamespace(
+                use_caption_condition=True,
+                use_speaker_condition_resolved=False,
+            ),
+        )
+        runtime._resolve_lora_adapter_path = cast(Any, lambda _value: None)
+        captured: dict[str, bool] = {}
+
+        def record_caption_condition(**kwargs: Any) -> tuple[float, float, float, list[str]]:
+            captured["use_caption_condition"] = bool(kwargs["use_caption_condition"])
+            raise RuntimeError("caption condition captured")
+
+        request = SamplingRequest(
+            text="テスト",
+            caption="",
+            caption_state_override=torch.ones((1, 2, 3)),
+            caption_mask_override=torch.ones((1, 2), dtype=torch.bool),
+        )
+        with (
+            patch(
+                "irodori_tts.inference_runtime.resolve_cfg_scales",
+                side_effect=record_caption_condition,
+            ),
+            self.assertRaisesRegex(RuntimeError, "caption condition captured"),
+        ):
+            runtime.synthesize(request)
+
+        self.assertTrue(captured["use_caption_condition"])
 
     def test_caption_encoder_receives_pretrained_backbone(self) -> None:
         runtime = self._runtime()

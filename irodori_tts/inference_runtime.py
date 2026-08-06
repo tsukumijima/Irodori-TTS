@@ -2146,6 +2146,16 @@ class InferenceRuntime:
             and req.caption is not None
             and str(req.caption).strip() != ""
         )
+        has_caption_override = bool(
+            req.caption_state_override is not None or req.caption_mask_override is not None
+        )
+        if (req.caption_state_override is None) != (req.caption_mask_override is None):
+            raise ValueError(
+                "caption_state_override and caption_mask_override must be set together."
+            )
+        if has_caption_override and not self.model_cfg.use_caption_condition:
+            raise ValueError("Caption condition overrides require a caption-conditioned model.")
+        has_caption_condition = bool(has_caption_text or has_caption_override)
 
         truncation_factor = None if req.truncation_factor is None else float(req.truncation_factor)
         rescale_k = None if req.rescale_k is None else float(req.rescale_k)
@@ -2205,7 +2215,7 @@ class InferenceRuntime:
             cfg_scale_caption=req.cfg_scale_caption,
             cfg_scale_speaker=req.cfg_scale_speaker,
             cfg_scale=req.cfg_scale,
-            use_caption_condition=has_caption_text,
+            use_caption_condition=has_caption_condition,
             use_speaker_condition=use_speaker_for_request,
         )
         messages.extend(scale_messages)
@@ -2262,7 +2272,7 @@ class InferenceRuntime:
                     caption_mask.zero_()
                 caption_ids = caption_ids.to(self.model_device)
                 caption_mask = caption_mask.to(self.model_device)
-                if caption_text != "":
+                if has_caption_condition:
                     caption_state_override, caption_mask_override = (
                         self._load_cached_caption_condition(
                             req=req,
@@ -2469,7 +2479,7 @@ class InferenceRuntime:
                     has_speaker=has_speaker_duration,
                     has_caption=torch.full(
                         (num_candidates,),
-                        has_caption_text,
+                        has_caption_condition,
                         dtype=torch.bool,
                         device=self.model_device,
                     )
