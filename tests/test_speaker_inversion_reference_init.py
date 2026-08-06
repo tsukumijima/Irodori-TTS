@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from safetensors.torch import save_file
 from torch import nn
 
 from irodori_tts.speaker_inversion import (
@@ -52,8 +53,8 @@ class ReferenceInitializedModel(nn.Module):
 def test_zero_residual_reproduces_reference_condition() -> None:
     """Keep step zero identical to the ordinary reference-derived speaker state."""
 
-    torch.manual_seed(42)
-    base = torch.randn(7, 8)
+    generator = torch.Generator().manual_seed(42)
+    base = torch.randn(7, 8, generator=generator)
     model = ReferenceInitializedModel(base)
     normalized = model.speaker_norm(base)
     expected = torch.cat([normalized.mean(dim=0, keepdim=True), normalized], dim=0)
@@ -80,13 +81,17 @@ def test_residual_projection_enforces_relative_norm_limit() -> None:
     """Prevent optimization from discarding the clear reference-derived starting state."""
 
     base = torch.ones(4, 8)
-    model = ReferenceInitializedModel(base, max_relative_norm=0.05)
+    max_relative_norm = 0.05
+    model = ReferenceInitializedModel(base, max_relative_norm=max_relative_norm)
     with torch.no_grad():
         model.speaker_inversion.embedding.fill_(1.0)
 
     model.speaker_inversion.project_residual_()
 
-    assert float(model.speaker_inversion.relative_residual_norm().detach()) <= 0.050001
+    assert float(model.speaker_inversion.relative_residual_norm().detach()) == pytest.approx(
+        max_relative_norm,
+        abs=1e-6,
+    )
 
 
 def test_reference_base_safetensors_round_trip(tmp_path: Path) -> None:
@@ -99,6 +104,38 @@ def test_reference_base_safetensors_round_trip(tmp_path: Path) -> None:
     payload = load_speaker_inversion_base_payload(path)
 
     torch.testing.assert_close(payload[SPEAKER_PRE_NORM_EMBEDDING_KEY], base)
+
+
+def test_reference_base_without_metadata_reports_format_error(tmp_path: Path) -> None:
+    """メタデータのない safetensors を形式エラーとして拒否する。"""
+
+    path = tmp_path / "voice.speaker-base.safetensors"
+    save_file({SPEAKER_PRE_NORM_EMBEDDING_KEY: torch.randn(5, 8)}, str(path))
+
+    with pytest.raises(ValueError, match="unsupported or missing format_version"):
+        load_speaker_inversion_base_payload(path)
+
+
+def test_reference_base_save_expands_home_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    チルダで始まる保存先を利用者のホームディレクトリへ展開する。
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): HOME を一時ディレクトリへ差し替えるフィクスチャ
+        tmp_path (Path): 保存先に使う一時ホームディレクトリ
+    """
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    save_speaker_inversion_base_safetensors(
+        "~/voice.speaker-base.safetensors",
+        torch.randn(5, 8),
+    )
+
+    assert (tmp_path / "voice.speaker-base.safetensors").is_file()
 
 
 def test_reference_base_rejects_different_checkpoint(tmp_path: Path) -> None:

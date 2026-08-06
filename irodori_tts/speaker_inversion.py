@@ -289,7 +289,7 @@ def load_speaker_inversion_base_payload(
             f"{SPEAKER_INVERSION_BASE_SAFETENSORS_SUFFIX!r} suffix: {source}"
         )
     with safe_open(str(source), framework="pt", device="cpu") as handle:
-        metadata = handle.metadata()
+        metadata = handle.metadata() or {}
     if metadata.get("format_version") != SPEAKER_INVERSION_BASE_FORMAT_VERSION:
         raise ValueError(
             "Speaker Inversion base file has an unsupported or missing format_version."
@@ -348,7 +348,7 @@ def save_speaker_inversion_base_safetensors(
 ) -> None:
     """Save a reference-derived pre-normalization state for residual inversion."""
 
-    target = Path(path)
+    target = Path(path).expanduser()
     if not target.name.endswith(SPEAKER_INVERSION_BASE_SAFETENSORS_SUFFIX):
         raise ValueError(
             "Speaker Inversion base output must use the "

@@ -12,6 +12,7 @@ from irodori_tts.inference_runtime import (
     download_hf_checkpoint,
 )
 from irodori_tts.speaker_inversion import (
+    SPEAKER_INVERSION_BASE_SAFETENSORS_SUFFIX,
     save_speaker_inversion_base_safetensors,
     speaker_inversion_checkpoint_sha256,
 )
@@ -47,6 +48,12 @@ def main() -> None:
         default="Aratako/Semantic-DACVAE-Japanese-32dim",
     )
     args = parser.parse_args()
+    output_path = Path(str(args.output)).expanduser()
+    if not output_path.name.endswith(SPEAKER_INVERSION_BASE_SAFETENSORS_SUFFIX):
+        raise ValueError(
+            "Speaker Inversion base output must use the "
+            f"{SPEAKER_INVERSION_BASE_SAFETENSORS_SUFFIX!r} suffix: {output_path}"
+        )
     if args.expected_local_tokens is not None and int(args.expected_local_tokens) <= 0:
         raise ValueError(
             "--expected-local-tokens must be > 0 when provided, "
@@ -93,12 +100,10 @@ def main() -> None:
             f"expected {int(args.expected_local_tokens)}, got {int(condition.state.shape[1])}."
         )
     # Persist only the fixed base because the learned residual belongs to training checkpoints.
-    output_path = Path(str(args.output)).expanduser()
     save_speaker_inversion_base_safetensors(
         output_path,
         condition.state,
         metadata={
-            "checkpoint": str(checkpoint_path.resolve()),
             "checkpoint_sha256": speaker_inversion_checkpoint_sha256(checkpoint_path),
             "speaker_patch_size": str(int(runtime.model_cfg.speaker_patch_size)),
             "codec_repo": str(args.codec_repo),

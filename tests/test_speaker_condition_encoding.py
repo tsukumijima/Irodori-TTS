@@ -182,6 +182,7 @@ def test_encode_reference_condition_accepts_multiple_waveforms() -> None:
     expected_latent = torch.zeros(1, 5, 6)
     expected_mask = torch.ones(1, 5, dtype=torch.bool)
     runtime._load_reference_latent = lambda **_kwargs: (expected_latent, expected_mask)
+    runtime.model_cfg = SimpleNamespace(use_speaker_condition_resolved=True)
 
     condition = runtime.encode_reference_condition(
         SamplingRequest(text="", ref_wavs=["first.flac", "second.flac"]),
@@ -239,11 +240,12 @@ def test_multiple_reference_waveforms_trim_each_clip_to_remaining_budget(
     runtime.default_max_ref_seconds = 1.0
     runtime.codec = RecordingReferenceCodec()
     runtime._reference_cache_key = lambda _request, lora_adapter: None
-    runtime._reference_condition_cache = {}
+    runtime._reference_condition_cache = OrderedDict()
 
     waveforms = {
         "first.wav": (torch.zeros((1, 6)), 10),
         "second.wav": (torch.zeros((1, 10)), 10),
+        "third.wav": (torch.zeros((1, 10)), 10),
     }
     monkeypatch.setattr(
         inference_runtime_module,
@@ -251,17 +253,22 @@ def test_multiple_reference_waveforms_trim_each_clip_to_remaining_budget(
         lambda path: waveforms[path],
     )
 
+    messages: list[str] = []
     latent, mask = runtime._load_reference_latent(
-        req=SamplingRequest(text="", ref_wavs=["first.wav", "second.wav"]),
+        req=SamplingRequest(
+            text="",
+            ref_wavs=["first.wav", "second.wav", "third.wav"],
+        ),
         lora_adapter=None,
         batch_size=1,
-        messages=[],
+        messages=messages,
     )
 
     assert latent is not None
     assert mask is not None
     assert runtime.codec.input_lengths == [6, 4]
     assert latent.shape == (1, 5, 1)
+    assert any("1 skipped after reaching the reference limit" in message for message in messages)
 
 
 @pytest.mark.parametrize(
