@@ -2099,7 +2099,6 @@ class LengthGroupedSampler(Sampler[int]):
         dataset_size = int(self.lengths.numel())
         if dataset_size <= 0:
             return iter(())
-        lengths = self.lengths.tolist()
         generator = torch.Generator()
         generator.manual_seed(self.seed + self.epoch)
 
@@ -2125,7 +2124,10 @@ class LengthGroupedSampler(Sampler[int]):
 
         for window_start in range(0, len(indices), window_size):
             window = indices[window_start : window_start + window_size]
-            window.sort(key=lambda idx: lengths[idx], reverse=True)
+            window_indices = torch.tensor(window, dtype=torch.int64)
+            window_lengths = self.lengths.index_select(0, window_indices)
+            sorted_order = torch.argsort(window_lengths, descending=True, stable=True)
+            window = window_indices.index_select(0, sorted_order).tolist()
             batches = [
                 window[i : i + global_batch_size]
                 for i in range(0, len(window), global_batch_size)
