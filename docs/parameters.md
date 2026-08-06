@@ -459,6 +459,31 @@ The v3-VoiceDesign and v4-Small reference-initialized recipes start from local p
 
 Create the fixed base with `prepare_speaker_inversion_base.py` before starting training. Its `--max-ref-seconds` controls the base reference independently of the training manifest. For example, the v4-Small recipe uses `--max-ref-seconds 120` and writes a `.speaker-base.safetensors` file that is passed to `--speaker-inversion-base-embedding`.
 
+```bash
+uv run python prepare_speaker_inversion_base.py \
+  --checkpoint /path/to/model.safetensors \
+  --ref-wav /path/to/reference.wav \
+  --output /path/to/voice.speaker-base.safetensors
+```
+
+| `prepare_speaker_inversion_base.py` option | Default | Notes |
+| --- | --- | --- |
+| `--checkpoint` | — | Local base checkpoint. Exactly one of this option and `--hf-checkpoint` is required. |
+| `--hf-checkpoint` | — | Hugging Face checkpoint ID or URL. |
+| `--ref-wav` | — | Single reference waveform. Exactly one reference input form is required. |
+| `--ref-wavs PATH ...` | — | Reference waveforms concatenated in the given order. |
+| `--ref-latent` | — | Single pre-encoded reference latent. |
+| `--ref-latents PATH ...` | — | Pre-encoded reference latents concatenated in the given order. |
+| `--output` | — | Required `.speaker-base.safetensors` output path. |
+| `--max-ref-seconds` | Checkpoint setting | Maximum combined reference duration used for this base. |
+| `--expected-local-tokens` | `None` | Rejects references that do not produce the expected local token count. |
+| `--ref-normalize-db` | `-16.0` | Per-clip reference loudness target in dB. |
+| `--model-device` | First available runtime device | Device used by the text-to-latent model. |
+| `--model-precision` | `fp32` | Text-to-latent precision: `fp32`, `bf16`, or `fp16`. |
+| `--codec-device` | First available runtime device | Device used by DACVAE. |
+| `--codec-precision` | `fp32` | DACVAE precision: `fp32`, `bf16`, or `fp16`. |
+| `--codec-repo` | `Aratako/Semantic-DACVAE-Japanese-32dim` | DACVAE repository ID or local path. |
+
 Each periodic and final embedding is accompanied by a `.speaker.trainer.pt` sidecar. Pass that sidecar to `--resume` with the same config and manifest to restore the embedding, optimizer, scheduler, step, random-number generators, and dataloader position. Resume rejects changes to the manifest contents, update-affecting training settings, or distributed world size. Output paths, logging, checkpoint retention, and the maximum training length may be changed. The sidecar records the frozen base checkpoint, so `--init-checkpoint` is not required when resuming while that checkpoint remains available at its recorded path.
 
 | Parameter / Field | Default in dataclass | Notes |

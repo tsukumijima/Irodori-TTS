@@ -28,24 +28,90 @@ def main() -> None:
         description="Prepare a reference-derived Speaker Inversion base embedding."
     )
     checkpoint_group = parser.add_mutually_exclusive_group(required=True)
-    checkpoint_group.add_argument("--checkpoint", default=None)
-    checkpoint_group.add_argument("--hf-checkpoint", default=None)
+    checkpoint_group.add_argument(
+        "--checkpoint",
+        default=None,
+        help="Local base checkpoint used to encode the reference.",
+    )
+    checkpoint_group.add_argument(
+        "--hf-checkpoint",
+        default=None,
+        help="Hugging Face checkpoint ID or URL used to encode the reference.",
+    )
     reference_group = parser.add_mutually_exclusive_group(required=True)
-    reference_group.add_argument("--ref-wav", default=None)
-    reference_group.add_argument("--ref-wavs", nargs="+", default=None, metavar="PATH")
-    reference_group.add_argument("--ref-latent", default=None)
-    reference_group.add_argument("--ref-latents", nargs="+", default=None, metavar="PATH")
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--max-ref-seconds", type=float, default=None)
-    parser.add_argument("--expected-local-tokens", type=int, default=None)
-    parser.add_argument("--ref-normalize-db", type=float, default=-16.0)
-    parser.add_argument("--model-device", default=default_runtime_device())
-    parser.add_argument("--model-precision", choices=["fp32", "bf16", "fp16"], default="fp32")
-    parser.add_argument("--codec-device", default=default_runtime_device())
-    parser.add_argument("--codec-precision", choices=["fp32", "bf16", "fp16"], default="fp32")
+    reference_group.add_argument(
+        "--ref-wav",
+        default=None,
+        help="Single reference waveform path.",
+    )
+    reference_group.add_argument(
+        "--ref-wavs",
+        nargs="+",
+        default=None,
+        metavar="PATH",
+        help="Reference waveform paths concatenated in the given order.",
+    )
+    reference_group.add_argument(
+        "--ref-latent",
+        default=None,
+        help="Single pre-encoded reference latent path.",
+    )
+    reference_group.add_argument(
+        "--ref-latents",
+        nargs="+",
+        default=None,
+        metavar="PATH",
+        help="Pre-encoded reference latent paths concatenated in the given order.",
+    )
+    parser.add_argument(
+        "--output",
+        required=True,
+        help="Output .speaker-base.safetensors path.",
+    )
+    parser.add_argument(
+        "--max-ref-seconds",
+        type=float,
+        default=None,
+        help="Maximum combined reference duration; omitted uses the checkpoint setting.",
+    )
+    parser.add_argument(
+        "--expected-local-tokens",
+        type=int,
+        default=None,
+        help="Reject the export unless the reference produces this many local tokens.",
+    )
+    parser.add_argument(
+        "--ref-normalize-db",
+        type=float,
+        default=-16.0,
+        help="Reference loudness target in dB; default: -16.0.",
+    )
+    parser.add_argument(
+        "--model-device",
+        default=default_runtime_device(),
+        help="Device used by the text-to-latent model.",
+    )
+    parser.add_argument(
+        "--model-precision",
+        choices=["fp32", "bf16", "fp16"],
+        default="fp32",
+        help="Text-to-latent model precision; default: fp32.",
+    )
+    parser.add_argument(
+        "--codec-device",
+        default=default_runtime_device(),
+        help="Device used by the reference audio codec.",
+    )
+    parser.add_argument(
+        "--codec-precision",
+        choices=["fp32", "bf16", "fp16"],
+        default="fp32",
+        help="Reference audio codec precision; default: fp32.",
+    )
     parser.add_argument(
         "--codec-repo",
         default="Aratako/Semantic-DACVAE-Japanese-32dim",
+        help="DACVAE repository or local path used to encode reference audio.",
     )
     args = parser.parse_args()
     output_path = Path(str(args.output)).expanduser()
@@ -117,7 +183,7 @@ def main() -> None:
     print(
         f"Saved Speaker Inversion base: {output_path} "
         f"local_tokens={condition.state.shape[1]} "
-        f"exported_tokens={condition.condition_state.shape[1]}"
+        f"normalized_condition_tokens={condition.condition_state.shape[1]}"
     )
 
 
