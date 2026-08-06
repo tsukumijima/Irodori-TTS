@@ -8,11 +8,7 @@ from pathlib import Path
 import gradio as gr
 
 from irodori_tts.gradio_emoji_palette import EMOJI_PALETTE_CSS, build_emoji_palette
-from irodori_tts.gradio_reference_files import (
-    LONG_REFERENCE_TIP_MARKDOWN,
-    coerce_gradio_file_path,
-    resolve_gradio_reference_wavs,
-)
+from irodori_tts.gradio_reference_files import GradioReferenceFiles
 from irodori_tts.inference_runtime import (
     RuntimeKey,
     SamplingRequest,
@@ -119,7 +115,7 @@ def _resolve_speaker_embedding(
     uploaded_embedding: object,
     speaker_embedding_path_raw: str | None,
 ) -> str | None:
-    uploaded_path = coerce_gradio_file_path(uploaded_embedding)
+    uploaded_path = GradioReferenceFiles.coerce_file_path(uploaded_embedding)
     raw_path = None
     if speaker_embedding_path_raw is not None and str(speaker_embedding_path_raw).strip():
         raw_path = str(speaker_embedding_path_raw).strip()
@@ -253,7 +249,7 @@ def _run_generation(
     manual_seconds = _parse_optional_float(seconds_raw, "seconds")
     lora_adapter = _parse_optional_str(lora_adapter_raw)
 
-    ref_wavs = resolve_gradio_reference_wavs(uploaded_audio)
+    ref_wavs = GradioReferenceFiles.resolve_reference_wavs(uploaded_audio)
     speaker_embedding = _resolve_speaker_embedding(
         uploaded_embedding=uploaded_speaker_embedding,
         speaker_embedding_path_raw=speaker_embedding_path_raw,
@@ -428,7 +424,7 @@ def build_ui() -> gr.Blocks:
             build_emoji_palette(text, open=False)
         with gr.Tabs():
             with gr.Tab("Reference Audio"):
-                gr.Markdown(LONG_REFERENCE_TIP_MARKDOWN)
+                gr.Markdown(GradioReferenceFiles.LONG_REFERENCE_TIP_MARKDOWN)
                 uploaded_audio = gr.File(
                     label=("Reference Audio Uploads (optional; concatenated in displayed order)"),
                     type="filepath",

@@ -4,11 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from irodori_tts.gradio_reference_files import (
-    coerce_gradio_file_path,
-    filter_gradio_reference_wavs,
-    resolve_gradio_reference_wavs,
-)
+from irodori_tts.gradio_reference_files import GradioReferenceFiles
 
 
 @dataclass
@@ -51,7 +47,7 @@ def test_coerce_gradio_file_path_accepts_supported_upload_values(
         expected (str | None): 期待するファイルパス
     """
 
-    assert coerce_gradio_file_path(value) == expected
+    assert GradioReferenceFiles.coerce_file_path(value) == expected
 
 
 def test_resolve_gradio_reference_wavs_preserves_order() -> None:
@@ -59,7 +55,7 @@ def test_resolve_gradio_reference_wavs_preserves_order() -> None:
     複数アップロードの順序を保ち、空の値だけを除外する。
     """
 
-    assert resolve_gradio_reference_wavs(
+    assert GradioReferenceFiles.resolve_reference_wavs(
         [
             {"path": "/tmp/first.wav"},
             None,
@@ -79,7 +75,7 @@ def test_filter_gradio_reference_wavs_reports_unsupported_checkpoint() -> None:
     話者条件を持たない checkpoint では参照を除外して理由を返す。
     """
 
-    reference_wavs, notification = filter_gradio_reference_wavs(
+    reference_wavs, notification = GradioReferenceFiles.filter_reference_wavs(
         ["/tmp/reference.wav"],
         supports_speaker_condition=False,
     )
@@ -97,7 +93,7 @@ def test_filter_gradio_reference_wavs_keeps_supported_reference() -> None:
 
     expected = ["/tmp/first.wav", "/tmp/second.wav"]
 
-    reference_wavs, notification = filter_gradio_reference_wavs(
+    reference_wavs, notification = GradioReferenceFiles.filter_reference_wavs(
         expected,
         supports_speaker_condition=True,
     )

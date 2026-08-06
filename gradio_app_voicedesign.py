@@ -8,11 +8,7 @@ from pathlib import Path
 import gradio as gr
 
 from irodori_tts.gradio_emoji_palette import EMOJI_PALETTE_CSS, build_emoji_palette
-from irodori_tts.gradio_reference_files import (
-    LONG_REFERENCE_TIP_MARKDOWN,
-    filter_gradio_reference_wavs,
-    resolve_gradio_reference_wavs,
-)
+from irodori_tts.gradio_reference_files import GradioReferenceFiles
 from irodori_tts.inference_runtime import (
     RuntimeKey,
     SamplingRequest,
@@ -273,9 +269,9 @@ def _run_generation(
             "Loaded checkpoint does not enable caption conditioning. "
             "Use gradio_app.py for reference-only inference."
         )
-    ref_wav_paths = resolve_gradio_reference_wavs(ref_wavs)
+    ref_wav_paths = GradioReferenceFiles.resolve_reference_wavs(ref_wavs)
     notifications: list[str] = []
-    ref_wav_paths, reference_notification = filter_gradio_reference_wavs(
+    ref_wav_paths, reference_notification = GradioReferenceFiles.filter_reference_wavs(
         ref_wav_paths,
         supports_speaker_condition=runtime.model_cfg.use_speaker_condition_resolved,
     )
@@ -457,7 +453,7 @@ def build_ui() -> gr.Blocks:
             label="Caption / Style Prompt (optional)",
             lines=4,
         )
-        gr.Markdown(LONG_REFERENCE_TIP_MARKDOWN)
+        gr.Markdown(GradioReferenceFiles.LONG_REFERENCE_TIP_MARKDOWN)
         ref_wavs = gr.File(
             label=(
                 "Reference Audio Uploads (optional; concatenated in displayed order, "
