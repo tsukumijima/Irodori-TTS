@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -27,6 +28,8 @@ def test_coerce_audio_preserves_datasets_source_sample_rate(
     waveform = np.linspace(-0.5, 0.5, source_sample_rate, dtype=np.float32)
     audio_path = tmp_path / f"sample.{extension}"
     if extension == "m4a":
+        if shutil.which("ffmpeg") is None:
+            pytest.skip("ffmpeg is required to create the M4A fixture")
         source_path = tmp_path / "m4a_source.wav"
         sf.write(source_path, waveform, source_sample_rate, subtype="PCM_16")
         subprocess.run(

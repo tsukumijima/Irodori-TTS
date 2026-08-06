@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -37,6 +38,9 @@ def test_load_audio_decodes_m4a_without_changing_sample_rate(tmp_path: Path) -> 
     Args:
         tmp_path (Path): 入出力音声を作成する一時ディレクトリ
     """
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is required to create the M4A fixture")
 
     sample_rate = 44100
     waveform = np.linspace(-0.25, 0.25, sample_rate, dtype=np.float32)
