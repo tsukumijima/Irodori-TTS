@@ -16,32 +16,27 @@ QUANTIZATION_TYPE_INT8_WEIGHT_ONLY = "int8_weight_only"
 QUANTIZATION_TYPE_INT8_DYNAMIC = "int8_dynamic_activation_int8_weight"
 QUANTIZATION_TYPE_INT4_WEIGHT_ONLY = "int4_weight_only"
 QUANTIZATION_TYPE_FLOAT8_WEIGHT_ONLY = "float8_weight_only"
-QUANTIZATION_TYPE_FLOAT8_DYNAMIC = "float8_dynamic_activation_float8_weight"
 INT4_GROUP_SIZES = (32, 64, 128, 256)
 DEFAULT_INT4_GROUP_SIZE = 128
 INT4_CUDA_PACKING_FORMAT = "tile_packed_to_4d"
 INT4_XPU_PACKING_FORMAT = "plain_int32"
-FLOAT8_DYNAMIC_ACTIVATION_VALUE_LB = 1e-12
 QUANTIZATION_TYPES = (
     QUANTIZATION_TYPE_INT8_WEIGHT_ONLY,
     QUANTIZATION_TYPE_INT8_DYNAMIC,
     QUANTIZATION_TYPE_INT4_WEIGHT_ONLY,
     QUANTIZATION_TYPE_FLOAT8_WEIGHT_ONLY,
-    QUANTIZATION_TYPE_FLOAT8_DYNAMIC,
 )
 QUANTIZATION_CLI_CHOICES = (
     "int8-weight-only",
     "int8-dynamic",
     "int4-weight-only",
     "float8-weight-only",
-    "float8-dynamic",
 )
 _CLI_TO_QUANTIZATION_TYPE = {
     "int8-weight-only": QUANTIZATION_TYPE_INT8_WEIGHT_ONLY,
     "int8-dynamic": QUANTIZATION_TYPE_INT8_DYNAMIC,
     "int4-weight-only": QUANTIZATION_TYPE_INT4_WEIGHT_ONLY,
     "float8-weight-only": QUANTIZATION_TYPE_FLOAT8_WEIGHT_ONLY,
-    "float8-dynamic": QUANTIZATION_TYPE_FLOAT8_DYNAMIC,
 }
 _QUANTIZATION_TYPE_TO_CLI = {value: key for key, value in _CLI_TO_QUANTIZATION_TYPE.items()}
 _TORCHAO_INSTALL_GUIDANCE = (
@@ -109,7 +104,6 @@ def _build_torchao_config(
 ) -> tuple[Any, Any]:
     try:
         from torchao.quantization import (
-            Float8DynamicActivationFloat8WeightConfig,
             Float8WeightOnlyConfig,
             Int4WeightOnlyConfig,
             Int8DynamicActivationInt8WeightConfig,
@@ -142,11 +136,6 @@ def _build_torchao_config(
         QUANTIZATION_TYPE_INT8_DYNAMIC: Int8DynamicActivationInt8WeightConfig,
         QUANTIZATION_TYPE_FLOAT8_WEIGHT_ONLY: Float8WeightOnlyConfig,
     }
-    if normalized == QUANTIZATION_TYPE_FLOAT8_DYNAMIC:
-        return quantize_, Float8DynamicActivationFloat8WeightConfig(
-            activation_value_lb=FLOAT8_DYNAMIC_ACTIVATION_VALUE_LB,
-            version=2,
-        )
     return quantize_, config_classes[normalized](version=2)
 
 
@@ -357,8 +346,6 @@ def flatten_quantized_state_dict(
             )
         payload["group_size"] = int4_group_size
         payload["packing_format"] = int4_packing_format
-    elif normalized_type == QUANTIZATION_TYPE_FLOAT8_DYNAMIC:
-        payload["activation_value_lb"] = FLOAT8_DYNAMIC_ACTIVATION_VALUE_LB
     metadata = dict(base_metadata)
     metadata.update(torchao_metadata)
     metadata[QUANTIZATION_METADATA_KEY] = json.dumps(

@@ -10,9 +10,19 @@ from irodori_tts.quantization import (
     QUANTIZATION_TYPE_INT8_WEIGHT_ONLY,
     flatten_quantized_state_dict,
     is_torchao_quantized_state_dict,
+    normalize_quantization_type,
     quantize_model,
     unflatten_quantized_state_dict,
 )
+
+
+def test_float8_dynamic_is_not_a_supported_quantization_type() -> None:
+    """
+    複数行入力を処理できない動的 FP8 量子化を公開形式として受理しない。
+    """
+
+    with pytest.raises(ValueError, match="Unsupported quantization type"):
+        normalize_quantization_type("float8-dynamic")
 
 
 class LinearModel(torch.nn.Module):

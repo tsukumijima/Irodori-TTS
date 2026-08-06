@@ -480,8 +480,8 @@ uv run --no-sync python infer.py \
 ```
 
 Available schemes are `int8-weight-only` (W8A16), `int8-dynamic` (W8A8),
-`int4-weight-only` (W4A16, group size 128 by default), `float8-weight-only` (FP8 weights
-and BF16 activations), and `float8-dynamic` (FP8 weights and activations).
+`int4-weight-only` (W4A16, group size 128 by default), and `float8-weight-only` (FP8 weights
+and BF16 activations).
 INT4 weight-only uses the CUDA tinygemm kernel and requires compute capability 8.0 or newer.
 Only the selected model variant and its tokenizer assets are downloaded.
 
