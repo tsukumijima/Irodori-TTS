@@ -138,7 +138,7 @@ def test_no_ref_dummy_preserves_minimum_length_after_speaker_patching(
     assert not mask.any().item()
 
 
-def test_encode_speaker_condition_returns_server_cache_value() -> None:
+def test_encode_speaker_condition_returns_reusable_condition() -> None:
     """単一参照の変換 API は speaker_state を返し、大きい参照 latent を残さない。"""
 
     runtime = cast(Any, InferenceRuntime.__new__(InferenceRuntime))

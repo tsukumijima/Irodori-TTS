@@ -104,7 +104,7 @@ class EncodedContextCapacityTest(unittest.TestCase):
     def test_none_capacity_preserves_unbounded_eager_behavior(self) -> None:
         runtime = self._runtime(None)
 
-        # 通常の eager runtime は製品エンジンの固定容量を持たないため、大きな条件も従来どおり受理する
+        # 固定容量を指定しない eager runtime は大きな条件も従来どおり受理する
         runtime._validate_encoded_context_capacity(
             self._conditions(
                 text_mask=torch.ones((1, 1024), dtype=torch.bool),
