@@ -280,8 +280,9 @@ def _run_generation(
         supports_speaker_condition=runtime.model_cfg.use_speaker_condition_resolved,
     )
     if reference_notification is not None:
-        stdout_log(reference_notification)
-        notifications.append(reference_notification)
+        application_notification = f"[gradio-caption] {reference_notification}"
+        stdout_log(application_notification)
+        notifications.append(application_notification)
     effective_no_ref = not ref_wav_paths
 
     stdout_log(f"[gradio-caption] runtime: {'reloaded' if reloaded else 'reused'}")

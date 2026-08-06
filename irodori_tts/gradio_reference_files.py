@@ -78,7 +78,7 @@ def filter_gradio_reference_wavs(
 
     if reference_wavs and supports_speaker_condition is False:
         return [], (
-            "[gradio-caption] uploaded reference audio was ignored because this checkpoint "
-            "does not support speaker conditioning."
+            "uploaded reference audio was ignored because this checkpoint does not support "
+            "speaker conditioning."
         )
     return reference_wavs, None

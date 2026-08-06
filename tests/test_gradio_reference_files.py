@@ -86,6 +86,7 @@ def test_filter_gradio_reference_wavs_reports_unsupported_checkpoint() -> None:
 
     assert reference_wavs == []
     assert notification is not None
+    assert "gradio-caption" not in notification
     assert "does not support speaker conditioning" in notification
 
 
