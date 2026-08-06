@@ -3621,9 +3621,13 @@ def main() -> None:
             show_progress=False,
             progress_desc="Index Manifest",
         )
+    # Speaker Inversion は学習対象埋め込みだけを使うため、通常話者学習用の別参照抽選を止める
+    enable_dataset_speaker_condition = bool(
+        model_cfg.use_speaker_condition_resolved and train_cfg.speaker_inversion_enabled is False
+    )
     ref_min_frames_cfg: int | None = None
     ref_max_frames_cfg: int | None = None
-    if model_cfg.use_speaker_condition_resolved and train_cfg.ref_max_seconds > 0.0:
+    if enable_dataset_speaker_condition is True and train_cfg.ref_max_seconds > 0.0:
         ref_min_frames_cfg = max(
             1,
             round(float(train_cfg.ref_min_seconds) * DACVAE_LATENT_FRAMES_PER_SECOND),
@@ -3653,7 +3657,7 @@ def main() -> None:
             max_latent_steps=train_cfg.max_latent_steps,
             subset_indices=train_indices,
             enable_caption_condition=model_cfg.use_caption_condition,
-            enable_speaker_condition=model_cfg.use_speaker_condition_resolved,
+            enable_speaker_condition=enable_dataset_speaker_condition,
             manifest_index=manifest_index,
             ref_min_frames=ref_min_frames_cfg,
             ref_max_frames=ref_max_frames_cfg,
@@ -3664,7 +3668,7 @@ def main() -> None:
             max_latent_steps=train_cfg.max_latent_steps,
             subset_indices=valid_indices,
             enable_caption_condition=model_cfg.use_caption_condition,
-            enable_speaker_condition=model_cfg.use_speaker_condition_resolved,
+            enable_speaker_condition=enable_dataset_speaker_condition,
             manifest_index=manifest_index,
             ref_min_frames=ref_min_frames_cfg,
             ref_max_frames=ref_max_frames_cfg,
@@ -3679,7 +3683,7 @@ def main() -> None:
             latent_dim=model_cfg.latent_dim,
             max_latent_steps=train_cfg.max_latent_steps,
             enable_caption_condition=model_cfg.use_caption_condition,
-            enable_speaker_condition=model_cfg.use_speaker_condition_resolved,
+            enable_speaker_condition=enable_dataset_speaker_condition,
             manifest_index=manifest_index,
             ref_min_frames=ref_min_frames_cfg,
             ref_max_frames=ref_max_frames_cfg,
