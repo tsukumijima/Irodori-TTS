@@ -529,6 +529,12 @@ def _run_worker(
                 f"speaker column(s) not found: {missing_speaker_columns}; available={ds.column_names}"
             )
 
+    # upstream の契約どおり、明示指定された場合だけデコード時に変換する
+    if args.target_sample_rate is not None:
+        ds = ds.cast_column(args.audio_column, Audio(sampling_rate=args.target_sample_rate))
+    else:
+        ds = ds.cast_column(args.audio_column, Audio())
+
     codec = DACVAECodec.load(
         repo_id=args.codec_repo,
         device=str(device),
@@ -536,8 +542,6 @@ def _run_worker(
         deterministic_decode=bool(args.codec_deterministic_decode),
         normalize_db=args.normalize_db,
     )
-    # codec と同じサンプルレートで1回だけデコードし、encode 内の再変換を避ける
-    ds = ds.cast_column(args.audio_column, Audio(sampling_rate=codec.sample_rate))
 
     start = max(0, int(args.skip_samples))
     total: int | None = None
@@ -853,6 +857,12 @@ def main() -> None:
         "--streaming",
         action="store_true",
         help="Load dataset in streaming mode.",
+    )
+    parser.add_argument(
+        "--target-sample-rate",
+        type=int,
+        default=None,
+        help="Optional decode sample rate",
     )
     parser.add_argument(
         "--min-sample-rate",

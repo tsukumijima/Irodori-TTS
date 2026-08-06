@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import soundfile as sf
 import torch
 from safetensors import safe_open
@@ -2842,7 +2841,7 @@ def clear_cached_runtime() -> None:
 
 def load_audio(path: str | Path) -> tuple[torch.Tensor, int]:
     """
-    SoundFile 対応音声を推論用のチャンネル先頭波形として読み込む。
+    音声を元のサンプリング周波数で推論用のチャンネル先頭波形へデコードする。
 
     Args:
         path (str | Path): 読み込む音声ファイル
@@ -2851,13 +2850,8 @@ def load_audio(path: str | Path) -> tuple[torch.Tensor, int]:
         tuple[torch.Tensor, int]: `(channel, frame)` 波形とサンプリング周波数
     """
 
-    # SoundFile の (frame, channel) を推論内部の (channel, frame) へ変換する
-    try:
-        data, sample_rate = sf.read(str(path), dtype="float32", always_2d=True)
-    except sf.LibsndfileError as ex:
-        raise RuntimeError(f"Failed to load reference audio: {path}") from ex
-    waveform = torch.from_numpy(np.ascontiguousarray(data.T))
-    return waveform, int(sample_rate)
+    # 学習時のファイル入力と同じ TorchCodec 経路を共有する
+    return DACVAECodec.load_audio(path)
 
 
 def save_wav(path: str | Path, audio: torch.Tensor, sample_rate: int) -> Path:
