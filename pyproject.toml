@@ -50,11 +50,6 @@ build-backend = "uv_build"
 [tool.uv]
 default-groups = ["dev"]
 exclude-newer = "2026-08-03T00:00:00Z"
-override-dependencies = [
-    # Torch 2.12.1 同梱指定の cuDNN 9.20 は RTX 5090 の Conv1d でサブライブラリ不一致になる
-    ## cuDNN 9.24 では同じ Torch wheel の DACVAE encode が cuDNN 有効のまま完走する
-    "nvidia-cudnn-cu13==9.24.0.43; sys_platform == 'linux' and platform_machine == 'x86_64'",
-]
 
 [tool.uv.build-backend]
 # ルートに irodori_tts パッケージがあるため module-root を空にする
