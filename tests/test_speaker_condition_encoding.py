@@ -9,7 +9,7 @@ import pytest
 import torch
 
 import irodori_tts.inference_runtime as inference_runtime_module
-from irodori_tts.inference_runtime import InferenceRuntime, SamplingRequest
+from irodori_tts.inference_runtime import InferenceRuntime, SamplingRequest, SpeakerCondition
 
 
 class RecordingSpeakerModel:
@@ -288,3 +288,54 @@ def test_encode_speaker_condition_rejects_missing_source(
 
     with pytest.raises(ValueError):
         runtime.encode_speaker_condition(sampling_request)
+
+
+def test_no_ref_request_uses_inherited_speaker_condition_for_cfg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    参照なし長文から引き継いだ話者状態を後続チャンクの CFG へ反映する。
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): CFG 解決時の話者条件判定を記録するフィクスチャ
+    """
+
+    runtime = cast(Any, InferenceRuntime.__new__(InferenceRuntime))
+    runtime.key = SimpleNamespace(
+        model_device="cpu",
+        model_precision="fp32",
+        codec_device="cpu",
+        codec_precision="fp32",
+    )
+    runtime.watermarker = None
+    runtime.default_text_max_len = 16
+    runtime.default_caption_max_len = 16
+    runtime.model_cfg = SimpleNamespace(
+        use_caption_condition=False,
+        use_speaker_condition_resolved=True,
+    )
+    runtime._resolve_lora_adapter_path = lambda _value: None
+    captured: dict[str, bool] = {}
+
+    def record_speaker_condition(**kwargs: Any) -> tuple[float, float, float, list[str]]:
+        captured["use_speaker_condition"] = bool(kwargs["use_speaker_condition"])
+        raise RuntimeError("speaker condition captured")
+
+    monkeypatch.setattr(
+        inference_runtime_module,
+        "resolve_cfg_scales",
+        record_speaker_condition,
+    )
+    request = SamplingRequest(
+        text="テスト",
+        no_ref=True,
+        speaker_condition_override=SpeakerCondition(
+            state=torch.ones((1, 3, 4)),
+            mask=torch.ones((1, 3), dtype=torch.bool),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="speaker condition captured"):
+        runtime.synthesize(request)
+
+    assert captured["use_speaker_condition"] is True

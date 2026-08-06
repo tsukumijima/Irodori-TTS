@@ -2180,8 +2180,10 @@ class InferenceRuntime:
         speaker_kv_max_layers = (
             None if req.speaker_kv_max_layers is None else int(req.speaker_kv_max_layers)
         )
+        # 参照なし長文の後続チャンクは、先頭チャンクから引き継いだ話者状態を正式な条件として扱う
         use_speaker_for_request = bool(
-            self.model_cfg.use_speaker_condition_resolved and not req.no_ref
+            self.model_cfg.use_speaker_condition_resolved
+            and (req.no_ref is False or req.speaker_condition_override is not None)
         )
         if speaker_kv_scale is not None:
             if not use_speaker_for_request:
