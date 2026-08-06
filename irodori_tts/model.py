@@ -1931,14 +1931,16 @@ class TextToLatentRFDiT(nn.Module):
                     raise ValueError(
                         "caption_input_ids and caption_mask are required when caption conditioning is enabled."
                     )
+                # 事前学習済み経路は有効な attention mask を保ち、独自 Encoder は dropout 後の mask を使う
+                caption_condition_mask = (
+                    caption_encoder_mask
+                    if self.pretrained_text_backbone is not None
+                    and caption_encoder_mask is not None
+                    else caption_mask
+                )
                 caption_state = self.encode_caption_condition(
                     input_ids=caption_input_ids,
-                    mask=(
-                        caption_encoder_mask
-                        if self.pretrained_text_backbone is not None
-                        and caption_encoder_mask is not None
-                        else caption_mask
-                    ),
+                    mask=caption_condition_mask,
                 )
             else:
                 caption_state, caption_mask = self._expand_condition_batch(
