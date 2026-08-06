@@ -244,6 +244,7 @@ class TrainConfig:
     seed: int = 0
 
     def __post_init__(self) -> None:
+        # ref_max_seconds=0.0 は、後段の参照音声選別で上限を設けない指定として扱う
         if self.ref_min_seconds < 0.0 or self.ref_max_seconds < 0.0:
             raise ValueError(
                 "ref_min_seconds and ref_max_seconds must be non-negative, "
