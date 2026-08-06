@@ -19,12 +19,14 @@ class EncodedContextCapacityTest(unittest.TestCase):
         return runtime
 
     def test_capacity_configuration_rejects_non_positive_values(self) -> None:
-        runtime = self._runtime(None)
+        runtime = self._runtime(864)
 
         with self.assertRaisesRegex(ValueError, "greater than zero"):
             runtime.set_max_encoded_context_tokens(0)
+        self.assertEqual(runtime._max_encoded_context_tokens, 864)
         with self.assertRaisesRegex(ValueError, "greater than zero"):
             runtime.set_max_encoded_context_tokens(-1)
+        self.assertEqual(runtime._max_encoded_context_tokens, 864)
 
     def _conditions(
         self,
