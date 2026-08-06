@@ -203,6 +203,25 @@ running many requests with similar shapes.
 | `--tail-mean-threshold` | `0.1` | Mean threshold for tail trimming. |
 | `--show-timings` | `True` | Prints timing breakdowns for major inference stages. |
 
+### WaveEx Sampling
+
+WaveEx reduces full model evaluations by extrapolating selected latent updates. It is disabled
+by default because changing the evaluation schedule can change generated audio. Start with the
+defaults and compare the resulting audio before selecting a schedule for repeated use.
+
+| Parameter | Default | Notes |
+|-----------|---------|-------|
+| `--waveex` / `--no-waveex` | disabled | Enables or disables WaveEx extrapolation. |
+| `--waveex-ode-steps` | `auto` | Comma-separated zero-based steps that run the full model. `auto` rescales the default indices `0,1,2,5,10,20` from a 40-step schedule. Step 0 is always included. |
+| `--waveex-wavelet` | `haar` | Wavelet basis. Longer filters require a matching increase in `--waveex-history-size`. |
+| `--waveex-taylor-order` | `1` | Taylor extrapolation order. Accepted values are `1` and `2`. |
+| `--waveex-history-size` | `2` | Number of retained latent states. The default uses direct Taylor extrapolation; values of at least `4` enable wavelet decomposition when the selected filter fits. |
+| `--waveex-high-freq-mode` | `extrapolate` | Handles the high-frequency band with `extrapolate`, `freeze`, or `zero`. |
+
+WaveEx assumes uniformly spaced history entries. Non-uniform sampling schedules remain accepted,
+but their index schedules require separate output-quality validation because Taylor differences
+are not rescaled by timestep width. WaveEx-specific options are ignored when `--waveex` is disabled.
+
 Tail trimming was mainly introduced for v2 checkpoints, which generate fixed 30-second
 outputs and can leave unused trailing regions after the spoken content. It is less
 important for v4-Small and v3 checkpoints because they predict a more appropriate output
@@ -440,7 +459,7 @@ The v3-VoiceDesign and v4-Small reference-initialized recipes start from local p
 
 Create the fixed base with `prepare_speaker_inversion_base.py` before starting training. Its `--max-ref-seconds` controls the base reference independently of the training manifest. For example, the v4-Small recipe uses `--max-ref-seconds 120` and writes a `.speaker-base.safetensors` file that is passed to `--speaker-inversion-base-embedding`.
 
-Each periodic and final embedding is accompanied by a `.speaker.trainer.pt` sidecar. Pass that sidecar to `--resume` with the same config and manifest to restore the embedding, optimizer, scheduler, step, random-number generators, and dataloader position. Exact data-order continuation also requires the same distributed world size. The sidecar records the frozen base checkpoint, so `--init-checkpoint` is not required when resuming while that checkpoint remains available at its recorded path.
+Each periodic and final embedding is accompanied by a `.speaker.trainer.pt` sidecar. Pass that sidecar to `--resume` with the same config and manifest to restore the embedding, optimizer, scheduler, step, random-number generators, and dataloader position. Resume rejects changes to the manifest contents, update-affecting training settings, or distributed world size. Output paths, logging, checkpoint retention, and the maximum training length may be changed. The sidecar records the frozen base checkpoint, so `--init-checkpoint` is not required when resuming while that checkpoint remains available at its recorded path.
 
 | Parameter / Field | Default in dataclass | Notes |
 |-------------------|----------------------|-------|

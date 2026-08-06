@@ -381,9 +381,8 @@ def main() -> None:
         default=2,
         help=(
             "Number of past latent states retained for the extrapolation window. "
-            "Default: 2 (uses direct Taylor on raw latents — empirically best on "
-            "the duration-control checkpoint; the wavelet path with haar + small "
-            "history is unstable). Set >= 4 to engage the wavelet decomposition."
+            "Default: 2 (uses direct Taylor extrapolation on raw latents). "
+            "Set >= 4 to engage wavelet decomposition."
         ),
     )
     parser.add_argument(

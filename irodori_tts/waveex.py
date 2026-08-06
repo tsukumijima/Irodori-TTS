@@ -257,11 +257,10 @@ class WaveExConfig:
     schedules such as Sway remain supported as empirically calibrated index
     schedules, but WaveEx does not rescale Taylor differences by timestep width.
 
-    By default the schedule follows the operating point that won an internal
-    sweep on the duration-control checkpoint (40 NFE → 6 ODE steps at indices
-    [0, 1, 2, 5, 10, 20]; haar + 1st-order direct Taylor on a 2-frame buffer)
-    and is rescaled to the actual num_steps when the sampler calls
-    `resolve_ode_step_indices`.
+    The default uses six full ODE evaluations at indices [0, 1, 2, 5, 10, 20]
+    for a 40-step schedule, with first-order direct Taylor extrapolation on a
+    two-frame buffer. `resolve_ode_step_indices` rescales these indices when
+    `num_steps` differs from 40.
     """
 
     enabled: bool = False
@@ -298,7 +297,7 @@ class WaveExConfig:
         Return the set of step indices at which a full ODE evaluation must run.
 
         If `ode_step_indices` is not set explicitly, derive a schedule from
-        the calibrated default (40 NFE: ODE at [0, 1, 2, 5, 10, 20]) by linear
+        the default (40 NFE: ODE at [0, 1, 2, 5, 10, 20]) by linear
         rescaling to the requested `num_steps`. Step 0 is always kept so the
         buffer can warm up.
         """
@@ -317,14 +316,14 @@ class WaveExConfig:
             indices.add(0)
             return indices
 
-        # Calibrated default: 6 ODE steps out of 40 NFE.
-        paper_default = (0, 1, 2, 5, 10, 20)
-        paper_total = 40
-        if num_steps == paper_total:
-            return set(paper_default)
-        scale = num_steps / paper_total
+        # Rescale the six-evaluation default while retaining the mandatory first step.
+        default_indices = (0, 1, 2, 5, 10, 20)
+        default_num_steps = 40
+        if num_steps == default_num_steps:
+            return set(default_indices)
+        scale = num_steps / default_num_steps
         scaled = {0}
-        for idx in paper_default:
+        for idx in default_indices:
             mapped = round(idx * scale)
             if 0 <= mapped < num_steps:
                 scaled.add(mapped)
@@ -444,7 +443,7 @@ def parse_ode_step_indices(spec: str | None, *, num_steps: int) -> tuple[int, ..
     Parse a CLI specification of explicit ODE step indices.
 
     Accepts:
-      * None / "" / "auto" — return None (sampler uses the paper default)
+      * None / "" / "auto" — return None (sampler uses the default schedule)
       * "0,2,4,6,8,14"     — comma-separated step indices
     """
     if spec is None:
