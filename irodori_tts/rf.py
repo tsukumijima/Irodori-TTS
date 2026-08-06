@@ -1155,7 +1155,7 @@ def sample_euler_rf_cfg(
                     t=t_value,
                     t_next=t_next_value,
                     x0_hat=rf_predict_x0(x_t=x_t, v_pred=v, t=tt),
-                    latent_mask=latent_mask,
+                    latent_mask=(None if latent_mask is None else latent_mask.detach().clone()),
                 )
             )
 

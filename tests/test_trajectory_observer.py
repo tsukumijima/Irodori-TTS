@@ -56,7 +56,11 @@ class ConstantVelocityModel:
             torch.Tensor: 入力潜在と同じ形の一定速度。
         """
 
-        return torch.full_like(cast(torch.Tensor, kwargs["x_t"]), 0.25)
+        velocity = torch.full_like(cast(torch.Tensor, kwargs["x_t"]), 0.25)
+        latent_mask = cast(torch.Tensor | None, kwargs.get("latent_mask"))
+        if latent_mask is not None:
+            velocity = velocity * latent_mask.unsqueeze(-1)
+        return velocity
 
 
 class TrajectoryObserverTest(unittest.TestCase):
@@ -237,6 +241,47 @@ class TrajectoryObserverTest(unittest.TestCase):
         )
 
         torch.testing.assert_close(observations[0].latent_mask, latent_mask)
+
+    def test_observer_cannot_mutate_sampler_latent_mask(self) -> None:
+        """
+        コールバックによる変更が後続のサンプリングへ波及しないことを確認する。
+        """
+
+        latent_mask = torch.tensor([[True, False]])
+
+        def sample(observer: TrajectoryObserver | None) -> torch.Tensor:
+            return sample_euler_rf_cfg(
+                model=cast(Any, ConstantVelocityModel()),
+                text_input_ids=torch.ones((1, 1), dtype=torch.long),
+                text_mask=torch.ones((1, 1), dtype=torch.bool),
+                ref_latent=None,
+                ref_mask=None,
+                sequence_length=2,
+                num_steps=2,
+                cfg_scale_text=0.0,
+                cfg_scale_caption=0.0,
+                cfg_scale_speaker=0.0,
+                use_context_kv_cache=False,
+                initial_noise=torch.ones((1, 2, 1), dtype=torch.float32),
+                latent_mask=latent_mask,
+                trajectory_observer=observer,
+            )
+
+        baseline = sample(None)
+
+        def clear_observed_mask(observation: TrajectoryObservation) -> None:
+            assert observation.latent_mask is not None
+            observation.latent_mask.fill_(False)
+
+        observed = sample(
+            TrajectoryObserver(
+                step_indices=(0,),
+                callback=clear_observed_mask,
+            )
+        )
+
+        torch.testing.assert_close(observed, baseline, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(latent_mask, torch.tensor([[True, False]]))
 
     def test_observer_accepts_full_waveex_step(self) -> None:
         observations: list[TrajectoryObservation] = []
