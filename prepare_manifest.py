@@ -529,16 +529,6 @@ def _run_worker(
                 f"speaker column(s) not found: {missing_speaker_columns}; available={ds.column_names}"
             )
 
-    if args.normalize_db is not None:
-        try:
-            from audiotools import AudioSignal
-
-            del AudioSignal
-        except Exception as exc:
-            raise RuntimeError(
-                "--normalize-db requires audiotools. Install audiotools or set --normalize-db none."
-            ) from exc
-
     codec = DACVAECodec.load(
         repo_id=args.codec_repo,
         device=str(device),
