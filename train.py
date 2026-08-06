@@ -3505,14 +3505,6 @@ def main() -> None:
         print("warning: allow_tf32=True requested on non-CUDA device; ignoring.")
 
     output_dir = Path(train_cfg.output_dir)
-    if is_main_process:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        dump_configs(output_dir / "config.json", model_cfg, train_cfg)
-        print(f"Compute precision={train_cfg.precision} (weights/optimizer states kept in fp32).")
-    if distributed:
-        dist.barrier()
-    if is_main_process and distributed:
-        print(f"DDP enabled: world_size={world_size} (local_rank={local_rank})")
     speaker_inversion_resume_contract = None
     if train_cfg.speaker_inversion_enabled:
         speaker_inversion_resume_contract = build_speaker_inversion_resume_contract(
@@ -3527,6 +3519,15 @@ def main() -> None:
                 train_cfg=train_cfg,
                 world_size=world_size,
             )
+    # 再開契約を検証してから実行設定を公開し、拒否された要求で既存メタデータを変えない
+    if is_main_process:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        dump_configs(output_dir / "config.json", model_cfg, train_cfg)
+        print(f"Compute precision={train_cfg.precision} (weights/optimizer states kept in fp32).")
+    if distributed:
+        dist.barrier()
+    if is_main_process and distributed:
+        print(f"DDP enabled: world_size={world_size} (local_rank={local_rank})")
     wandb_run = None
     if train_cfg.wandb_enabled and is_main_process:
         try:
