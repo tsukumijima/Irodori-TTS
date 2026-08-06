@@ -4165,6 +4165,7 @@ def main() -> None:
     resume_loader_state_loaded = False
     epoch_step_offset = 0
     progress: TrainProgress | None = None
+    rng_state: dict[str, Any] | None = None
     if args.resume is not None:
         if resume_payload is None:
             raise RuntimeError("Resume checkpoint payload is unavailable.")
@@ -4174,6 +4175,13 @@ def main() -> None:
                 raw_model,
                 optimizer,
                 scheduler,
+                ckpt,
+                distributed=distributed,
+                rank=rank,
+                world_size=world_size,
+            )
+            # Speaker Inversion の復元処理が使用した保存状態を、共通の再開ログにも反映する
+            rng_state = _select_rng_state_for_rank(
                 ckpt,
                 distributed=distributed,
                 rank=rank,
