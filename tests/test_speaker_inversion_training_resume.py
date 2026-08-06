@@ -95,6 +95,35 @@ def test_resume_rejects_changed_speaker_inversion_training_contract() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("flag", "requested_value", "resume_value"),
+    [
+        ("--speaker-inversion", True, False),
+        ("--no-speaker-inversion", False, True),
+    ],
+)
+def test_resume_recognizes_explicit_speaker_inversion_flags(
+    flag: str,
+    requested_value: bool,
+    resume_value: bool,
+) -> None:
+    """
+    Speaker Inversion の有効化と無効化を明示した再開要求を検出する。
+
+    Args:
+        flag (str): 明示指定として検証する CLI フラグ
+        requested_value (bool): CLI 解析後の有効化状態
+        resume_value (bool): 保存済み再開契約の有効化状態
+    """
+
+    with pytest.raises(ValueError, match="speaker_inversion_enabled"):
+        _restore_resume_speaker_inversion_config(
+            TrainConfig(speaker_inversion_enabled=requested_value),
+            resume_train_cfg={"speaker_inversion_enabled": resume_value},
+            raw_argv=["train.py", flag],
+        )
+
+
 def test_exact_resume_contract_rejects_manifest_and_training_changes(tmp_path: Path) -> None:
     """Reject changed data and update settings before restoring training state."""
 

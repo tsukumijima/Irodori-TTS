@@ -7,6 +7,7 @@ from torch import nn
 
 from irodori_tts.speaker_inversion import (
     SPEAKER_EMBEDDING_KEY,
+    SPEAKER_INVERSION_BASE_FORMAT_VERSION,
     SPEAKER_PRE_NORM_EMBEDDING_KEY,
     SpeakerInversionEmbedding,
     load_speaker_inversion_base_payload,
@@ -114,6 +115,24 @@ def test_reference_base_without_metadata_reports_format_error(tmp_path: Path) ->
 
     with pytest.raises(ValueError, match="unsupported or missing format_version"):
         load_speaker_inversion_base_payload(path)
+
+
+def test_reference_base_rejects_tensor_dimension_mismatch(tmp_path: Path) -> None:
+    """Reject a tensor whose dimension disagrees with validated metadata."""
+
+    path = tmp_path / "voice.speaker-base.safetensors"
+    save_file(
+        {SPEAKER_PRE_NORM_EMBEDDING_KEY: torch.randn(5, 7)},
+        str(path),
+        metadata={
+            "format_version": SPEAKER_INVERSION_BASE_FORMAT_VERSION,
+            "local_tokens": "5",
+            "speaker_dim": "8",
+        },
+    )
+
+    with pytest.raises(ValueError, match=r"speaker_pre_norm_embedding.*dim"):
+        load_speaker_inversion_base_payload(path, expected_speaker_dim=8)
 
 
 def test_reference_base_save_expands_home_directory(

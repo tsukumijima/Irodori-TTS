@@ -333,7 +333,11 @@ def load_speaker_inversion_base_payload(
     return {
         SPEAKER_PRE_NORM_EMBEDDING_KEY: normalize_speaker_embedding_tensor(
             raw_embedding,
-            speaker_dim=int(raw_embedding.shape[-1]),
+            speaker_dim=(
+                int(raw_embedding.shape[-1])
+                if expected_speaker_dim is None
+                else int(expected_speaker_dim)
+            ),
             field_name=SPEAKER_PRE_NORM_EMBEDDING_KEY,
         )
     }
@@ -411,6 +415,7 @@ def speaker_inversion_batch_tensors(
     return state, mask
 
 
+@torch.no_grad()
 def speaker_inversion_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
     module = getattr(model, "speaker_inversion", None)
     if not isinstance(module, SpeakerInversionEmbedding):

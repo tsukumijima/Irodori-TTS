@@ -1651,8 +1651,12 @@ def _restore_resume_speaker_inversion_config(
         if field not in resume_train_cfg:
             continue
         resume_value = resume_train_cfg[field]
-        flag = "--" + field.replace("_", "-")
-        if cli_provided(raw_argv, flag):
+        flags = (
+            ("--speaker-inversion", "--no-speaker-inversion")
+            if field == "speaker_inversion_enabled"
+            else ("--" + field.replace("_", "-"),)
+        )
+        if any(cli_provided(raw_argv, flag) for flag in flags):
             current_value = getattr(train_cfg, field)
             if current_value != resume_value:
                 raise ValueError(
