@@ -134,6 +134,10 @@ class LatentTextDataset(Dataset[dict[str, Any]]):
                     [int(x) for x in subset_indices],
                     dtype=torch.int64,
                 )
+            if subset_index_tensor.ndim != 1:
+                raise ValueError(
+                    f"subset_indices must be one-dimensional, got shape={tuple(subset_index_tensor.shape)}"
+                )
             subset_index_tensor = subset_index_tensor.contiguous()
             if subset_index_tensor.numel() == 0:
                 raise ValueError("subset_indices must contain at least one index.")
@@ -612,12 +616,15 @@ class _ManifestIndex:
                         speaker_codes.append(-1)
                     else:
                         speaker_id = str(speaker_id)
-                        speaker_code = speaker_id_to_code.get(speaker_id)
-                        if speaker_code is None:
-                            speaker_code = len(speakers)
-                            speaker_id_to_code[speaker_id] = speaker_code
-                            speakers.append(speaker_id)
-                        speaker_codes.append(int(speaker_code))
+                        if not speaker_id.strip():
+                            speaker_codes.append(-1)
+                        else:
+                            speaker_code = speaker_id_to_code.get(speaker_id)
+                            if speaker_code is None:
+                                speaker_code = len(speakers)
+                                speaker_id_to_code[speaker_id] = speaker_code
+                                speakers.append(speaker_id)
+                            speaker_codes.append(int(speaker_code))
                     has_caption.append(_has_caption(item.get(caption_key)))
                     manifest_num_frames = max(0, int(item.get("num_frames", 0) or 0))
                     num_frames.append(manifest_num_frames)
