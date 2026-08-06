@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-import numpy as np
-import soundfile as sf
-import soxr
 import torch
+import torchaudio
 from huggingface_hub import hf_hub_download
-from numpy.typing import NDArray
-from scipy.signal import lfilter
+from torchcodec.decoders import AudioDecoder
+
+from .audiotools_loudness import AudioToolsLoudness
 
 
 _CODEC_DEFAULT = object()
@@ -50,6 +49,13 @@ class DACVAECodec:
     deterministic_encode: bool
     deterministic_decode: bool
     normalize_db: float | None
+    _resamplers: dict[tuple[int, torch.device, torch.dtype], torchaudio.transforms.Resample] = (
+        field(
+            default_factory=dict,
+            init=False,
+            repr=False,
+        )
+    )
 
     @classmethod
     def load(
@@ -142,129 +148,20 @@ class DACVAECodec:
     @staticmethod
     def _measure_loudness(wav: torch.Tensor, sample_rate: int) -> torch.Tensor:
         """
-        ITU-R BS.1770-4 の統合ラウドネスを CPU で測定する。
+        AudioTools 0.7.2 と同じ統合ラウドネスを CPU で測定する。
+
+        Args:
+            wav (torch.Tensor): モノラル波形
+            sample_rate (int): サンプリング周波数
+
+        Returns:
+            torch.Tensor: CPU 上の float32 ラウドネス値
+
+        Raises:
+            ValueError: 入力が1次元のモノラル波形ではない場合
         """
 
-        waveform = wav.detach().to(device="cpu", dtype=torch.float32).numpy()
-        if waveform.ndim != 1:
-            raise ValueError(
-                f"measure_loudness expects a mono waveform, got {tuple(waveform.shape)}"
-            )
-
-        def apply_biquad(
-            audio: np.ndarray,
-            numerator: tuple[np.float32, np.float32, np.float32],
-            denominator: tuple[np.float32, np.float32, np.float32],
-        ) -> np.ndarray:
-            """
-            Torchaudio と同じゼロ初期状態と段間 clamp で2次 IIR を適用する。
-            """
-
-            filtered = lfilter(
-                np.asarray(numerator, dtype=np.float32),
-                np.asarray(denominator, dtype=np.float32),
-                audio,
-            )
-            return np.clip(filtered, -1.0, 1.0).astype(np.float32, copy=False)
-
-        # Torchaudio の BS.1770 実装と同じ RBJ high-shelf 係数を float32 で生成する
-        high_shelf_frequency = np.float32(1500.0)
-        high_shelf_q = np.float32(1.0 / np.sqrt(2.0))
-        high_shelf_gain = np.float32(4.0)
-        angular_frequency = np.float32(2.0 * np.pi) * high_shelf_frequency / np.float32(sample_rate)
-        alpha = np.sin(angular_frequency, dtype=np.float32) / np.float32(2.0) / high_shelf_q
-        amplitude = np.exp(
-            high_shelf_gain / np.float32(40.0) * np.float32(np.log(10.0)),
-            dtype=np.float32,
-        )
-        temporary_1 = np.float32(2.0) * np.sqrt(amplitude, dtype=np.float32) * alpha
-        temporary_2 = (amplitude - np.float32(1.0)) * np.cos(
-            angular_frequency,
-            dtype=np.float32,
-        )
-        temporary_3 = (amplitude + np.float32(1.0)) * np.cos(
-            angular_frequency,
-            dtype=np.float32,
-        )
-        waveform = apply_biquad(
-            waveform,
-            (
-                amplitude * ((amplitude + np.float32(1.0)) + temporary_2 + temporary_1),
-                np.float32(-2.0) * amplitude * ((amplitude - np.float32(1.0)) + temporary_3),
-                amplitude * ((amplitude + np.float32(1.0)) + temporary_2 - temporary_1),
-            ),
-            (
-                (amplitude + np.float32(1.0)) - temporary_2 + temporary_1,
-                np.float32(2.0) * ((amplitude - np.float32(1.0)) - temporary_3),
-                (amplitude + np.float32(1.0)) - temporary_2 - temporary_1,
-            ),
-        )
-
-        # 続く38Hz high-pass も同じ係数と float32 演算で適用する
-        high_pass_frequency = np.float32(38.0)
-        high_pass_q = np.float32(0.5)
-        angular_frequency = np.float32(2.0 * np.pi) * high_pass_frequency / np.float32(sample_rate)
-        cosine = np.cos(angular_frequency, dtype=np.float32)
-        alpha = np.sin(angular_frequency, dtype=np.float32) / np.float32(2.0) / high_pass_q
-        waveform = apply_biquad(
-            waveform,
-            (
-                (np.float32(1.0) + cosine) / np.float32(2.0),
-                -np.float32(1.0) - cosine,
-                (np.float32(1.0) + cosine) / np.float32(2.0),
-            ),
-            (
-                np.float32(1.0) + alpha,
-                np.float32(-2.0) * cosine,
-                np.float32(1.0) - alpha,
-            ),
-        )
-
-        # 400ms窓を75%重複させ、絶対ゲートと相対ゲートを順に適用する
-        gate_samples = round(0.4 * sample_rate)
-        step_samples = round(gate_samples * 0.25)
-        if waveform.shape[-1] >= gate_samples:
-            windows: NDArray[np.float32] = np.lib.stride_tricks.sliding_window_view(
-                waveform,
-                gate_samples,
-            )[::step_samples]
-            # 長音声でも全窓分の二乗配列を同時に確保しないよう、窓を固定数ずつ集計する
-            energy = np.empty((windows.shape[0],), dtype=np.float32)
-            window_chunk_size = 1024
-            for window_start in range(0, windows.shape[0], window_chunk_size):
-                window_end = min(window_start + window_chunk_size, windows.shape[0])
-                energy[window_start:window_end] = np.mean(
-                    np.square(windows[window_start:window_end]),
-                    axis=1,
-                    dtype=np.float32,
-                )
-        else:
-            energy = np.empty((0,), dtype=np.float32)
-        # 窓を1つも作れない短音声は、有限な無音値として扱う
-        if energy.size == 0:
-            return torch.tensor(-70.0, dtype=torch.float32)
-        # 無音ブロックは規格どおり -inf となるため、NumPy の診断だけを抑えてゲートで除外する
-        with np.errstate(divide="ignore", invalid="ignore"):
-            block_loudness = np.float32(-0.691) + np.float32(10.0) * np.log10(energy)
-            gated_blocks = block_loudness > np.float32(-70.0)
-            if not np.any(gated_blocks):
-                return torch.tensor(-70.0, dtype=torch.float32)
-            gated_energy = np.sum(
-                energy[gated_blocks],
-                dtype=np.float32,
-            ) / np.count_nonzero(gated_blocks)
-            relative_gate = (
-                np.float32(-0.691) + np.float32(10.0) * np.log10(gated_energy) - np.float32(10.0)
-            )
-            gated_blocks = np.logical_and(gated_blocks, block_loudness > relative_gate)
-            if not np.any(gated_blocks):
-                return torch.tensor(-70.0, dtype=torch.float32)
-            gated_energy = np.sum(
-                energy[gated_blocks],
-                dtype=np.float32,
-            ) / np.count_nonzero(gated_blocks)
-            measured_db = np.float32(-0.691) + np.float32(10.0) * np.log10(gated_energy)
-        return torch.tensor(measured_db, dtype=torch.float32)
+        return AudioToolsLoudness.measure(wav, sample_rate)
 
     @staticmethod
     def measure_loudness(wav: torch.Tensor, sample_rate: int) -> torch.Tensor:
@@ -285,51 +182,22 @@ class DACVAECodec:
     def _normalize_loudness(
         wav: torch.Tensor, sample_rate: int, target_db: float | None
     ) -> torch.Tensor:
-        if target_db is None:
-            return wav
-        wav_device = wav.device
-        wav = wav.to(dtype=torch.float32)
-        if wav.ndim == 2:
-            if wav.shape[0] == 1:
-                wav = wav[0]
-            elif wav.shape[1] == 1:
-                wav = wav[:, 0]
-            else:
-                wav = wav.mean(dim=0)
-        if wav.ndim != 1:
-            raise ValueError(
-                "normalize_loudness expects a mono waveform with shape (T,) "
-                f"or singleton-channel (1, T)/(T, 1), got {tuple(wav.shape)}"
-            )
+        """
+        AudioTools 0.7.2 と同じ順序でラウドネスとピークを正規化する。
 
-        # BS.1770 の測定窓を満たすように短い参照音声だけ右側をゼロ埋めする
-        minimum_samples = int(sample_rate * 0.5)
-        loudness_input = wav
-        if wav.shape[-1] < minimum_samples:
-            loudness_input = torch.nn.functional.pad(
-                wav,
-                (0, minimum_samples - wav.shape[-1]),
-            )
+        Args:
+            wav (torch.Tensor): モノラル波形または単一チャンネル波形
+            sample_rate (int): サンプリング周波数
+            target_db (float | None): 目標ラウドネス。None の場合は入力を変更しない
 
-        # GPU 世代や CUDA ライブラリに左右されない SciPy の CPU IIR 経路で測る
-        measured_db = DACVAECodec._measure_loudness(
-            loudness_input,
-            int(sample_rate),
-        ).clamp_min(-70.0)
-        # 測定下限の無音は増幅もピーク制限も行わず、入力波形をそのまま返す
-        if measured_db.item() == -70.0:
-            return wav.to(dtype=torch.float32, device=wav_device)
-        gain = torch.exp(
-            (torch.as_tensor(float(target_db)) - measured_db)
-            * (torch.log(torch.tensor(10.0)) / 20.0)
-        ).to(device=wav.device)
-        normalized = wav * gain
+        Returns:
+            torch.Tensor: 入力と同じデバイス上の float32 モノラル波形
 
-        # ラウドネス調整後にピークが1.0を超える場合だけ全体を縮小する
-        peak = normalized.abs().max()
-        if torch.isfinite(peak) and peak > 1.0:
-            normalized = normalized / peak
-        return normalized.to(dtype=torch.float32, device=wav_device)
+        Raises:
+            ValueError: 入力をモノラル波形として扱えない場合
+        """
+
+        return AudioToolsLoudness.normalize(wav, sample_rate, target_db)
 
     @torch.inference_mode()
     def encode_waveform(
@@ -356,21 +224,17 @@ class DACVAECodec:
         if waveform.shape[1] != 1:
             waveform = waveform.mean(dim=1, keepdim=True)
         if sample_rate != self.sample_rate:
-            # Reference audio normally arrives on CPU from SoundFile, and the short
-            # per-utterance tensors pay more scheduling cost than useful work in torch resample.
-            # soxr のチャンネル次元へバッチを載せ、全波形を1回の呼び出しで変換する
-            waveform_np = (
-                waveform.squeeze(1).detach().to(device="cpu", dtype=torch.float32).numpy().T
-            )
-            resampled_np = soxr.resample(
-                waveform_np,
-                float(sample_rate),
-                float(self.sample_rate),
-                quality="HQ",
-            )
-            waveform = torch.from_numpy(
-                np.ascontiguousarray(np.asarray(resampled_np, dtype=np.float32).T)
-            ).unsqueeze(1)
+            # TorchAudio のカーネルを再利用し、upstream と同じ変換の固定費だけを省く
+            resampler_key = (sample_rate, waveform.device, waveform.dtype)
+            resampler = self._resamplers.get(resampler_key)
+            if resampler is None:
+                resampler = torchaudio.transforms.Resample(
+                    sample_rate,
+                    self.sample_rate,
+                    dtype=waveform.dtype,
+                ).to(device=waveform.device)
+                self._resamplers[resampler_key] = resampler
+            waveform = resampler(waveform)
 
         if normalize_db is _CODEC_DEFAULT:
             effective_normalize_db = self.normalize_db
@@ -441,11 +305,29 @@ class DACVAECodec:
         return self.model.decode(z)
 
     def encode_file(self, path: str | Path) -> torch.Tensor:
-        # SoundFile で常に (frame, channel) として読み、従来の (channel, frame) 契約へ戻す
-        try:
-            data, sr = sf.read(str(path), dtype="float32", always_2d=True)
-        except sf.LibsndfileError as ex:
-            raise RuntimeError(f"Failed to load reference audio: {path}") from ex
-        wav = torch.from_numpy(np.ascontiguousarray(data.T))
+        # TorchCodec へデコードを集約し、WAV・FLAC・M4A で元のサンプルレートを維持する
+        wav, sample_rate = self.load_audio(path)
         wav = wav.unsqueeze(0)  # (1, C, T)
-        return self.encode_waveform(wav, sr).cpu()
+        return self.encode_waveform(wav, sample_rate).cpu()
+
+    @staticmethod
+    def load_audio(path: str | Path) -> tuple[torch.Tensor, int]:
+        """
+        音声ファイルを元のサンプリング周波数でデコードする。
+
+        Args:
+            path (str | Path): 読み込む音声ファイル
+
+        Returns:
+            tuple[torch.Tensor, int]: `(channel, frame)` の float32 波形とサンプリング周波数
+
+        Raises:
+            RuntimeError: TorchCodec で音声をデコードできない場合
+        """
+
+        # sample_rate=None により、デコーダー内で暗黙のリサンプリングを行わない
+        try:
+            samples = AudioDecoder(str(path), sample_rate=None).get_all_samples()
+        except RuntimeError as ex:
+            raise RuntimeError(f"Failed to load reference audio: {path}") from ex
+        return samples.data.to(dtype=torch.float32), int(samples.sample_rate)

@@ -11,11 +11,11 @@ dependencies = [
     "numpy>=1.26.0,<3.0",
     "pyyaml>=6.0",
     "safetensors>=0.7.0",
-    "scipy>=1.11.0,<2.0",
     "soundfile>=0.12.0",
-    "soxr>=1.0.0",
     "sentencepiece>=0.1.99,<0.2",
     "torch>=2.12.1,<2.13.0",
+    "torchaudio>=2.11.0,<2.12.0",
+    "torchcodec>=0.15.0,<0.16.0",
     "transformers>=5.12.1,<6",
 ]
 
@@ -33,7 +33,6 @@ dev = [
     "silentcipher @ git+https://github.com/SesameAILabs/silentcipher.git@d46d7d0893a583d8968ab3a6626e2289faec9152",
     "taskipy>=1.14.0,<2.0.0",
     "torchao>=0.17.0,<0.18.0",
-    "torchcodec>=0.15.0,<0.16.0",
     "tqdm>=4.67.3",
     "wandb>=0.17.0",
     "torchdata>=0.11.0",
@@ -52,6 +51,11 @@ build-backend = "uv_build"
 [tool.uv]
 default-groups = ["dev"]
 exclude-newer = "2026-08-03T00:00:00Z"
+override-dependencies = [
+    # Torch 2.12.1 同梱指定の cuDNN 9.20 は RTX 5090 の Conv1d でサブライブラリ不一致になる
+    ## cuDNN 9.24 では同じ Torch wheel の DACVAE encode が cuDNN 有効のまま完走する
+    "nvidia-cudnn-cu13==9.24.0.43; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 
 [tool.uv.build-backend]
 # ルートに irodori_tts パッケージがあるため module-root を空にする
@@ -78,6 +82,9 @@ torch = [
     { index = "pytorch-cu130", marker = "(sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')" },
 ]
 torchcodec = [
+    { index = "pytorch-cu130", marker = "(sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')" },
+]
+torchaudio = [
     { index = "pytorch-cu130", marker = "(sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')" },
 ]
 

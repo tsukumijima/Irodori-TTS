@@ -7,21 +7,21 @@ from irodori_tts.codec import DACVAECodec
 @pytest.mark.parametrize(
     ("sample_rate", "expected_sine", "expected_noise"),
     (
-        (16000, -29.7590274810791, -37.323036193847656),
-        (32000, -29.75702667236328, -36.99609375),
-        (44100, -29.75666618347168, -36.891578674316406),
-        (48000, -29.75687599182129, -36.87406921386719),
+        (16000, -29.75902557373047, -37.32304000854492),
+        (32000, -29.75699234008789, -36.99609375),
+        (44100, -29.756685256958008, -36.891578674316406),
+        (48000, -29.756589889526367, -36.87405776977539),
     ),
 )
-def test_measure_loudness_matches_torchaudio_reference_values(
+def test_measure_loudness_matches_audiotools_reference_values(
     sample_rate: int,
     expected_sine: float,
     expected_noise: float,
 ) -> None:
-    """Torchaudio 2.9 で事前計測した BS.1770 値との数値差を監視する。
+    """AudioTools 0.7.2 で事前計測した BS.1770 値との数値差を監視する。
 
     各サンプルレートで1秒の 440Hz 正弦波と seed 1 の白色雑音を作り、
-    `torchaudio.functional.loudness()` へ渡した値を参照値として固定する。
+    `AudioSignal.loudness()` へ渡した値を参照値として固定する。
     """
 
     time = torch.arange(sample_rate, dtype=torch.float32) / sample_rate
@@ -92,3 +92,44 @@ def test_normalize_loudness_limits_peak_after_gain() -> None:
 
     # 目標ラウドネスで増幅しても出力波形の絶対ピークを1.0へ収める
     torch.testing.assert_close(normalized.abs().max(), torch.tensor(1.0))
+
+
+def test_normalize_loudness_matches_audiotools_for_intermediate_filter_peaks() -> None:
+    """IIR の段間ピークが1.0を超える波形でも AudioTools 0.7.2 と一致させる。"""
+
+    sample_rate = 48000
+    generator = torch.Generator().manual_seed(20260806)
+    waveform = torch.randn(sample_rate, generator=generator, dtype=torch.float32) * 0.35
+    waveform = waveform.clamp(-1.0, 1.0)
+
+    normalized = DACVAECodec._normalize_loudness(
+        waveform,
+        sample_rate=sample_rate,
+        target_db=-16.0,
+    )
+
+    # AudioTools 0.7.2 の AudioSignal.normalize() と ensure_max_of_audio() の固定値
+    torch.testing.assert_close(
+        DACVAECodec.measure_loudness(waveform, sample_rate),
+        torch.tensor(-6.046573638916016),
+        atol=1e-4,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        normalized.abs().max(), torch.tensor(0.31792792677879333), atol=1e-6, rtol=0.0
+    )
+
+
+def test_normalize_loudness_preserves_audiotools_minimum_loudness_gain() -> None:
+    """測定下限に達する微小波形にも AudioTools 0.7.2 と同じゲインを適用する。"""
+
+    waveform = torch.full((48000,), 1e-8, dtype=torch.float32)
+
+    normalized = DACVAECodec._normalize_loudness(
+        waveform,
+        sample_rate=48000,
+        target_db=-16.0,
+    )
+
+    expected_gain = torch.exp(torch.tensor(54.0) * (torch.log(torch.tensor(10.0)) / 20.0))
+    torch.testing.assert_close(normalized, waveform * expected_gain)
