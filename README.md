@@ -392,27 +392,13 @@ Speaker Inversion trains only a small set of speaker embedding tokens while keep
 base Irodori-TTS model frozen. It is useful when you want a reusable speaker identity
 checkpoint instead of providing reference audio at every inference call.
 
-Prepare a manifest and a 750-token reference base from the target speaker's audio, then
-initialize from v4-Small:
-
-```bash
-uv run --no-sync python prepare_speaker_inversion_base.py \
-  --checkpoint path/to/Irodori-TTS-v4-Small/model.safetensors \
-  --ref-wavs path/to/reference_1.wav path/to/reference_2.wav \
-  --max-ref-seconds 120 \
-  --expected-local-tokens 750 \
-  --output data/target_speaker.speaker-base.safetensors
-```
-
-The reference inputs must contain at least 120 seconds of audio. The preparation command
-truncates longer input and rejects shorter input that cannot produce the recipe's 750 local tokens.
+Prepare a manifest from the target speaker's audio, then initialize from v4-Small:
 
 ```bash
 uv run --no-sync python train.py \
   --config configs/train_v4_small_speaker_inversion.yaml \
   --manifest data/target_speaker_manifest.jsonl \
   --init-checkpoint path/to/Irodori-TTS-v4-Small/model.safetensors \
-  --speaker-inversion-base-embedding data/target_speaker.speaker-base.safetensors \
   --output-dir outputs/speaker_inversion/name
 ```
 
@@ -428,11 +414,9 @@ uv run --no-sync python infer.py \
   --output-wav outputs/sample_speaker_inversion.wav
 ```
 
-To warm-start a new optimization from a saved embedding, set `speaker_inversion_init_embedding`
-in the config or pass `--speaker-inversion-init-embedding path/to/checkpoint.speaker.safetensors`.
-To continue an interrupted run with its optimizer, scheduler, dataloader, and random-number
-generator state, pass the `.speaker.trainer.pt` sidecar to `--resume` together with the same
-config and manifest. Exact data-order continuation also requires the same distributed world size.
+To continue from a saved embedding, set `speaker_inversion_init_embedding` in the
+config or pass `--speaker-inversion-init-embedding path/to/checkpoint.speaker.safetensors`.
+Full trainer `--resume` is intentionally not used for Speaker Inversion checkpoints.
 Enable `gradient_checkpointing: true` or pass `--gradient-checkpointing` if GPU memory is tight.
 
 ### 5. Resume Interrupted Training

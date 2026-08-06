@@ -1,5 +1,9 @@
 # Irodori-TTS Parameter Guide
 
+> [!NOTE]
+> This fork extends the upstream parameter set. This guide documents both upstream and
+> fork-specific inference and training parameters supported by the current `master` branch.
+
 This document explains the main inference and training parameters used by Irodori-TTS.
 
 ## Version Notes
@@ -492,6 +496,7 @@ manifest consumed by `train.py`.
 | `--output-manifest` | required | Output JSONL path. |
 | `--latent-dir` | required | Directory where `.pt` latent files are written. |
 | `--normalize-db` | `-16.0` | Loudness normalization before codec encode. Use `none` to disable. |
+| `--target-sample-rate` | `None` | Optional decode sample rate. |
 | `--min-sample-rate` | `0` | Skips decoded samples below this sample rate. |
 | `--max-seconds` | `None` | Trims source audio before encode. |
 | `--max-samples` | `None` | Maximum number of accepted samples to write per rank. |
