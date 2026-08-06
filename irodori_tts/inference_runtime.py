@@ -805,7 +805,9 @@ def _split_hf_checkpoint_source(source: str) -> tuple[str, str | None]:
     parts = raw.split("/")
     if any(part in {"", ".", ".."} for part in parts):
         raise ValueError(f"Invalid Hugging Face checkpoint source: {source!r}")
-    if len(parts) <= 2:
+    if len(parts) == 1:
+        raise ValueError(f"Hugging Face checkpoint sources must use owner/repo format: {source!r}")
+    if len(parts) == 2:
         return raw, None
     if len(parts) != 3:
         raise ValueError(
@@ -1900,9 +1902,12 @@ class InferenceRuntime:
                     break
             ref_latent = torch.cat(latent_pieces, dim=1)
             if len(latent_paths) > 1:
+                skipped_clip_count = len(latent_paths) - len(latent_pieces)
                 messages.append(
                     f"info: concatenated {len(latent_pieces)}/{len(latent_paths)} reference latents "
-                    f"in input order ({ref_latent.shape[1]} steps before max-length trimming)."
+                    "in input order "
+                    f"({skipped_clip_count} skipped after reaching the reference limit; "
+                    f"{ref_latent.shape[1]} steps before max-length trimming)."
                 )
         else:
             if req.ref_normalize_db is not None:
@@ -1954,10 +1959,12 @@ class InferenceRuntime:
                     break
             ref_latent = torch.cat(latent_pieces, dim=1)
             if len(wav_paths) > 1:
+                skipped_clip_count = len(wav_paths) - len(latent_pieces)
                 messages.append(
                     f"info: encoded and concatenated {len(latent_pieces)}/{len(wav_paths)} "
                     "reference waveforms in input order "
-                    f"({ref_latent.shape[1]} latent steps before max-length trimming)."
+                    f"({skipped_clip_count} skipped after reaching the reference limit; "
+                    f"{ref_latent.shape[1]} latent steps before max-length trimming)."
                 )
 
         if max_ref_latent_steps is not None and ref_latent.shape[1] > max_ref_latent_steps:
