@@ -510,7 +510,9 @@ def main() -> None:
     else:
         # WaveEx が無効な要求では、効果のない非既定オプションを利用者へ知らせる
         waveex_overrides = {
-            "--waveex-ode-steps": args.waveex_ode_steps,
+            "--waveex-ode-steps": (
+                args.waveex_ode_steps if args.waveex_ode_steps not in {None, "auto"} else None
+            ),
             "--waveex-wavelet": args.waveex_wavelet if args.waveex_wavelet != "haar" else None,
             "--waveex-taylor-order": (
                 args.waveex_taylor_order if args.waveex_taylor_order != 1 else None
