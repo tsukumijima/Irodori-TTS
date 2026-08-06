@@ -119,6 +119,7 @@ def _extract_inference_values(raw: dict[str, Any]) -> dict[str, int | float]:
         value = raw[key]
         if value is None:
             continue
+        # 整数設定は bool を含まない正の整数だけを受理する
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"Inference config key '{key}' must be a positive integer.")
         inference_cfg[key] = int(value)
@@ -128,6 +129,7 @@ def _extract_inference_values(raw: dict[str, Any]) -> dict[str, int | float]:
         value = raw[key]
         if value is None:
             continue
+        # 小数設定は正の有限値へ正規化できる整数または小数を受理する
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"Inference config key '{key}' must be a positive finite number.")
         value_float = float(value)
@@ -508,6 +510,10 @@ def _condition_encoder_compatibility_mismatches(
     ]
     if base_cfg.use_pretrained_text_encoder != resolved_model_cfg.use_pretrained_text_encoder:
         mismatches.append("use_pretrained_text_encoder")
+
+    # caption 付き base を無効な adapter へ結合すると、base の条件重みを解釈できない
+    if base_cfg.use_caption_condition and resolved_model_cfg.use_caption_condition is False:
+        mismatches.append("caption_condition_disabled")
 
     # caption が両方に存在するときだけ、学習済み重みを解釈する入力契約を比較する
     ## caption 追加を許す既存の upgrade 経路は、この比較から除外する

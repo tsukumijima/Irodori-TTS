@@ -52,3 +52,16 @@ def test_caption_compatibility_allows_caption_upgrade() -> None:
     mismatches = _condition_encoder_compatibility_mismatches(base_cfg, adapter_cfg)
 
     assert not any(field.startswith("caption_") for field in mismatches)
+
+
+def test_caption_compatibility_rejects_caption_downgrade() -> None:
+    """
+    caption 付き base の重みを caption 無効の adapter と結合しない。
+    """
+
+    base_cfg = ModelConfig(use_caption_condition=True)
+    adapter_cfg = ModelConfig(use_caption_condition=False)
+
+    mismatches = _condition_encoder_compatibility_mismatches(base_cfg, adapter_cfg)
+
+    assert any(field.startswith("caption_") for field in mismatches)
