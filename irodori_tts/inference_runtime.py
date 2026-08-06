@@ -2619,15 +2619,23 @@ class InferenceRuntime:
                     model=self.model,
                     text_input_ids=text_ids,
                     text_mask=text_mask,
-                    ref_latent=ref_latent,
-                    ref_mask=ref_mask,
+                    ref_latent=None if encoded_conditions is not None else ref_latent,
+                    ref_mask=None if encoded_conditions is not None else ref_mask,
                     sequence_length=sampling_patched_steps,
-                    caption_input_ids=caption_ids,
-                    caption_mask=caption_mask,
-                    speaker_state_override=speaker_state_override,
-                    speaker_mask_override=speaker_mask_override,
-                    caption_state_override=caption_state_override,
-                    caption_mask_override=caption_mask_override,
+                    caption_input_ids=None if encoded_conditions is not None else caption_ids,
+                    caption_mask=None if encoded_conditions is not None else caption_mask,
+                    speaker_state_override=(
+                        None if encoded_conditions is not None else speaker_state_override
+                    ),
+                    speaker_mask_override=(
+                        None if encoded_conditions is not None else speaker_mask_override
+                    ),
+                    caption_state_override=(
+                        None if encoded_conditions is not None else caption_state_override
+                    ),
+                    caption_mask_override=(
+                        None if encoded_conditions is not None else caption_mask_override
+                    ),
                     speaker_uncond_mode=req.speaker_uncond_mode,
                     num_steps=int(req.num_steps),
                     cfg_scale_text=cfg_scale_text,

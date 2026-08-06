@@ -1784,8 +1784,8 @@ class TextToLatentRFDiT(nn.Module):
                 uncond_mask,
                 batch_size=speaker_state.shape[0],
                 condition_dim=self.cfg.speaker_dim,
-                state_name="speaker_state",
-                mask_name="speaker_mask",
+                state_name="speaker_uncond_state",
+                mask_name="speaker_uncond_mask",
             )
             uncond_state = uncond_state.to(device=speaker_state.device, dtype=speaker_state.dtype)
             uncond_mask = uncond_mask.to(device=speaker_state.device, dtype=torch.bool)
