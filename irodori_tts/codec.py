@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from .audiotools_loudness import AudioToolsLoudness
 
 _CODEC_DEFAULT = object()
 DACVAE_LATENT_FRAMES_PER_SECOND = 25
+_RESAMPLER_CACHE_MAX_ENTRIES = 32
 
 
 def patchify_latent(latent: torch.Tensor, patch_size: int) -> torch.Tensor:
@@ -49,12 +51,13 @@ class DACVAECodec:
     deterministic_encode: bool
     deterministic_decode: bool
     normalize_db: float | None
-    _resamplers: dict[tuple[int, torch.device, torch.dtype], torchaudio.transforms.Resample] = (
-        field(
-            default_factory=dict,
-            init=False,
-            repr=False,
-        )
+    _resamplers: OrderedDict[
+        tuple[int, torch.device, torch.dtype],
+        torchaudio.transforms.Resample,
+    ] = field(
+        default_factory=OrderedDict,
+        init=False,
+        repr=False,
     )
 
     @classmethod
@@ -234,6 +237,10 @@ class DACVAECodec:
                     dtype=waveform.dtype,
                 ).to(device=waveform.device)
                 self._resamplers[resampler_key] = resampler
+                if len(self._resamplers) > _RESAMPLER_CACHE_MAX_ENTRIES:
+                    self._resamplers.popitem(last=False)
+            else:
+                self._resamplers.move_to_end(resampler_key)
             waveform = resampler(waveform)
 
         if normalize_db is _CODEC_DEFAULT:

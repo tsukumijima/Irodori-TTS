@@ -157,7 +157,13 @@ def _build_dwt_matrix(
     """
     if T < 2 or T % 2 != 0:
         raise ValueError(f"DWT matrix requires even T>=2, got T={T}.")
-    cache_key = (str(wavelet).lower(), int(T), str(device), str(dtype))
+    device_index = device.index
+    if device_index is None and device.type == "cuda":
+        device_index = torch.cuda.current_device()
+    elif device_index is None and device.type == "xpu":
+        device_index = torch.xpu.current_device()
+    canonical_device = f"{device.type}:{device_index}" if device_index is not None else device.type
+    cache_key = (str(wavelet).lower(), int(T), canonical_device, str(dtype))
     # LRU の参照順更新を含むため、読み取りも排他区間へ含める
     with _DWT_MATRIX_CACHE_LOCK:
         cached = _DWT_MATRIX_CACHE.get(cache_key)
