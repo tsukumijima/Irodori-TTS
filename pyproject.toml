@@ -13,11 +13,15 @@ dependencies = [
     "safetensors>=0.7.0",
     "soundfile>=0.12.0",
     "sentencepiece>=0.1.99,<0.2",
-    "torch>=2.12.1,<2.13.0",
-    "torchaudio>=2.11.0,<2.12.0",
-    "torchcodec>=0.15.0,<0.16.0",
     "tqdm>=4.67.3",
     "transformers>=5.12.1,<6",
+    # PyTorch 関連
+    "torch>=2.12.1,<2.13.0",
+    # torchaudio は最終リリースである 2.11.x に固定する
+    "torchaudio>=2.11.0,<2.12.0",
+    # torchcodec は PyTorch 2.12.x と互換性のある最新バージョンに固定する
+    # このフォークでは torchaudio.load/save() から torchcodec を直接呼ぶ形に移行している
+    "torchcodec>=0.16.0,<0.17.0",
 ]
 
 # 単体利用時の依存関係グループ
