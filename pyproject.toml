@@ -34,8 +34,8 @@ dev = [
     "silentcipher @ git+https://github.com/SesameAILabs/silentcipher.git@d46d7d0893a583d8968ab3a6626e2289faec9152",
     "taskipy>=1.14.0,<2.0.0",
     "torchao>=0.17.0,<0.18.0",
-    "wandb>=0.17.0",
     "torchdata>=0.11.0",
+    "wandb>=0.17.0",
 ]
 
 [tool.taskipy.tasks]
@@ -50,7 +50,6 @@ build-backend = "uv_build"
 
 [tool.uv]
 default-groups = ["dev"]
-exclude-newer = "2026-08-03T00:00:00Z"
 
 [tool.uv.build-backend]
 # ルートに irodori_tts パッケージがあるため module-root を空にする
@@ -76,10 +75,10 @@ dacvae = { git = "https://github.com/tsukumijima/dacvae", rev = "d165f907b9cf91d
 torch = [
     { index = "pytorch-cu130", marker = "(sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')" },
 ]
-torchcodec = [
+torchaudio = [
     { index = "pytorch-cu130", marker = "(sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')" },
 ]
-torchaudio = [
+torchcodec = [
     { index = "pytorch-cu130", marker = "(sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')" },
 ]
 
@@ -136,11 +135,14 @@ pythonPlatform = "All"
 include = [
     "irodori_tts/",
     "tests/",
-    "infer.py",
+    "convert_checkpoint_to_safetensors.py",
     "gradio_app.py",
     "gradio_app_voicedesign.py",
+    "infer.py",
     "prepare_manifest.py",
     "prepare_speaker_inversion_base.py",
+    "quantize_checkpoint.py",
+    "train.py",
 ]
 # 除外するパス
 exclude = [
