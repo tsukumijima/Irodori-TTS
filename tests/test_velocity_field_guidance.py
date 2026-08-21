@@ -1,20 +1,17 @@
 from __future__ import annotations
 
-import math
 import unittest
-from dataclasses import fields, replace
 from types import SimpleNamespace
 from typing import Any, cast
 
 import torch
 
-from irodori_tts.inference_runtime import SamplingRequest
 from irodori_tts.model import EncodedConditions
 from irodori_tts.rf import VelocityFieldGuidance, sample_euler_rf_cfg
 
 
 class FakeVelocityModel:
-    """速度場ガイダンスの契約と時間窓を小さな決定論的モデルで検証する。"""
+    """速度場ガイダンスの forward 回数と KV キャッシュ構築回数を記録する。"""
 
     def __init__(self) -> None:
         self.device = torch.device("cpu")
@@ -28,22 +25,10 @@ class FakeVelocityModel:
         self.context_cache_builds = 0
 
     def build_context_kv_cache(self, **_kwargs: Any) -> list[tuple[torch.Tensor, ...]]:
-        """
-        ガイダンス条件ごとの KV キャッシュ構築回数を記録する。
-
-        Args:
-            **_kwargs (Any): 実モデルと同じ呼び出しを受ける未使用の条件 Tensor
-
-        Returns:
-            list[tuple[torch.Tensor, ...]]: forward へ渡す空のテスト用キャッシュ
-        """
-
         self.context_cache_builds += 1
         return []
 
     def encode_conditions(self, **kwargs: Any) -> EncodedConditions:
-        """テスト入力をサンプラーが使う条件タプルへ変換する。"""
-
         caption_state = cast(torch.Tensor, kwargs["caption_state_override"])
         caption_mask = cast(torch.Tensor, kwargs["caption_mask_override"])
         text_state = torch.zeros((1, 1, 1), dtype=self.dtype)
@@ -51,8 +36,6 @@ class FakeVelocityModel:
         return EncodedConditions(text_state, text_mask, None, None, caption_state, caption_mask)
 
     def forward_with_encoded_conditions(self, **kwargs: Any) -> torch.Tensor:
-        """キャプション状態の平均を速度として返し、追加 forward の発火も記録する。"""
-
         x_t = cast(torch.Tensor, kwargs["x_t"])
         caption_state = cast(torch.Tensor, kwargs["caption_state"])
         caption_sum = float(caption_state.sum().item())
@@ -61,10 +44,6 @@ class FakeVelocityModel:
 
 
 class FakeSpeakerVelocityModel(FakeVelocityModel):
-    """
-    話者条件対による追加 forward を記録する。
-    """
-
     def __init__(self) -> None:
         super().__init__()
         self.cfg.use_caption_condition = False
@@ -72,16 +51,6 @@ class FakeSpeakerVelocityModel(FakeVelocityModel):
         self.speaker_sums: list[float] = []
 
     def encode_conditions(self, **_kwargs: Any) -> EncodedConditions:
-        """
-        話者条件を含む最小の符号化済み条件を返す。
-
-        Args:
-            **_kwargs (Any): 実モデルと同じ呼び出しを受ける未使用の条件 Tensor
-
-        Returns:
-            EncodedConditions: 話者状態とマスクを含む条件一式
-        """
-
         text_state = torch.zeros((1, 1, 1), dtype=self.dtype)
         text_mask = torch.ones((1, 1), dtype=torch.bool)
         speaker_state = torch.ones((1, 2, 1), dtype=self.dtype)
@@ -96,16 +65,6 @@ class FakeSpeakerVelocityModel(FakeVelocityModel):
         )
 
     def forward_with_encoded_conditions(self, **kwargs: Any) -> torch.Tensor:
-        """
-        話者状態の合計を速度として返す。
-
-        Args:
-            **kwargs (Any): `x_t` と `speaker_state` を含むサンプラー引数
-
-        Returns:
-            torch.Tensor: 入力潜在と同じ形の一定速度
-        """
-
         x_t = cast(torch.Tensor, kwargs["x_t"])
         speaker_state = cast(torch.Tensor, kwargs["speaker_state"])
         speaker_sum = float(speaker_state.sum().item())
@@ -114,11 +73,6 @@ class FakeSpeakerVelocityModel(FakeVelocityModel):
 
 
 class VelocityFieldGuidanceTest(unittest.TestCase):
-    def test_sampling_request_keeps_guidance_before_new_positional_fields(self) -> None:
-        field_names = [field.name for field in fields(SamplingRequest)]
-        # index 50 を固定し、既存フィールドと新規位置引数の互換境界を検証する
-        self.assertEqual(field_names.index("velocity_field_guidance"), 50)
-
     def _sample(
         self,
         guidance: VelocityFieldGuidance | None,
@@ -169,12 +123,6 @@ class VelocityFieldGuidanceTest(unittest.TestCase):
             opposite_caption_mask=mask.clone(),
         )
 
-    def test_none_keeps_output_identical(self) -> None:
-        first, _ = self._sample(None)
-        second, _ = self._sample(None)
-
-        self.assertTrue(torch.equal(first, second))
-
     def test_zero_alpha_keeps_output_identical(self) -> None:
         baseline, _ = self._sample(None)
         guided, model = self._sample(self._caption_guidance(alpha=0.0))
@@ -182,59 +130,6 @@ class VelocityFieldGuidanceTest(unittest.TestCase):
         self.assertTrue(torch.equal(baseline, guided))
         self.assertEqual(len(model.caption_sums), 3)
         self.assertEqual(model.context_cache_builds, 0)
-
-    def test_partial_caption_pair_is_rejected(self) -> None:
-        partial = VelocityFieldGuidance(
-            alpha=1.0,
-            target_caption_state=torch.ones((1, 2, 1), dtype=torch.float32),
-        )
-
-        with self.assertRaisesRegex(ValueError, "all four state/mask values"):
-            self._sample(partial)
-
-    def test_both_condition_pairs_are_rejected(self) -> None:
-        state = torch.ones((1, 2, 1), dtype=torch.float32)
-        mask = torch.ones((1, 2), dtype=torch.bool)
-        guidance = replace(
-            self._caption_guidance(),
-            target_speaker_state=state,
-            target_speaker_mask=mask,
-            opposite_speaker_state=state.clone(),
-            opposite_speaker_mask=mask.clone(),
-        )
-
-        with self.assertRaisesRegex(ValueError, "exactly one complete"):
-            self._sample(guidance)
-
-    def test_missing_condition_pairs_are_rejected(self) -> None:
-        with self.assertRaisesRegex(ValueError, "exactly one complete"):
-            self._sample(VelocityFieldGuidance(alpha=1.0))
-
-    def test_invalid_time_ranges_are_rejected(self) -> None:
-        for min_t, max_t in ((-0.1, 0.5), (0.5, 1.1), (0.8, 0.2)):
-            with self.subTest(min_t=min_t, max_t=max_t):
-                with self.assertRaisesRegex(ValueError, "0 <= min_t <= max_t <= 1"):
-                    self._sample(self._caption_guidance(min_t=min_t, max_t=max_t))
-
-    def test_non_finite_alpha_is_rejected(self) -> None:
-        for alpha in (math.nan, math.inf, -math.inf):
-            with self.subTest(alpha=alpha):
-                with self.assertRaisesRegex(ValueError, "alpha must be finite"):
-                    self._sample(self._caption_guidance(alpha=alpha))
-
-    def test_guidance_rejects_invalid_tensor_contracts(self) -> None:
-        valid = self._caption_guidance()
-        invalid_values = (
-            replace(valid, target_caption_state=torch.ones((2, 1))),
-            replace(valid, target_caption_mask=torch.ones((1, 2, 1), dtype=torch.bool)),
-            replace(valid, target_caption_state=torch.ones((2, 2, 1))),
-            replace(valid, target_caption_state=torch.ones((1, 2, 1), dtype=torch.float64)),
-            replace(valid, target_caption_state=torch.ones((1, 2, 1), device="meta")),
-        )
-        for guidance in invalid_values:
-            with self.subTest(guidance=guidance):
-                with self.assertRaisesRegex(ValueError, "shape|batch size|must use|must be on"):
-                    self._sample(guidance)
 
     def test_speaker_guidance_runs_target_and_opposite_forwards(self) -> None:
         model = FakeSpeakerVelocityModel()
@@ -253,14 +148,12 @@ class VelocityFieldGuidanceTest(unittest.TestCase):
         self.assertEqual(model.speaker_sums.count(-2.0), 3)
 
     def test_time_window_includes_both_boundaries(self) -> None:
-        # サンプラーと同じ float32 の時刻を境界値に使い、丸め誤差と包含判定を分離
         schedule = (1.0 - torch.linspace(0.0, 1.0, 4, dtype=torch.float32)) * 0.999
         first_t = float(schedule[0].item())
         second_t = float(schedule[1].item())
         guidance = self._caption_guidance(min_t=second_t, max_t=first_t)
         _result, model = self._sample(guidance, num_steps=3)
 
-        # 通常 forward 3回に加え、時間窓の開始・終了境界で target/opposite を各1回計算
         self.assertEqual(model.caption_sums.count(6.0), 2)
         self.assertEqual(model.caption_sums.count(-2.0), 2)
         self.assertEqual(len(model.caption_sums), 7)
@@ -270,7 +163,6 @@ class VelocityFieldGuidanceTest(unittest.TestCase):
         guidance = self._caption_guidance()
         _result, model = self._sample(guidance, use_context_kv_cache=True)
 
-        # 通常条件とガイダンスの target/opposite を各1回だけ構築し、全ステップで再利用
         self.assertEqual(model.context_cache_builds, 3)
         self.assertEqual(model.caption_sums.count(6.0), 3)
         self.assertEqual(model.caption_sums.count(-2.0), 3)

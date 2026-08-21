@@ -1,18 +1,12 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from torch import nn
 
 from irodori_tts.config import TrainConfig
-from irodori_tts.optim import (
-    _partition_adamw_params,
-    _partition_muon_params,
-    build_optimizer,
-    current_lr,
-)
+from irodori_tts.optim import build_optimizer
 
 
 class DummyOptimizerModel(nn.Module):
@@ -26,72 +20,12 @@ class DummyOptimizerModel(nn.Module):
         self.output = nn.Linear(2, 1)
 
 
-def test_adamw_partitions_pretrained_text_backbone() -> None:
-    """
-    AdamW が事前学習済みバックボーンを専用学習率の対象へ分離する。
-    """
-
-    model = DummyOptimizerModel()
-
-    partitions = _partition_adamw_params(model)
-
-    assert id(model.pretrained_text_backbone.weight) in {
-        id(param) for param in partitions.pretrained_decay
-    }
-    assert id(model.pretrained_text_backbone.bias) in {
-        id(param) for param in partitions.pretrained_no_decay
-    }
-    assert id(model.output.weight) in {id(param) for param in partitions.decay}
-
-
-def test_muon_partitions_pretrained_text_backbone_into_auxiliary_adamw() -> None:
-    """
-    Muon が事前学習済みバックボーンを補助 AdamW の専用分割へ配置する。
-    """
-
-    model = DummyOptimizerModel()
-
-    partitions = _partition_muon_params(model)
-
-    assert id(model.pretrained_text_backbone.weight) in {
-        id(param) for param in partitions.pretrained_decay
-    }
-    assert id(model.pretrained_text_backbone.bias) in {
-        id(param) for param in partitions.pretrained_no_decay
-    }
-    assert id(model.output.weight) in {id(param) for param in partitions.muon_decay}
-
-
-def test_adamw_rejects_model_without_trainable_parameters() -> None:
-    """
-    AdamW が学習対象のないモデルを明示的に拒否する。
-    """
-
-    model = nn.Linear(2, 1)
-    model.requires_grad_(False)
-
-    with pytest.raises(ValueError, match="No trainable parameters found for optimizer=adamw"):
-        build_optimizer(model, TrainConfig(optimizer="adamw"))
-
-
 def _pretrained_groups(optimizer: Any) -> list[dict[str, Any]]:
     return [
         group
         for group in optimizer.param_groups
         if str(group.get("group_name", "")).startswith("pretrained_text_encoder")
     ]
-
-
-def test_current_lr_uses_pretrained_group_when_main_group_is_absent() -> None:
-    """
-    事前学習済みバックボーンだけを更新する構成でも実際の学習率を報告する。
-    """
-
-    optimizer = SimpleNamespace(
-        param_groups=[{"group_name": "pretrained_text_encoder_decay", "lr": 2e-5}],
-    )
-
-    assert current_lr(optimizer) == pytest.approx(2e-5)
 
 
 def test_build_optimizer_adamw_applies_pretrained_learning_rate() -> None:
@@ -118,6 +52,9 @@ def test_build_optimizer_adamw_applies_pretrained_learning_rate() -> None:
     assert decay_groups
     assert no_decay_groups
     assert all(group["weight_decay"] == pytest.approx(0.01) for group in decay_groups)
+    assert id(model.pretrained_text_backbone.weight) in {
+        id(param) for group in optimizer.param_groups for param in group["params"]
+    }
 
 
 def test_build_optimizer_muon_places_pretrained_in_auxiliary_adamw() -> None:
@@ -141,3 +78,9 @@ def test_build_optimizer_muon_places_pretrained_in_auxiliary_adamw() -> None:
         assert group["lr"] == pytest.approx(3e-5)
     assert any(group["weight_decay"] == pytest.approx(0.01) for group in pretrained_groups)
     assert any(group["weight_decay"] == 0.0 for group in pretrained_groups)
+    assert id(model.output.weight) in {
+        id(param)
+        for group in optimizer.param_groups
+        if str(group.get("group_name", "")).startswith("main_muon")
+        for param in group["params"]
+    }

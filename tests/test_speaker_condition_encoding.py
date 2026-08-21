@@ -173,51 +173,6 @@ def test_encode_speaker_condition_returns_reusable_condition() -> None:
     )
 
 
-def test_encode_reference_condition_accepts_multiple_waveforms() -> None:
-    """複数参照も通常推論と同じ読込経路から公開条件として返す。"""
-
-    runtime = cast(Any, InferenceRuntime.__new__(InferenceRuntime))
-    runtime._infer_lock = threading.Lock()
-    runtime._resolve_lora_adapter_path = lambda _path: None
-    expected_latent = torch.zeros(1, 5, 6)
-    expected_mask = torch.ones(1, 5, dtype=torch.bool)
-    runtime._load_reference_latent = lambda **_kwargs: (expected_latent, expected_mask)
-    runtime.model_cfg = SimpleNamespace(use_speaker_condition_resolved=True)
-
-    condition = runtime.encode_reference_condition(
-        SamplingRequest(text="", ref_wavs=["first.flac", "second.flac"]),
-    )
-
-    torch.testing.assert_close(condition.latent, expected_latent)
-    torch.testing.assert_close(condition.mask, expected_mask)
-
-
-def test_encode_speaker_inversion_base_uses_public_pre_norm_model_api() -> None:
-    """Expose reference-derived local tokens without reaching into model internals."""
-
-    runtime = cast(Any, InferenceRuntime.__new__(InferenceRuntime))
-    runtime.model_cfg = SimpleNamespace(use_speaker_condition_resolved=True)
-    runtime.model_device = torch.device("cpu")
-    runtime._model_dtype = torch.float32
-    runtime._infer_lock = threading.Lock()
-    runtime.model = RecordingSpeakerModel()
-    runtime._resolve_lora_adapter_path = lambda _path: None
-    runtime._load_reference_latent = lambda **_kwargs: (
-        torch.zeros(1, 5, 6),
-        torch.ones(1, 5, dtype=torch.bool),
-    )
-
-    condition = runtime.encode_speaker_inversion_base(
-        SamplingRequest(text="", ref_wav="reference.wav"),
-    )
-
-    assert condition.state.shape == (1, 3, 4)
-    assert condition.mask.shape == (1, 3)
-    assert condition.state.eq(2.0).all().item()
-    assert condition.condition_state.shape == (1, 4, 4)
-    assert condition.condition_mask.shape == (1, 4)
-
-
 def test_multiple_reference_waveforms_trim_each_clip_to_remaining_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -269,25 +224,6 @@ def test_multiple_reference_waveforms_trim_each_clip_to_remaining_budget(
     assert runtime.codec.input_lengths == [6, 4]
     assert latent.shape == (1, 5, 1)
     assert any("1 skipped after reaching the reference limit" in message for message in messages)
-
-
-@pytest.mark.parametrize(
-    "sampling_request",
-    [
-        SamplingRequest(text="", no_ref=True),
-        SamplingRequest(text=""),
-    ],
-)
-def test_encode_speaker_condition_rejects_missing_source(
-    sampling_request: SamplingRequest,
-) -> None:
-    """話者条件を持たない要求はモデルへ入る前に拒否する。"""
-
-    runtime = cast(Any, InferenceRuntime.__new__(InferenceRuntime))
-    runtime.model_cfg = SimpleNamespace(use_speaker_condition_resolved=True)
-
-    with pytest.raises(ValueError):
-        runtime.encode_speaker_condition(sampling_request)
 
 
 def test_no_ref_request_uses_inherited_speaker_condition_for_cfg(

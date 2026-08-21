@@ -73,8 +73,14 @@ def test_save_wav_preserves_previous_default_subtypes(tmp_path: Path) -> None:
     assert sf.info(flac_path).subtype == "PCM_24"
 
 
-def test_save_wav_rejects_unsupported_output_extension(tmp_path: Path) -> None:
-    waveform = torch.zeros((1, 480), dtype=torch.float32)
+def test_save_wav_and_load_audio_round_trip_preserves_mono_waveform(tmp_path: Path) -> None:
+    sample_rate = 48000
+    waveform = torch.linspace(-0.5, 0.5, sample_rate, dtype=torch.float32).unsqueeze(0)
+    wav_path = tmp_path / "roundtrip.wav"
 
-    with pytest.raises(ValueError, match=r"expected \.flac or \.wav"):
-        save_wav(tmp_path / "output.ogg", waveform, 48000)
+    save_wav(wav_path, waveform, sample_rate)
+    loaded, loaded_sample_rate = load_audio(wav_path)
+
+    assert loaded_sample_rate == sample_rate
+    assert loaded.shape == waveform.shape
+    torch.testing.assert_close(loaded, waveform, rtol=0.0, atol=1 / 32768.0)

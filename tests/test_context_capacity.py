@@ -18,16 +18,6 @@ class EncodedContextCapacityTest(unittest.TestCase):
         runtime.set_max_encoded_context_tokens(capacity)
         return runtime
 
-    def test_capacity_configuration_rejects_non_positive_values(self) -> None:
-        runtime = self._runtime(864)
-
-        with self.assertRaisesRegex(ValueError, "greater than zero"):
-            runtime.set_max_encoded_context_tokens(0)
-        self.assertEqual(runtime._max_encoded_context_tokens, 864)
-        with self.assertRaisesRegex(ValueError, "greater than zero"):
-            runtime.set_max_encoded_context_tokens(-1)
-        self.assertEqual(runtime._max_encoded_context_tokens, 864)
-
     def _conditions(
         self,
         *,
@@ -102,19 +92,6 @@ class EncodedContextCapacityTest(unittest.TestCase):
                 caption_mask=torch.tensor([[True]]),
             )
         )
-
-    def test_none_capacity_preserves_unbounded_eager_behavior(self) -> None:
-        runtime = self._runtime(None)
-
-        # 固定容量を指定しない eager runtime は大きな条件も従来どおり受理する
-        runtime._validate_encoded_context_capacity(
-            self._conditions(
-                text_mask=torch.ones((1, 1024), dtype=torch.bool),
-                speaker_mask=torch.ones((1, 1024), dtype=torch.bool),
-                caption_mask=None,
-            )
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

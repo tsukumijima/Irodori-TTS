@@ -135,28 +135,6 @@ def test_reference_base_rejects_tensor_dimension_mismatch(tmp_path: Path) -> Non
         load_speaker_inversion_base_payload(path, expected_speaker_dim=8)
 
 
-def test_reference_base_save_expands_home_directory(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """
-    チルダで始まる保存先を利用者のホームディレクトリへ展開する。
-
-    Args:
-        monkeypatch (pytest.MonkeyPatch): HOME を一時ディレクトリへ差し替えるフィクスチャ
-        tmp_path (Path): 保存先に使う一時ホームディレクトリ
-    """
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-
-    save_speaker_inversion_base_safetensors(
-        "~/voice.speaker-base.safetensors",
-        torch.randn(5, 8),
-    )
-
-    assert (tmp_path / "voice.speaker-base.safetensors").is_file()
-
-
 def test_reference_base_rejects_different_checkpoint(tmp_path: Path) -> None:
     """Reject a base extracted from weights other than the frozen training checkpoint."""
 

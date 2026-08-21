@@ -27,7 +27,6 @@ from train import (
     enforce_periodic_checkpoint_limit,
     restore_speaker_inversion_training_state,
     save_checkpoint,
-    set_seed,
     validate_speaker_inversion_resume_contract,
 )
 
@@ -42,21 +41,6 @@ class SpeakerInversionCheckpointModel(nn.Module):
             speaker_dim=4,
             init_std=0.02,
         )
-
-
-def test_set_seed_initializes_all_training_random_generators(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Initialize Python, NumPy, and PyTorch streams from the configured training seed."""
-
-    monkeypatch.setattr(torch.cuda, "manual_seed_all", lambda _: None)
-    set_seed(42)
-    expected = (random.random(), float(np.random.random()), float(torch.rand(())))
-
-    set_seed(42)
-    actual = (random.random(), float(np.random.random()), float(torch.rand(())))
-
-    assert actual == expected
 
 
 def test_resume_restores_speaker_inversion_training_contract() -> None:

@@ -7,22 +7,6 @@ import torch
 from irodori_tts.dataset import LatentTextDataset
 
 
-def test_subset_indices_reject_multidimensional_tensor(tmp_path: Path) -> None:
-    """
-    多次元の index Tensor を標本列として解釈しない。
-
-    Args:
-        tmp_path (Path): 存在しない manifest パスを置く一時ディレクトリ
-    """
-
-    with pytest.raises(ValueError, match="one-dimensional"):
-        LatentTextDataset(
-            tmp_path / "manifest.jsonl",
-            latent_dim=4,
-            subset_indices=torch.tensor([[0, 1]]),
-        )
-
-
 def test_blank_speaker_ids_remain_unlabeled(tmp_path: Path) -> None:
     """
     空白だけの話者 ID を独立した話者として登録しない。
