@@ -13,7 +13,7 @@ import warnings
 from contextlib import nullcontext
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -684,7 +684,7 @@ def _collect_dataloader_state(
     distributed: bool,
     rank: int,
     world_size: int,
-) -> dict:
+) -> dict[str, Any]:
     local_state = loader.state_dict()
     if not distributed:
         return {
@@ -693,7 +693,7 @@ def _collect_dataloader_state(
             "rank_states": [local_state],
         }
 
-    rank_states: list[dict | None] = [None for _ in range(world_size)]
+    rank_states: list[dict[str, Any] | None] = [None for _ in range(world_size)]
     dist.all_gather_object(rank_states, local_state)
     return {
         "version": 1,
@@ -704,12 +704,12 @@ def _collect_dataloader_state(
 
 
 def _select_dataloader_state_for_rank(
-    payload: dict,
+    payload: dict[str, Any],
     *,
     distributed: bool,
     rank: int,
     world_size: int,
-) -> dict | None:
+) -> dict[str, Any] | None:
     state = payload.get(DATALOADER_STATE_KEY)
     if state is None:
         return None
@@ -816,11 +816,11 @@ def maybe_save_best_val_loss_checkpoint(
     scheduler,
     model_cfg: ModelConfig,
     train_cfg: TrainConfig,
-    base_init: dict | None,
+    base_init: dict[str, Any] | None,
     lora_metadata: dict[str, Any] | None,
-    dataloader_state: dict | None,
-    runtime_state: dict | None,
-    rng_state: dict | None = None,
+    dataloader_state: dict[str, Any] | None,
+    runtime_state: dict[str, Any] | None,
+    rng_state: dict[str, Any] | None = None,
     speaker_inversion_resume_contract: dict[str, Any] | None = None,
 ) -> tuple[list[tuple[float, int, Path]], Path | None]:
     if keep_best_n <= 0:
@@ -948,6 +948,30 @@ def build_caption_tokenizer(
         local_files_only=local_files_only,
         revision=model_cfg.text_encoder_revision,
     )
+
+
+def load_training_tokenizers(
+    model_cfg: ModelConfig,
+    *,
+    local_files_only: bool,
+) -> tuple[PretrainedTextTokenizer, int, PretrainedTextTokenizer | None, int | None]:
+    tokenizer = build_text_tokenizer(model_cfg, local_files_only=local_files_only)
+    text_hidden_size = validate_text_backbone_dim(
+        model_cfg,
+        local_files_only=local_files_only,
+    )
+    caption_tokenizer = None
+    caption_hidden_size = None
+    if model_cfg.use_caption_condition:
+        caption_tokenizer = build_caption_tokenizer(
+            model_cfg,
+            local_files_only=local_files_only,
+        )
+        caption_hidden_size = validate_caption_backbone_dim(
+            model_cfg,
+            local_files_only=local_files_only,
+        )
+    return tokenizer, text_hidden_size, caption_tokenizer, caption_hidden_size
 
 
 def validate_pretrained_backbone_dim(
@@ -1094,7 +1118,7 @@ def initialize_caption_embedding_from_pretrained(
 
 def _load_model_state_from_checkpoint(
     path: Path,
-) -> tuple[dict[str, torch.Tensor], dict | None, dict | None, dict | None]:
+) -> tuple[dict[str, torch.Tensor], dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
     if path.suffix.lower() == ".safetensors":
         from safetensors import safe_open
         from safetensors.torch import load_file as load_safetensors_file
@@ -1156,7 +1180,7 @@ def _load_model_state_from_checkpoint(
 
 def _check_model_config_compatibility(
     checkpoint_path: Path,
-    checkpoint_model_cfg: dict | None,
+    checkpoint_model_cfg: dict[str, Any] | None,
     current_model_cfg: ModelConfig,
     *,
     require_caption_match: bool,
@@ -1348,7 +1372,7 @@ def _check_model_config_compatibility(
 
 
 def checkpoint_uses_caption_condition(
-    checkpoint_model_cfg: dict | None,
+    checkpoint_model_cfg: dict[str, Any] | None,
     state_dict: dict[str, torch.Tensor],
 ) -> bool:
     if checkpoint_model_cfg is not None:
@@ -1369,7 +1393,7 @@ def checkpoint_uses_caption_condition(
 
 
 def checkpoint_uses_duration_predictor(
-    checkpoint_model_cfg: dict | None,
+    checkpoint_model_cfg: dict[str, Any] | None,
     state_dict: dict[str, torch.Tensor],
 ) -> bool:
     if checkpoint_model_cfg is not None:
@@ -1571,7 +1595,7 @@ def validate_checkpoint_upgrade_partial_load(
         )
 
 
-def _load_checkpoint_payload(path: str | Path, *, map_location) -> dict:
+def _load_checkpoint_payload(path: str | Path, *, map_location) -> dict[str, Any]:
     checkpoint_path = Path(path)
     if checkpoint_path.is_dir():
         state_path = checkpoint_path / LORA_TRAINER_STATE_NAME
@@ -1597,10 +1621,10 @@ def _lora_field_cli_explicit(field: str, args: argparse.Namespace, raw_argv: lis
 def _restore_resume_lora_config(
     train_cfg: TrainConfig,
     *,
-    resume_train_cfg: dict | None,
+    resume_train_cfg: dict[str, Any] | None,
     args: argparse.Namespace,
     raw_argv: list[str],
-    exp_cfg: dict,
+    exp_cfg: dict[str, Any],
 ) -> TrainConfig:
     if not isinstance(resume_train_cfg, dict):
         return train_cfg
@@ -1633,7 +1657,7 @@ def _restore_resume_lora_config(
 def _restore_resume_speaker_inversion_config(
     train_cfg: TrainConfig,
     *,
-    resume_train_cfg: dict | None,
+    resume_train_cfg: dict[str, Any] | None,
     raw_argv: list[str],
 ) -> TrainConfig:
     if not isinstance(resume_train_cfg, dict):
@@ -1745,10 +1769,15 @@ def _apply_base_initialization(
     raw_model: torch.nn.Module,
     *,
     model_cfg: ModelConfig,
-    base_init: dict | None,
+    base_init: dict[str, Any] | None,
     distributed: bool,
     is_main_process: bool,
-    preloaded_checkpoint: tuple[dict[str, torch.Tensor], dict | None, dict | None, dict | None]
+    preloaded_checkpoint: tuple[
+        dict[str, torch.Tensor],
+        dict[str, Any] | None,
+        dict[str, Any] | None,
+        dict[str, Any] | None,
+    ]
     | None = None,
 ) -> None:
     mode = None if base_init is None else base_init.get("mode")
@@ -1762,6 +1791,8 @@ def _apply_base_initialization(
         return
 
     if mode == "checkpoint":
+        if base_init is None:
+            raise RuntimeError("base_init is required when mode is 'checkpoint'.")
         checkpoint_path = base_init.get("checkpoint_path")
         if not isinstance(checkpoint_path, str) or not checkpoint_path:
             raise ValueError("LoRA checkpoint metadata is missing base_init.checkpoint_path.")
@@ -1775,6 +1806,7 @@ def _apply_base_initialization(
         checkpoint_has_duration = checkpoint_uses_duration_predictor(init_model_cfg, init_state)
         current_has_duration = bool(model_cfg.use_duration_predictor)
         checkpoint_uses_pretrained_text_encoder = False
+        checkpoint_cfg: ModelConfig | None = None
         if isinstance(init_model_cfg, dict):
             checkpoint_cfg = merge_dataclass_overrides(
                 ModelConfig(),
@@ -1809,6 +1841,8 @@ def _apply_base_initialization(
         require_caption_match = checkpoint_has_caption and current_has_caption
         checkpoint_speaker_patch = None
         if isinstance(init_model_cfg, dict):
+            if checkpoint_cfg is None:
+                raise RuntimeError("Checkpoint model config was not parsed.")
             checkpoint_speaker_patch = checkpoint_cfg.speaker_patch_size
         upgrade_speaker_patch = bool(
             model_cfg.use_speaker_condition_resolved
@@ -1974,14 +2008,14 @@ def reduce_sum(value: torch.Tensor, distributed: bool) -> torch.Tensor:
     return reduced
 
 
-def _move_batch_to_device(batch: dict, device: torch.device) -> dict:
+def _move_batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
     return {
         key: value.to(device, non_blocking=True) if isinstance(value, torch.Tensor) else value
         for key, value in batch.items()
     }
 
 
-def _record_batch_stream(batch: dict, stream: torch.cuda.Stream) -> None:
+def _record_batch_stream(batch: dict[str, Any], stream: torch.cuda.Stream) -> None:
     for value in batch.values():
         if isinstance(value, torch.Tensor):
             value.record_stream(stream)
@@ -2299,7 +2333,7 @@ def split_train_valid_indices(
 def run_validation(
     *,
     model,
-    loader: TorchDataLoader,
+    loader: TorchDataLoader[Any],
     train_cfg: TrainConfig,
     device: torch.device,
     use_bf16: bool,
@@ -2370,13 +2404,22 @@ def run_validation(
                 x_t = rf_interpolate(x0, noise, t)
                 v_target = rf_velocity_target(x0, noise)
 
+            use_speaker: torch.Tensor | None = None
             if model_cfg.use_speaker_condition_resolved:
                 if train_cfg.speaker_inversion_enabled:
                     # Speaker Inversion learns one embedding for this run, so validation
                     # should match training and treat every sample as speaker-conditioned.
                     use_speaker = torch.ones((bsz,), device=device, dtype=torch.bool)
                 else:
+                    if has_speaker is None:
+                        raise RuntimeError(
+                            "Speaker conditioning is enabled but has_speaker batch tensor is missing."
+                        )
                     use_speaker = has_speaker
+                if use_speaker is None:
+                    raise RuntimeError(
+                        "Speaker conditioning is enabled but use_speaker tensor is missing."
+                    )
                 speaker_condition_dropout = ~use_speaker
                 duration_has_speaker = use_speaker
                 duration_features = set_duration_has_speaker_feature(
@@ -2428,6 +2471,14 @@ def run_validation(
                     )
                 else:
                     if model_cfg.use_speaker_condition_resolved:
+                        if use_speaker is None:
+                            raise RuntimeError(
+                                "Speaker conditioning is enabled but use_speaker tensor is missing."
+                            )
+                        if ref_latent is None or ref_mask is None:
+                            raise RuntimeError(
+                                "Speaker conditioning is enabled but reference latent tensors are missing."
+                            )
                         ref_mask = ref_mask & use_speaker[:, None]
                         ref_latent = ref_latent * use_speaker[:, None, None].to(ref_latent.dtype)
                     v_pred = model(
@@ -3553,49 +3604,24 @@ def main() -> None:
             f"W&B enabled: project={train_cfg.wandb_project} mode={train_cfg.wandb_mode} run={wandb_run.name if wandb_run is not None else train_cfg.wandb_run_name}"
         )
 
+    tokenizers: (
+        tuple[PretrainedTextTokenizer, int, PretrainedTextTokenizer | None, int | None] | None
+    ) = None
+
     if distributed:
         local_files_only = not is_main_process
         if is_main_process:
-            tokenizer = build_text_tokenizer(model_cfg, local_files_only=False)
-            text_hidden_size = validate_text_backbone_dim(model_cfg, local_files_only=False)
-            caption_tokenizer = None
-            caption_hidden_size = None
-            if model_cfg.use_caption_condition:
-                caption_tokenizer = build_caption_tokenizer(model_cfg, local_files_only=False)
-                caption_hidden_size = validate_caption_backbone_dim(
-                    model_cfg,
-                    local_files_only=False,
-                )
+            tokenizers = load_training_tokenizers(model_cfg, local_files_only=False)
         dist.barrier()
         if not is_main_process:
-            tokenizer = build_text_tokenizer(model_cfg, local_files_only=local_files_only)
-            text_hidden_size = validate_text_backbone_dim(
-                model_cfg,
-                local_files_only=local_files_only,
-            )
-            caption_tokenizer = None
-            caption_hidden_size = None
-            if model_cfg.use_caption_condition:
-                caption_tokenizer = build_caption_tokenizer(
-                    model_cfg,
-                    local_files_only=local_files_only,
-                )
-                caption_hidden_size = validate_caption_backbone_dim(
-                    model_cfg,
-                    local_files_only=local_files_only,
-                )
+            tokenizers = load_training_tokenizers(model_cfg, local_files_only=local_files_only)
         dist.barrier()
     else:
-        tokenizer = build_text_tokenizer(model_cfg, local_files_only=False)
-        text_hidden_size = validate_text_backbone_dim(model_cfg, local_files_only=False)
-        caption_tokenizer = None
-        caption_hidden_size = None
-        if model_cfg.use_caption_condition:
-            caption_tokenizer = build_caption_tokenizer(model_cfg, local_files_only=False)
-            caption_hidden_size = validate_caption_backbone_dim(
-                model_cfg,
-                local_files_only=False,
-            )
+        tokenizers = load_training_tokenizers(model_cfg, local_files_only=False)
+
+    if tokenizers is None:
+        raise RuntimeError("Training tokenizers were not loaded.")
+    tokenizer, text_hidden_size, caption_tokenizer, caption_hidden_size = tokenizers
     if is_main_process:
         print(
             f"Text tokenizer={model_cfg.text_tokenizer_repo} vocab={tokenizer.vocab_size} add_bos={model_cfg.text_add_bos} padding_side=right "
@@ -3954,7 +3980,7 @@ def main() -> None:
         load_pretrained_backbone_weights=load_pretrained_backbone_weights,
     ).to(device)
     lora_wrapped = False
-    base_init: dict | None = None
+    base_init: dict[str, Any] | None = None
     if args.resume is not None and train_config_uses_lora(train_cfg):
         base_init = resume_base_init
         if args.init_checkpoint is not None:
@@ -4107,13 +4133,13 @@ def main() -> None:
             if model_cfg.use_pretrained_text_encoder:
                 scope += " and the pretrained text encoder (when supported)"
             print(f"Gradient checkpointing enabled on {scope}.")
-    train_model = raw_model
+    train_model: torch.nn.Module = raw_model
     if train_cfg.compile_model:
         if not hasattr(torch, "compile"):
             raise RuntimeError("compile_model=True requires torch.compile (PyTorch 2+).")
         if is_main_process:
             print("torch.compile enabled (dynamic=True).")
-        train_model = torch.compile(raw_model, dynamic=True)
+        train_model = cast(torch.nn.Module, torch.compile(raw_model, dynamic=True))
     ddp_find_unused_parameters = bool(train_cfg.ddp_find_unused_parameters)
     ddp_find_unused_parameters_explicit = args.ddp_find_unused_parameters is not None or (
         isinstance(exp_cfg.get("train"), dict)
@@ -4146,7 +4172,7 @@ def main() -> None:
                         "DDP find_unused_parameters auto-enabled "
                         "(conditional branches may be fully masked in some steps)."
                     )
-        model = DDP(
+        model: torch.nn.Module = DDP(
             train_model,
             device_ids=[local_rank],
             output_device=local_rank,
@@ -4398,12 +4424,17 @@ def main() -> None:
                     speaker_cond_drop = (
                         torch.rand(bsz, device=device) < train_cfg.speaker_condition_dropout
                     )
+                    use_speaker: torch.Tensor
                     if train_cfg.speaker_inversion_enabled:
                         # Speaker Inversion learns one embedding for this run, so all samples are
                         # speaker-conditioned even when the manifest has no speaker_id.
                         use_speaker = ~speaker_cond_drop
                         speaker_drop_for_model = speaker_cond_drop
                     else:
+                        if has_speaker is None:
+                            raise RuntimeError(
+                                "Speaker conditioning is enabled but has_speaker batch tensor is missing."
+                            )
                         use_speaker = has_speaker & (~speaker_cond_drop)
                         speaker_drop_for_model = ~use_speaker
                     duration_speaker_drop = (
@@ -4421,11 +4452,19 @@ def main() -> None:
                         not raw_model.cfg.use_duration_predictor
                         and not train_cfg.speaker_inversion_enabled
                     ):
+                        if ref_latent is None or ref_mask is None:
+                            raise RuntimeError(
+                                "Speaker conditioning is enabled but reference latent tensors are missing."
+                            )
                         ref_mask = ref_mask & use_speaker[:, None]
                         ref_latent = ref_latent * use_speaker[:, None, None].to(ref_latent.dtype)
 
                 should_step = (accum_micro_steps % accum_steps) == 0
-                sync_context = model.no_sync() if distributed and not should_step else nullcontext()
+                if distributed and not should_step:
+                    assert isinstance(model, DDP)
+                    sync_context = model.no_sync()
+                else:
+                    sync_context = nullcontext()
                 with sync_context:
                     with (
                         torch.autocast(device_type="cuda", dtype=torch.bfloat16)

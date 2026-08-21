@@ -354,7 +354,7 @@ def _initialize_caption_embedding_from_pretrained(
 
 
 def _checkpoint_uses_caption_condition(
-    checkpoint_model_cfg: dict | None,
+    checkpoint_model_cfg: dict[str, Any] | None,
     state_dict: dict[str, torch.Tensor],
 ) -> bool:
     if checkpoint_model_cfg is not None:
@@ -375,7 +375,7 @@ def _checkpoint_uses_caption_condition(
 
 
 def _checkpoint_uses_duration_predictor(
-    checkpoint_model_cfg: dict | None,
+    checkpoint_model_cfg: dict[str, Any] | None,
     state_dict: dict[str, torch.Tensor],
 ) -> bool:
     if checkpoint_model_cfg is not None:
