@@ -19,8 +19,7 @@ dependencies = [
     "torch>=2.12.1,<2.13.0",
     # torchaudio は最終リリースである 2.11.x に固定する
     "torchaudio>=2.11.0,<2.12.0",
-    # torchcodec は PyTorch 2.12.x と互換性のある最新バージョンに固定する
-    # このフォークでは torchaudio.load/save() から torchcodec を直接呼ぶ形に移行している
+    # torchcodec は PyTorch 2.12.x と互換性のある最新バージョンに固定する (torchaudio.load/save() が内部的に依存)
     "torchcodec>=0.16.0,<0.17.0",
 ]
 
@@ -75,6 +74,7 @@ source-exclude = [
 
 [tool.uv.sources]
 dacvae = { git = "https://github.com/tsukumijima/dacvae", rev = "d165f907b9cf91d9e05a744f2a5adceaa815b039" }
+# torch / torchaudio / torchcodec のソース指定
 # Windows x64・Linux x64: CUDA 13.0 版 / macOS・その他: PyPI から CPU 版
 torch = [
     { index = "pytorch-cu130", marker = "(sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')" },

@@ -446,14 +446,12 @@ def _maybe_compile_inference_model(
         return model
     if not hasattr(torch, "compile"):
         raise RuntimeError("compile_model=True requires torch.compile (PyTorch 2+).")
-    model.encode_conditions = torch.compile(model.encode_conditions, dynamic=bool(dynamic))
-    model.build_context_kv_cache = torch.compile(
-        model.build_context_kv_cache,
-        dynamic=bool(dynamic),
-    )
+    compile_kwargs = {"dynamic": bool(dynamic)}
+    model.encode_conditions = torch.compile(model.encode_conditions, **compile_kwargs)
+    model.build_context_kv_cache = torch.compile(model.build_context_kv_cache, **compile_kwargs)
     model.forward_with_encoded_conditions = torch.compile(
         model.forward_with_encoded_conditions,
-        dynamic=bool(dynamic),
+        **compile_kwargs,
     )
     return model
 
@@ -2857,17 +2855,6 @@ def clear_cached_runtime() -> None:
 
 
 def load_audio(path: str | Path) -> tuple[torch.Tensor, int]:
-    """
-    音声を元のサンプリング周波数で推論用のチャンネル先頭波形へデコードする。
-
-    Args:
-        path (str | Path): 読み込む音声ファイル
-
-    Returns:
-        tuple[torch.Tensor, int]: `(channel, frame)` 波形とサンプリング周波数
-    """
-
-    # 学習時のファイル入力と同じ TorchCodec 経路を共有する
     return DACVAECodec.load_audio(path)
 
 

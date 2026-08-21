@@ -32,7 +32,6 @@ class GradioUploadValue:
         (None, None),
         (" ", None),
         ({"path": " ", "name": ""}, None),
-        (object(), None),
     ],
 )
 def test_coerce_gradio_file_path_accepts_supported_upload_values(
@@ -48,6 +47,14 @@ def test_coerce_gradio_file_path_accepts_supported_upload_values(
     """
 
     assert GradioReferenceFiles.coerce_file_path(value) == expected
+
+
+def test_coerce_gradio_file_path_falls_back_to_str_for_unknown_values() -> None:
+    """
+    upstream と同様、path/name を持たない未知型は str() へフォールバックする。
+    """
+
+    assert GradioReferenceFiles.coerce_file_path(object()) is not None
 
 
 def test_resolve_gradio_reference_wavs_preserves_order() -> None:

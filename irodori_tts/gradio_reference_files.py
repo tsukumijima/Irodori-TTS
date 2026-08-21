@@ -86,4 +86,5 @@ class GradioReferenceFiles:
                 text = str(candidate).strip()
                 if text:
                     return text
-        return None
+        text = str(value).strip()
+        return text or None

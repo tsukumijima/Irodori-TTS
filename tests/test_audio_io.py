@@ -33,7 +33,7 @@ def test_load_audio_preserves_channel_first_float32_contract(tmp_path: Path) -> 
 
 def test_load_audio_decodes_m4a_without_changing_sample_rate(tmp_path: Path) -> None:
     """
-    TorchCodec が M4A を元のサンプリング周波数でデコードする。
+    torchaudio.load() 経由で M4A をデコードできる。
 
     Args:
         tmp_path (Path): 入出力音声を作成する一時ディレクトリ

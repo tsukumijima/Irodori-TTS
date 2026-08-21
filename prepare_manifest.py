@@ -180,14 +180,7 @@ class _PreparedItem:
     error: str | None = None
 
 
-@dataclass(frozen=True)
-class _EndMarker:
-    """
-    prefetch キューの終端を型で識別する。
-    """
-
-
-_END = _EndMarker()
+_END = object()
 
 
 def _prepare_example(
@@ -266,8 +259,8 @@ def _prepare_example(
 def _start_prefetch(
     iterator: Iterable[_PreparedItem | tuple[int, dict[str, Any]]],
     args: argparse.Namespace,
-) -> tuple[Queue[_PreparedItem | _EndMarker], Event, Thread]:
-    queue: Queue[_PreparedItem | _EndMarker] = Queue(maxsize=max(1, args.prefetch))
+) -> tuple[Queue[_PreparedItem | object], Event, Thread]:
+    queue: Queue[_PreparedItem | object] = Queue(maxsize=max(1, args.prefetch))
     stop_event = Event()
     worker_count = max(1, int(getattr(args, "prefetch_workers", 1)))
     if worker_count == 1:
@@ -298,7 +291,7 @@ def _start_prefetch(
         thread.start()
         return queue, stop_event, thread
 
-    raw_queue: Queue[tuple[int, dict[str, Any]] | _EndMarker] = Queue(
+    raw_queue: Queue[tuple[int, dict[str, Any]] | object] = Queue(
         maxsize=max(1, args.prefetch * worker_count)
     )
 
@@ -327,7 +320,7 @@ def _start_prefetch(
     def _worker() -> None:
         while True:
             item = raw_queue.get()
-            if isinstance(item, _EndMarker):
+            if item is _END:
                 break
             idx, sample = item
             if stop_event.is_set():
@@ -529,7 +522,6 @@ def _run_worker(
                 f"speaker column(s) not found: {missing_speaker_columns}; available={ds.column_names}"
             )
 
-    # upstream の契約どおり、明示指定された場合だけデコード時に変換する
     if args.target_sample_rate is not None:
         ds = ds.cast_column(args.audio_column, Audio(sampling_rate=args.target_sample_rate))
     else:
@@ -689,7 +681,7 @@ def _run_worker(
                 end_needed = max(1, int(getattr(args, "prefetch_workers", 1)))
                 while True:
                     queued = queue.get()
-                    if isinstance(queued, _EndMarker):
+                    if queued is _END:
                         end_needed -= 1
                         if end_needed <= 0:
                             break

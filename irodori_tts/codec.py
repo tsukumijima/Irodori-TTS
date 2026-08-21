@@ -8,7 +8,6 @@ from pathlib import Path
 import torch
 import torchaudio
 from huggingface_hub import hf_hub_download
-from torchcodec.decoders import AudioDecoder
 
 from .audiotools_loudness import AudioToolsLoudness
 
@@ -149,7 +148,7 @@ class DACVAECodec:
         wm_model.random_message = _fixed_message
 
     @staticmethod
-    def _measure_loudness(wav: torch.Tensor, sample_rate: int) -> torch.Tensor:
+    def measure_loudness(wav: torch.Tensor, sample_rate: int) -> torch.Tensor:
         """
         AudioTools 0.7.2 と同じ統合ラウドネスを CPU で測定する。
 
@@ -165,21 +164,6 @@ class DACVAECodec:
         """
 
         return AudioToolsLoudness.measure(wav, sample_rate)
-
-    @staticmethod
-    def measure_loudness(wav: torch.Tensor, sample_rate: int) -> torch.Tensor:
-        """
-        ITU-R BS.1770-4 の統合ラウドネスを測定する。
-
-        Args:
-            wav (torch.Tensor): モノラル波形
-            sample_rate (int): サンプリング周波数
-
-        Returns:
-            torch.Tensor: CPU 上の float32 ラウドネス値
-        """
-
-        return DACVAECodec._measure_loudness(wav, sample_rate)
 
     @staticmethod
     def _normalize_loudness(
@@ -227,7 +211,7 @@ class DACVAECodec:
         if waveform.shape[1] != 1:
             waveform = waveform.mean(dim=1, keepdim=True)
         if sample_rate != self.sample_rate:
-            # TorchAudio のカーネルを再利用し、upstream と同じ変換の固定費だけを省く
+            # Resample オブジェクトを使い回し、functional.resample() のカーネル再構築コストを省く
             resampler_key = (sample_rate, waveform.device, waveform.dtype)
             resampler = self._resamplers.get(resampler_key)
             if resampler is None:
@@ -249,11 +233,11 @@ class DACVAECodec:
             effective_normalize_db = None
         else:
             effective_normalize_db = float(normalize_db)
-        # 音量正規化の有効時は内部でピークも制限するため、無効時だけ追加のピーク制限を使う
-        if effective_normalize_db is None and ensure_max is not None:
-            effective_ensure_max = bool(ensure_max)
-        else:
-            effective_ensure_max = False
+        # audiotools normalization already applies ensure_max_of_audio(), so codec-side
+        # peak scaling is only needed when normalization is disabled.
+        effective_ensure_max = (
+            effective_normalize_db is None and bool(ensure_max) if ensure_max is not None else False
+        )
 
         if effective_normalize_db is not None or effective_ensure_max:
             # 音量測定とピーク制限が必要な波形だけを CPU の float32 へ移す
@@ -312,29 +296,21 @@ class DACVAECodec:
         return self.model.decode(z)
 
     def encode_file(self, path: str | Path) -> torch.Tensor:
-        # TorchCodec へデコードを集約し、WAV・FLAC・M4A で元のサンプルレートを維持する
-        wav, sample_rate = self.load_audio(path)
+        wav, sr = self.load_audio(path)
         wav = wav.unsqueeze(0)  # (1, C, T)
-        return self.encode_waveform(wav, sample_rate).cpu()
+        return self.encode_waveform(wav, sr).cpu()
 
     @staticmethod
     def load_audio(path: str | Path) -> tuple[torch.Tensor, int]:
-        """
-        音声ファイルを元のサンプリング周波数でデコードする。
-
-        Args:
-            path (str | Path): 読み込む音声ファイル
-
-        Returns:
-            tuple[torch.Tensor, int]: `(channel, frame)` の float32 波形とサンプリング周波数
-
-        Raises:
-            RuntimeError: TorchCodec で音声をデコードできない場合
-        """
-
-        # sample_rate=None により、デコーダー内で暗黙のリサンプリングを行わない
         try:
-            samples = AudioDecoder(str(path), sample_rate=None).get_all_samples()
-        except RuntimeError as ex:
-            raise RuntimeError(f"Failed to load reference audio: {path}") from ex
-        return samples.data.to(dtype=torch.float32), int(samples.sample_rate)
+            wav, sr = torchaudio.load(str(path))
+        except RuntimeError:
+            import soundfile as sf
+
+            data, sr = sf.read(str(path), dtype="float32")
+            wav = torch.from_numpy(data)
+            if wav.ndim == 1:
+                wav = wav.unsqueeze(0)
+            else:
+                wav = wav.T
+        return wav, sr
