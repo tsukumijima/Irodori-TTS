@@ -69,9 +69,7 @@ from irodori_tts.rf import (
 from irodori_tts.speaker_inversion import (
     SPEAKER_EMBEDDING_KEY,
     SPEAKER_INVERSION_SAFETENSORS_SUFFIX,
-    SPEAKER_PRE_NORM_EMBEDDING_KEY,
     SpeakerInversionEmbedding,
-    load_speaker_inversion_base_payload,
     load_speaker_inversion_payload,
     save_speaker_inversion_checkpoint,
     speaker_inversion_state_dict,
@@ -121,7 +119,6 @@ SPEAKER_INVERSION_RESUME_MUTABLE_TRAIN_FIELDS = {
     "progress",
     "progress_all_ranks",
     "save_every",
-    "speaker_inversion_base_embedding",
     "speaker_inversion_init_embedding",
     "valid_every",
     "wandb_enabled",
@@ -1667,8 +1664,6 @@ def _restore_resume_speaker_inversion_config(
         "speaker_inversion_enabled",
         "speaker_inversion_tokens",
         "speaker_inversion_init_std",
-        "speaker_inversion_residual_regularization_weight",
-        "speaker_inversion_max_relative_residual_norm",
     )
     updates: dict[str, object] = {}
     for field in fields:
@@ -2801,23 +2796,6 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--speaker-inversion-base-embedding",
-        default=None,
-        help="Reference-derived .speaker-base.safetensors used for residual inversion.",
-    )
-    parser.add_argument(
-        "--speaker-inversion-residual-regularization-weight",
-        type=float,
-        default=None,
-        help="Weight for residual energy relative to the fixed reference-derived base.",
-    )
-    parser.add_argument(
-        "--speaker-inversion-max-relative-residual-norm",
-        type=float,
-        default=None,
-        help="Optional hard limit on residual norm relative to the fixed base norm.",
-    )
-    parser.add_argument(
         "--timestep-stratified",
         action="store_true",
         help="Use stratified logit-normal timestep sampling (Echo-style).",
@@ -3066,25 +3044,6 @@ def main() -> None:
             train_cfg,
             speaker_inversion_init_embedding=args.speaker_inversion_init_embedding,
         )
-    if cli_provided(raw_argv, "--speaker-inversion-base-embedding"):
-        train_cfg = replace(
-            train_cfg,
-            speaker_inversion_base_embedding=args.speaker_inversion_base_embedding,
-        )
-    if cli_provided(raw_argv, "--speaker-inversion-residual-regularization-weight"):
-        train_cfg = replace(
-            train_cfg,
-            speaker_inversion_residual_regularization_weight=(
-                args.speaker_inversion_residual_regularization_weight
-            ),
-        )
-    if cli_provided(raw_argv, "--speaker-inversion-max-relative-residual-norm"):
-        train_cfg = replace(
-            train_cfg,
-            speaker_inversion_max_relative_residual_norm=(
-                args.speaker_inversion_max_relative_residual_norm
-            ),
-        )
     if cli_provided(raw_argv, "--timestep-stratified"):
         train_cfg = replace(train_cfg, timestep_stratified=True)
     if cli_provided(raw_argv, "--max-latent-steps"):
@@ -3291,38 +3250,6 @@ def main() -> None:
             raise ValueError(
                 "speaker_inversion_init_std must be >= 0, "
                 f"got {train_cfg.speaker_inversion_init_std}"
-            )
-        if (
-            train_cfg.speaker_inversion_init_embedding is not None
-            and train_cfg.speaker_inversion_base_embedding is not None
-        ):
-            raise ValueError(
-                "speaker_inversion_init_embedding and speaker_inversion_base_embedding "
-                "cannot be used together."
-            )
-        if train_cfg.speaker_inversion_residual_regularization_weight < 0.0:
-            raise ValueError(
-                "speaker_inversion_residual_regularization_weight must be >= 0, got "
-                f"{train_cfg.speaker_inversion_residual_regularization_weight}"
-            )
-        if (
-            train_cfg.speaker_inversion_max_relative_residual_norm is not None
-            and train_cfg.speaker_inversion_max_relative_residual_norm <= 0.0
-        ):
-            raise ValueError(
-                "speaker_inversion_max_relative_residual_norm must be > 0 when provided, got "
-                f"{train_cfg.speaker_inversion_max_relative_residual_norm}"
-            )
-        if (
-            train_cfg.speaker_inversion_base_embedding is None
-            and (
-                train_cfg.speaker_inversion_residual_regularization_weight > 0.0
-                or train_cfg.speaker_inversion_max_relative_residual_norm is not None
-            )
-            and args.resume is None
-        ):
-            raise ValueError(
-                "Residual regularization and projection require speaker_inversion_base_embedding."
             )
         optimizer_explicit = cli_provided(raw_argv, "--optimizer") or (
             isinstance(exp_cfg.get("train"), dict) and "optimizer" in exp_cfg.get("train", {})
@@ -4051,23 +3978,11 @@ def main() -> None:
     )
     if train_cfg.speaker_inversion_enabled:
         init_embedding = None
-        base_pre_norm_embedding = None
-        resume_module_state: dict[str, torch.Tensor] | None = None
         if args.resume is not None:
             if resume_payload is None:
                 raise RuntimeError("Speaker Inversion resume payload is unavailable.")
-            raw_module_state = resume_payload.get(SPEAKER_INVERSION_MODULE_STATE_KEY)
-            if raw_module_state is not None:
-                if not isinstance(raw_module_state, dict):
-                    raise ValueError("Speaker Inversion module state must be a dictionary.")
-                resume_module_state = raw_module_state
-                saved_base = resume_module_state.get("base_pre_norm_embedding")
-                if isinstance(saved_base, torch.Tensor):
-                    base_pre_norm_embedding = saved_base
-                else:
-                    init_embedding = resume_payload[SPEAKER_EMBEDDING_KEY]
-            else:
-                init_embedding = resume_payload[SPEAKER_EMBEDDING_KEY]
+            # 埋め込みの形状を sidecar に合わせて構築し、学習状態の復元で同じ保存時点へ戻す
+            init_embedding = resume_payload[SPEAKER_EMBEDDING_KEY]
             if is_main_process:
                 print(f"Loaded Speaker Inversion trainer state: {args.resume}")
         elif train_cfg.speaker_inversion_init_embedding is not None:
@@ -4080,25 +3995,10 @@ def main() -> None:
                     "Loaded Speaker Inversion init embedding: "
                     f"{train_cfg.speaker_inversion_init_embedding}"
                 )
-        elif train_cfg.speaker_inversion_base_embedding is not None:
-            base_payload = load_speaker_inversion_base_payload(
-                train_cfg.speaker_inversion_base_embedding,
-                expected_checkpoint=args.init_checkpoint,
-                expected_speaker_dim=model_cfg.speaker_dim,
-                expected_speaker_patch_size=model_cfg.speaker_patch_size,
-            )
-            base_pre_norm_embedding = base_payload[SPEAKER_PRE_NORM_EMBEDDING_KEY]
-            if is_main_process:
-                print(
-                    "Loaded reference-derived Speaker Inversion base: "
-                    f"{train_cfg.speaker_inversion_base_embedding}"
-                )
         speaker_inversion = raw_model.enable_speaker_inversion(
             num_tokens=train_cfg.speaker_inversion_tokens,
             init_std=train_cfg.speaker_inversion_init_std,
             init_embedding=init_embedding,
-            base_pre_norm_embedding=base_pre_norm_embedding,
-            max_relative_residual_norm=(train_cfg.speaker_inversion_max_relative_residual_norm),
         )
         speaker_inversion.to(device)
         if is_main_process:
@@ -4579,20 +4479,6 @@ def main() -> None:
                         loss = duration_loss
                     else:
                         loss = rf_loss + (float(train_cfg.duration_loss_weight) * duration_loss)
-                    speaker_inversion_module = getattr(raw_model, "speaker_inversion", None)
-                    residual_regularization_weight = float(
-                        train_cfg.speaker_inversion_residual_regularization_weight
-                    )
-                    # 重み0のときは計算グラフへ余計なノードを足さない
-                    if (
-                        isinstance(speaker_inversion_module, SpeakerInversionEmbedding)
-                        and speaker_inversion_module.uses_pre_norm_residual
-                        and residual_regularization_weight > 0.0
-                    ):
-                        loss = loss + (
-                            residual_regularization_weight
-                            * speaker_inversion_module.residual_regularization_loss()
-                        )
                     (loss / float(accum_steps)).backward()
                     if pretrained_projector_warmup_active:
                         clear_non_pretrained_projector_grads(raw_model)
@@ -4620,9 +4506,6 @@ def main() -> None:
                 accum_duration_group_totals.zero_()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip_norm)
                 optimizer.step()
-                speaker_inversion_module = getattr(raw_model, "speaker_inversion", None)
-                if isinstance(speaker_inversion_module, SpeakerInversionEmbedding):
-                    speaker_inversion_module.project_residual_()
                 optimizer.zero_grad(set_to_none=True)
                 if scheduler is not None:
                     scheduler.step()
@@ -4668,16 +4551,6 @@ def main() -> None:
                         "rf": rf_loss_value,
                         "lr": lr_value,
                     }
-                    residual_norm_value: float | None = None
-                    speaker_inversion_module = getattr(raw_model, "speaker_inversion", None)
-                    if (
-                        isinstance(speaker_inversion_module, SpeakerInversionEmbedding)
-                        and speaker_inversion_module.uses_pre_norm_residual
-                    ):
-                        residual_norm_value = float(
-                            speaker_inversion_module.relative_residual_norm().detach().cpu()
-                        )
-                        progress_metrics["residual_norm"] = residual_norm_value
                     if pretrained_lr_value is not None:
                         progress_metrics["text_lr"] = pretrained_lr_value
                     if raw_model.cfg.use_duration_predictor:
@@ -4717,8 +4590,6 @@ def main() -> None:
                                 )
                                 if group_suffix:
                                     message += f" {group_suffix}"
-                            if residual_norm_value is not None:
-                                message += f" residual_norm={residual_norm_value:.6f}"
                             progress.write(f"{message} lr={lr_value:.3e}")
                         else:
                             progress.write(
@@ -4733,10 +4604,6 @@ def main() -> None:
                             }
                             if pretrained_lr_value is not None:
                                 metrics["train/pretrained_text_encoder_lr"] = pretrained_lr_value
-                            if residual_norm_value is not None:
-                                metrics["train/speaker_inversion_relative_residual_norm"] = (
-                                    residual_norm_value
-                                )
                             if raw_model.cfg.use_duration_predictor:
                                 metrics["train/duration_loss"] = duration_loss_value
                                 metrics["train/duration_mae_frames"] = duration_mae_frames_value

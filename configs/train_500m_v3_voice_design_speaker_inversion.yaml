@@ -1,25 +1,19 @@
-# Reference-initialized Speaker Inversion training for Irodori-TTS-600M-v3-VoiceDesign.
+# Speaker Inversion training for Irodori-TTS-600M-v3-VoiceDesign.
 # The 500m filename follows the established v3 recipe naming convention.
-#
-# Prepare the fixed 30-second reference base first:
-#   uv run prepare_speaker_inversion_base.py \
-#     --checkpoint path/to/Irodori-TTS-600M-v3-VoiceDesign/model.safetensors \
-#     --ref-wav path/to/reference.wav \
-#     --max-ref-seconds 30 \
-#     --expected-local-tokens 750 \
-#     --output path/to/name.speaker-base.safetensors
 #
 # Usage:
 #   uv run train.py \
 #     --config configs/train_500m_v3_voice_design_speaker_inversion.yaml \
 #     --manifest path/to/manifest.jsonl \
 #     --init-checkpoint path/to/Irodori-TTS-600M-v3-VoiceDesign/model.safetensors \
-#     --speaker-inversion-base-embedding path/to/name.speaker-base.safetensors \
 #     --output-dir outputs/speaker_inversion/name
 #
-# The reference inputs must contain at least 30 seconds of audio. The preparation
-# command truncates them to 30 seconds and verifies the 750 local Speaker Encoder
-# tokens required by this recipe. Export recomputes the mean token for 751 total tokens.
+# The saved embedding can be used with:
+#   uv run infer.py \
+#     --checkpoint path/to/Irodori-TTS-600M-v3-VoiceDesign/model.safetensors \
+#     --ref-embed outputs/speaker_inversion/name/checkpoint_final.speaker.safetensors \
+#     --text "読み上げるテキスト" \
+#     --caption "声質やスタイルの記述"
 
 model:
   latent_dim: 32
@@ -65,12 +59,9 @@ model:
 train:
   train_mode: rf
   speaker_inversion_enabled: true
-  speaker_inversion_tokens: 751
+  speaker_inversion_tokens: 16
   speaker_inversion_init_std: 0.02
   speaker_inversion_init_embedding:
-  speaker_inversion_base_embedding:
-  speaker_inversion_residual_regularization_weight: 0.01
-  speaker_inversion_max_relative_residual_norm: 0.15
   batch_size: 16
   gradient_accumulation_steps: 1
   num_workers: 8
@@ -81,15 +72,13 @@ train:
   gradient_checkpointing: true
   precision: bf16
   optimizer: adamw
-  learning_rate: 0.001
+  learning_rate: 0.01
   weight_decay: 0.0
   adam_beta1: 0.9
   adam_beta2: 0.999
   adam_eps: 0.00000001
-  lr_scheduler: cosine
-  warmup_steps: 50
-  max_steps: 2000
-  min_lr_scale: 0.1
+  lr_scheduler: none
+  max_steps: 3000
   max_text_len: 256
   max_caption_len: 512
   text_condition_dropout: 0.0

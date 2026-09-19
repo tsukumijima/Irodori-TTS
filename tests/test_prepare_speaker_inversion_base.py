@@ -9,7 +9,11 @@ import torch
 from safetensors import safe_open
 
 import prepare_speaker_inversion_base
-from irodori_tts.speaker_inversion import speaker_inversion_checkpoint_sha256
+from irodori_tts.speaker_inversion import (
+    SPEAKER_EMBEDDING_KEY,
+    load_speaker_inversion_payload,
+    speaker_inversion_checkpoint_sha256,
+)
 
 
 class SpeakerInversionBaseRuntime:
@@ -57,6 +61,7 @@ def _run_prepare_command(
     *,
     actual_local_tokens: int,
     expected_local_tokens: int,
+    speaker_output_path: Path | None = None,
 ) -> tuple[Path, Path]:
     """
     一時 checkpoint と参照音声を使って base 作成コマンドを実行する。
@@ -66,6 +71,7 @@ def _run_prepare_command(
         tmp_path (Path): 入出力を置く一時ディレクトリ
         actual_local_tokens (int): 推論ランタイムが返す局所話者 token 数
         expected_local_tokens (int): コマンドへ指定する期待 token 数
+        speaker_output_path (Path | None): 指定した場合に追加で書き出す .speaker.safetensors のパス
 
     Returns:
         tuple[Path, Path]: checkpoint と出力 base のパス
@@ -95,6 +101,11 @@ def _run_prepare_command(
             str(expected_local_tokens),
             "--output",
             str(output_path),
+            *(
+                []
+                if speaker_output_path is None
+                else ["--speaker-output", str(speaker_output_path)]
+            ),
         ],
     )
 
@@ -129,6 +140,72 @@ def test_prepare_command_saves_verified_base(
     assert metadata["speaker_patch_size"] == "4"
     assert "checkpoint" not in metadata
     assert metadata["checkpoint_sha256"] == speaker_inversion_checkpoint_sha256(checkpoint_path)
+
+
+def test_prepare_command_saves_zero_shot_speaker_embedding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    平均 token を先頭に付けた正規化後の話者状態を .speaker.safetensors として保存する。
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): 推論ランタイムとコマンド引数の差し替え
+        tmp_path (Path): 入出力を置く一時ディレクトリ
+    """
+
+    speaker_output_path = tmp_path / "voice.speaker.safetensors"
+    _run_prepare_command(
+        monkeypatch,
+        tmp_path,
+        actual_local_tokens=6,
+        expected_local_tokens=6,
+        speaker_output_path=speaker_output_path,
+    )
+
+    payload = load_speaker_inversion_payload(speaker_output_path)
+    embedding = payload[SPEAKER_EMBEDDING_KEY]
+    assert embedding.shape == (7, 8)
+    torch.testing.assert_close(embedding[0], embedding[1:].mean(dim=0))
+
+
+def test_prepare_command_rejects_speaker_output_suffix_before_loading_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    不正な話者出力名をモデル読込より前に拒否する。
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): コマンド引数とモデル読込を差し替えるフィクスチャ
+        tmp_path (Path): 入力 checkpoint を置く一時ディレクトリ
+    """
+
+    checkpoint_path = tmp_path / "model.safetensors"
+    checkpoint_path.write_bytes(b"checkpoint contents")
+    monkeypatch.setattr(
+        prepare_speaker_inversion_base.InferenceRuntime,
+        "from_key",
+        staticmethod(lambda _key: pytest.fail("runtime must not be loaded")),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prepare_speaker_inversion_base.py",
+            "--checkpoint",
+            str(checkpoint_path),
+            "--ref-wav",
+            str(tmp_path / "reference.wav"),
+            "--output",
+            str(tmp_path / "voice.speaker-base.safetensors"),
+            "--speaker-output",
+            str(tmp_path / "voice.safetensors"),
+        ],
+    )
+
+    with pytest.raises(ValueError, match=r"speaker\.safetensors"):
+        prepare_speaker_inversion_base.main()
 
 
 def test_prepare_command_rejects_unexpected_token_count(

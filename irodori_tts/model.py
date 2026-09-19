@@ -1660,8 +1660,6 @@ class TextToLatentRFDiT(nn.Module):
         num_tokens: int,
         init_std: float,
         init_embedding: torch.Tensor | None = None,
-        base_pre_norm_embedding: torch.Tensor | None = None,
-        max_relative_residual_norm: float | None = None,
     ) -> SpeakerInversionEmbedding:
         if not self.cfg.use_speaker_condition_resolved:
             raise ValueError("Speaker inversion requires model speaker conditioning to be enabled.")
@@ -1670,8 +1668,6 @@ class TextToLatentRFDiT(nn.Module):
             speaker_dim=int(self.cfg.speaker_dim),
             init_std=float(init_std),
             init_embedding=init_embedding,
-            base_pre_norm_embedding=base_pre_norm_embedding,
-            max_relative_residual_norm=max_relative_residual_norm,
         )
         self.speaker_inversion = module
         return module
@@ -2027,25 +2023,11 @@ class TextToLatentRFDiT(nn.Module):
         else:
             speaker_inversion = getattr(self, "speaker_inversion", None)
             if isinstance(speaker_inversion, SpeakerInversionEmbedding):
-                if speaker_inversion.uses_pre_norm_residual:
-                    ref_state, ref_mask = speaker_inversion.pre_norm_state(
-                        batch_size=batch_size,
-                        device=device,
-                        dtype=dtype,
-                    )
-                    ref_state, ref_mask = self.compose_speaker_condition_pre_norm(
-                        state=ref_state,
-                        mask=ref_mask,
-                        batch_size=batch_size,
-                        dtype=dtype,
-                        device=device,
-                    )
-                else:
-                    ref_state, ref_mask = speaker_inversion(
-                        batch_size=batch_size,
-                        device=device,
-                        dtype=dtype,
-                    )
+                ref_state, ref_mask = speaker_inversion(
+                    batch_size=batch_size,
+                    device=device,
+                    dtype=dtype,
+                )
             else:
                 if ref_latent is None or ref_mask is None:
                     raise ValueError(

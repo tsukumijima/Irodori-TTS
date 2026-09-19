@@ -44,28 +44,24 @@ class SpeakerInversionCheckpointModel(nn.Module):
 
 
 def test_resume_restores_speaker_inversion_training_contract() -> None:
-    """Restore token shape and residual constraints from the exact-resume sidecar."""
+    """Restore the token shape and initialization settings from the exact-resume sidecar."""
 
     restored = _restore_resume_speaker_inversion_config(
         TrainConfig(
             speaker_inversion_enabled=True,
             speaker_inversion_tokens=188,
-            speaker_inversion_residual_regularization_weight=0.0,
-            speaker_inversion_max_relative_residual_norm=None,
+            speaker_inversion_init_std=0.5,
         ),
         resume_train_cfg={
             "speaker_inversion_enabled": True,
             "speaker_inversion_tokens": 32,
             "speaker_inversion_init_std": 0.02,
-            "speaker_inversion_residual_regularization_weight": 0.01,
-            "speaker_inversion_max_relative_residual_norm": 0.15,
         },
         raw_argv=["train.py", "--resume", "checkpoint.speaker.trainer.pt"],
     )
 
     assert restored.speaker_inversion_tokens == 32
-    assert restored.speaker_inversion_residual_regularization_weight == 0.01
-    assert restored.speaker_inversion_max_relative_residual_norm == 0.15
+    assert restored.speaker_inversion_init_std == 0.02
 
 
 def test_resume_rejects_changed_speaker_inversion_training_contract() -> None:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Protocol, cast
 
 import torch
 import torch.nn as nn
@@ -39,18 +38,6 @@ def speaker_inversion_checkpoint_sha256(path: str | Path) -> str:
     return hasher.hexdigest()
 
 
-class SpeakerConditionComposer(Protocol):
-    def compose_speaker_condition_pre_norm(
-        self,
-        *,
-        state: torch.Tensor,
-        mask: torch.Tensor,
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor]: ...
-
-
 def normalize_speaker_embedding_tensor(
     tensor: torch.Tensor,
     *,
@@ -76,9 +63,7 @@ def is_speaker_inversion_safetensors_path(path: str | Path) -> bool:
 
 
 class SpeakerInversionEmbedding(nn.Module):
-    """
-    Learned speaker/style tokens that bypass the reference latent speaker encoder.
-    """
+    """Learned speaker/style tokens that bypass the reference latent speaker encoder."""
 
     def __init__(
         self,
@@ -87,8 +72,6 @@ class SpeakerInversionEmbedding(nn.Module):
         speaker_dim: int,
         init_std: float,
         init_embedding: torch.Tensor | None = None,
-        base_pre_norm_embedding: torch.Tensor | None = None,
-        max_relative_residual_norm: float | None = None,
     ) -> None:
         super().__init__()
         num_tokens = int(num_tokens)
@@ -101,39 +84,9 @@ class SpeakerInversionEmbedding(nn.Module):
         if init_std < 0:
             raise ValueError(f"speaker inversion init_std must be >= 0, got {init_std}")
 
-        if init_embedding is not None and base_pre_norm_embedding is not None:
-            raise ValueError("init_embedding and base_pre_norm_embedding cannot be used together.")
-        if max_relative_residual_norm is not None and max_relative_residual_norm <= 0.0:
-            raise ValueError(
-                "max_relative_residual_norm must be > 0 when provided, "
-                f"got {max_relative_residual_norm}"
-            )
-        # 固定 base が無いと相対ノルム制約の比較対象が無く、設定が黙って無効になる
-        if max_relative_residual_norm is not None and base_pre_norm_embedding is None:
-            raise ValueError(
-                "max_relative_residual_norm requires base_pre_norm_embedding; "
-                "without a fixed base the residual constraint has no effect."
-            )
-
-        # Preserve the ordinary reference state and learn only a bounded correction.
-        if base_pre_norm_embedding is not None:
-            base_embedding = normalize_speaker_embedding_tensor(
-                base_pre_norm_embedding,
-                speaker_dim=speaker_dim,
-                field_name=SPEAKER_PRE_NORM_EMBEDDING_KEY,
-            )
-            if int(base_embedding.shape[0]) + 1 != num_tokens:
-                raise ValueError(
-                    "speaker inversion base token mismatch: "
-                    f"expected {num_tokens - 1} content tokens, got {int(base_embedding.shape[0])}"
-                )
-            self.register_buffer("base_pre_norm_embedding", base_embedding)
-            embedding = torch.zeros_like(base_embedding)
-        elif init_embedding is None:
-            self.register_buffer("base_pre_norm_embedding", None)
+        if init_embedding is None:
             embedding = torch.randn(num_tokens, speaker_dim, dtype=torch.float32) * init_std
         else:
-            self.register_buffer("base_pre_norm_embedding", None)
             embedding = normalize_speaker_embedding_tensor(
                 init_embedding,
                 speaker_dim=speaker_dim,
@@ -145,76 +98,14 @@ class SpeakerInversionEmbedding(nn.Module):
                     f"expected {num_tokens}, got {int(embedding.shape[0])}"
                 )
         self.embedding = nn.Parameter(embedding)
-        self.max_relative_residual_norm = (
-            None if max_relative_residual_norm is None else float(max_relative_residual_norm)
-        )
 
     @property
     def num_tokens(self) -> int:
-        if self.base_pre_norm_embedding is not None:
-            return int(self.embedding.shape[0]) + 1
         return int(self.embedding.shape[0])
 
     @property
     def speaker_dim(self) -> int:
         return int(self.embedding.shape[1])
-
-    @property
-    def uses_pre_norm_residual(self) -> bool:
-        return self.base_pre_norm_embedding is not None
-
-    def pre_norm_state(
-        self,
-        *,
-        batch_size: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return the reference-derived pre-normalization state plus its learned residual."""
-
-        base_embedding = self.base_pre_norm_embedding
-        if not isinstance(base_embedding, torch.Tensor):
-            raise RuntimeError("Speaker Inversion does not use a pre-normalization base state.")
-        state = (base_embedding + self.embedding).to(
-            device=device,
-            dtype=dtype,
-        )
-        state = state[None, :, :].expand(int(batch_size), -1, -1)
-        mask = torch.ones(
-            (int(batch_size), state.shape[1]),
-            dtype=torch.bool,
-            device=device,
-        )
-        return state, mask
-
-    def relative_residual_norm(self) -> torch.Tensor:
-        """Return the residual Frobenius norm relative to the fixed base state."""
-
-        base_embedding = self.base_pre_norm_embedding
-        if not isinstance(base_embedding, torch.Tensor):
-            raise RuntimeError("Speaker Inversion does not use a pre-normalization base state.")
-        base_norm = torch.linalg.vector_norm(base_embedding.float()).clamp_min(1e-12)
-        return torch.linalg.vector_norm(self.embedding.float()) / base_norm
-
-    def residual_regularization_loss(self) -> torch.Tensor:
-        """Return residual squared energy normalized by the fixed base energy."""
-
-        base_embedding = self.base_pre_norm_embedding
-        if not isinstance(base_embedding, torch.Tensor):
-            raise RuntimeError("Speaker Inversion does not use a pre-normalization base state.")
-        base_energy = base_embedding.float().square().sum().clamp_min(1e-12)
-        return self.embedding.float().square().sum() / base_energy
-
-    @torch.no_grad()
-    def project_residual_(self) -> None:
-        """Project the learned residual onto the configured relative-norm ball."""
-
-        if self.base_pre_norm_embedding is None or self.max_relative_residual_norm is None:
-            return
-        relative_norm = self.relative_residual_norm()
-        if bool(relative_norm <= self.max_relative_residual_norm):
-            return
-        self.embedding.mul_(self.max_relative_residual_norm / relative_norm)
 
     def forward(
         self,
@@ -223,11 +114,6 @@ class SpeakerInversionEmbedding(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.base_pre_norm_embedding is not None:
-            raise RuntimeError(
-                "Pre-normalization Speaker Inversion must be normalized by the model; "
-                "call pre_norm_state() instead of forward()."
-            )
         state = self.embedding.to(device=device, dtype=dtype)[None, :, :].expand(
             int(batch_size),
             -1,
@@ -350,7 +236,7 @@ def save_speaker_inversion_base_safetensors(
     dtype: torch.dtype = torch.float32,
     metadata: dict[str, str] | None = None,
 ) -> None:
-    """Save a reference-derived pre-normalization state for residual inversion."""
+    """Save reference-derived local speaker tokens taken before speaker normalization."""
 
     target = Path(path).expanduser()
     if not target.name.endswith(SPEAKER_INVERSION_BASE_SAFETENSORS_SUFFIX):
@@ -415,32 +301,13 @@ def speaker_inversion_batch_tensors(
     return state, mask
 
 
-@torch.no_grad()
 def speaker_inversion_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
     module = getattr(model, "speaker_inversion", None)
     if not isinstance(module, SpeakerInversionEmbedding):
         raise ValueError("Model does not have an enabled SpeakerInversionEmbedding module.")
 
-    if module.uses_pre_norm_residual:
-        parameter = next(model.parameters())
-        local_state, local_mask = module.pre_norm_state(
-            batch_size=1,
-            device=parameter.device,
-            dtype=parameter.dtype,
-        )
-        condition_composer = cast(SpeakerConditionComposer, model)
-        state, _ = condition_composer.compose_speaker_condition_pre_norm(
-            state=local_state,
-            mask=local_mask,
-            batch_size=1,
-            dtype=parameter.dtype,
-            device=parameter.device,
-        )
-        embedding = state[0]
-    else:
-        embedding = module.embedding
     return {
-        SPEAKER_EMBEDDING_KEY: embedding.detach().cpu().float().clone(),
+        SPEAKER_EMBEDDING_KEY: module.embedding.detach().cpu().float().clone(),
     }
 
 

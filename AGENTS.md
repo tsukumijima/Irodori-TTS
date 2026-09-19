@@ -67,6 +67,7 @@ AI コーディングエージェント向けに、ブランチ運用とコン�
 - Speaker Inversion の定期保存では、推論用の軽量な `.speaker.safetensors` と、optimizer・scheduler・step・乱数・dataloader の状態を含む学習再開用 sidecar を同時に保存する
 - `--resume` は学習再開用 sidecar から frozen base model と話者埋め込みを復元し、中断前と同じデータ順・乱数状態で残りの step を継続できる状態を維持する
 - warm-start 用の `--speaker-inversion-init-embedding` は新しい最適化として扱い、完全再開の代替として案内しない
+- 話者トークンの学習は upstream と同じ乱数初期化の自由トークンだけを提供する。参照由来の固定基準に制約付きの残差を学習する方式は、乱数初期化の 16 トークンより劣ると確認して撤去済みであり、再導入しない。参照由来のゼロショット埋め込みからの warm-start も同様に劣ったため、推奨手順として案内しない
 
 ## upstream への貢献フロー
 

@@ -455,15 +455,16 @@ embedding tokens. The output is a `.speaker.safetensors` file used at inference 
 
 Use the recipe that matches the frozen base checkpoint: `train_500m_v3_speaker_inversion.yaml` for the caption-free v3 model, `train_500m_v3_voice_design_speaker_inversion.yaml` for v3-VoiceDesign, and `train_v4_small_speaker_inversion.yaml` for v4-Small. The v3 filenames retain the established `500m` recipe prefix even though the released VoiceDesign checkpoint is named Irodori-TTS-600M-v3-VoiceDesign. These model families have different condition encoders and duration-predictor architectures, so their recipes are intentionally separate.
 
-The v3-VoiceDesign and v4-Small reference-initialized recipes start from local pre-normalization Speaker Encoder tokens produced by an ordinary reference. A zero residual therefore exports the normalized local tokens and a recomputed mean token. The v3-VoiceDesign recipe requires at least 30 seconds of reference audio, while the v4-Small recipe requires at least 120 seconds. Pass `--expected-local-tokens 750` when preparing either base so insufficient reference audio fails before training. Both recipes export 751 tokens after prepending the recomputed mean.
+All recipes start from randomly initialized tokens. This fork once trained a constrained residual on top of a fixed reference-derived state, but that design produced worse voices than the randomly initialized 16-token recipe and was removed. Warm-starting the free tokens from a zero-shot reference embedding through `--speaker-inversion-init-embedding` was not better either, so keep the random initialization unless you are continuing an earlier optimization.
 
-Create the fixed base with `prepare_speaker_inversion_base.py` before starting training. Its `--max-ref-seconds` controls the base reference independently of the training manifest. For example, the v4-Small recipe uses `--max-ref-seconds 120` and writes a `.speaker-base.safetensors` file that is passed to `--speaker-inversion-base-embedding`.
+`prepare_speaker_inversion_base.py` extracts the speaker state that an ordinary reference produces without any training. Its `--output` writes a `.speaker-base.safetensors` file with the local Speaker Encoder tokens before speaker normalization, and `--speaker-output` additionally writes the normalized tokens with the prepended mean token as a `.speaker.safetensors` file. That zero-shot embedding works with `--ref-embed` and serves as the untrained baseline when comparing Speaker Inversion checkpoints. `--max-ref-seconds` limits the reference independently of the checkpoint default, and `--expected-local-tokens` rejects references that are shorter than the intended length.
 
 ```bash
 uv run python prepare_speaker_inversion_base.py \
   --checkpoint /path/to/model.safetensors \
   --ref-wav /path/to/reference.wav \
-  --output /path/to/voice.speaker-base.safetensors
+  --output /path/to/voice.speaker-base.safetensors \
+  --speaker-output /path/to/voice.speaker.safetensors
 ```
 
 | `prepare_speaker_inversion_base.py` option | Default | Notes |
@@ -475,6 +476,7 @@ uv run python prepare_speaker_inversion_base.py \
 | `--ref-latent` | — | Single pre-encoded reference latent. |
 | `--ref-latents PATH ...` | — | Pre-encoded reference latents concatenated in the given order. |
 | `--output` | — | Required `.speaker-base.safetensors` output path. |
+| `--speaker-output` | `None` | Optional `.speaker.safetensors` output path for the zero-shot embedding. |
 | `--max-ref-seconds` | Checkpoint setting | Maximum combined reference duration used for this base. |
 | `--expected-local-tokens` | `None` | Rejects references that do not produce the expected local token count. |
 | `--ref-normalize-db` | `-16.0` | Per-clip reference loudness target in dB. |
@@ -492,9 +494,6 @@ Each periodic and final embedding is accompanied by a `.speaker.trainer.pt` side
 | `speaker_inversion_tokens` / `--speaker-inversion-tokens` | `16` | Number of learned speaker embedding tokens. |
 | `speaker_inversion_init_std` / `--speaker-inversion-init-std` | `0.02` | Standard deviation for random initialization of the embedding tokens. |
 | `speaker_inversion_init_embedding` / `--speaker-inversion-init-embedding` | `None` | Path to an existing `.speaker.safetensors` to warm-start a new optimization with fresh optimizer and data-iteration state. Use `--resume` for an exact continuation. |
-| `speaker_inversion_base_embedding` / `--speaker-inversion-base-embedding` | `None` | Path to a `.speaker-base.safetensors` containing fixed pre-normalization local Speaker Encoder tokens. Training starts with a zero residual around this reference-derived state. |
-| `speaker_inversion_residual_regularization_weight` / `--speaker-inversion-residual-regularization-weight` | `0.0` | Weight applied to residual squared energy normalized by the fixed base energy. It requires `speaker_inversion_base_embedding`. |
-| `speaker_inversion_max_relative_residual_norm` / `--speaker-inversion-max-relative-residual-norm` | `None` | Optional hard limit on residual Frobenius norm relative to the fixed base norm. It requires `speaker_inversion_base_embedding`. |
 
 Use `--init-checkpoint` with the base model weights and `--manifest` with audio from the
 target speaker. All condition dropout values should be set to `0.0` so the embedding

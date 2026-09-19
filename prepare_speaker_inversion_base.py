@@ -12,15 +12,22 @@ from irodori_tts.inference_runtime import (
     download_hf_checkpoint,
 )
 from irodori_tts.speaker_inversion import (
+    SPEAKER_EMBEDDING_KEY,
     SPEAKER_INVERSION_BASE_SAFETENSORS_SUFFIX,
+    SPEAKER_INVERSION_SAFETENSORS_SUFFIX,
     save_speaker_inversion_base_safetensors,
+    save_speaker_inversion_safetensors,
     speaker_inversion_checkpoint_sha256,
 )
 
 
 def main() -> None:
     """
-    Extract pre-normalization speaker tokens from an ordinary reference.
+    Extract the speaker tokens that an ordinary reference produces, without any training.
+
+    The base file keeps the local Speaker Encoder tokens before speaker normalization,
+    and the optional speaker file keeps the normalized tokens with the prepended mean token
+    in the same ``.speaker.safetensors`` form that Speaker Inversion training saves.
     """
 
     # Keep checkpoint and reference selection unambiguous because both determine token identity.
@@ -67,6 +74,14 @@ def main() -> None:
         "--output",
         required=True,
         help="Output .speaker-base.safetensors path.",
+    )
+    parser.add_argument(
+        "--speaker-output",
+        default=None,
+        help=(
+            "Optional .speaker.safetensors path that receives the same reference as a "
+            "zero-shot speaker embedding usable with --ref-embed."
+        ),
     )
     parser.add_argument(
         "--max-ref-seconds",
@@ -120,6 +135,16 @@ def main() -> None:
             "Speaker Inversion base output must use the "
             f"{SPEAKER_INVERSION_BASE_SAFETENSORS_SUFFIX!r} suffix: {output_path}"
         )
+    speaker_output_path = (
+        None if args.speaker_output is None else Path(str(args.speaker_output)).expanduser()
+    )
+    if speaker_output_path is not None and not speaker_output_path.name.endswith(
+        SPEAKER_INVERSION_SAFETENSORS_SUFFIX
+    ):
+        raise ValueError(
+            "Speaker Inversion speaker output must use the "
+            f"{SPEAKER_INVERSION_SAFETENSORS_SUFFIX!r} suffix: {speaker_output_path}"
+        )
     if args.expected_local_tokens is not None and int(args.expected_local_tokens) <= 0:
         raise ValueError(
             "--expected-local-tokens must be > 0 when provided, "
@@ -145,7 +170,7 @@ def main() -> None:
             codec_precision=str(args.codec_precision),
         )
     )
-    # Export local tokens before speaker normalization; training recomputes the mean token.
+    # Export local tokens before speaker normalization together with the composed condition.
     condition = runtime.encode_speaker_inversion_base(
         SamplingRequest(
             text="",
@@ -165,7 +190,7 @@ def main() -> None:
             "Reference length produced an unexpected number of local speaker tokens: "
             f"expected {int(args.expected_local_tokens)}, got {int(condition.state.shape[1])}."
         )
-    # Persist only the fixed base because the learned residual belongs to training checkpoints.
+    # The base keeps the pre-normalization tokens so callers can recompose them with the model.
     save_speaker_inversion_base_safetensors(
         output_path,
         condition.state,
@@ -185,6 +210,17 @@ def main() -> None:
         f"local_tokens={condition.state.shape[1]} "
         f"normalized_condition_tokens={condition.condition_state.shape[1]}"
     )
+    # The composed condition already matches what the model consumes, so it can stand in
+    # for a trained embedding as the zero-shot starting point.
+    if speaker_output_path is not None:
+        save_speaker_inversion_safetensors(
+            speaker_output_path,
+            {SPEAKER_EMBEDDING_KEY: condition.condition_state[0].detach().cpu().float().clone()},
+        )
+        print(
+            f"Saved zero-shot speaker embedding: {speaker_output_path} "
+            f"tokens={condition.condition_state.shape[1]}"
+        )
 
 
 if __name__ == "__main__":

@@ -1,19 +1,10 @@
-# Reference-initialized Speaker Inversion training for Irodori-TTS-v4-Small.
-#
-# Prepare the fixed 120-second reference base first:
-#   uv run prepare_speaker_inversion_base.py \
-#     --checkpoint path/to/Irodori-TTS-v4-Small/model.safetensors \
-#     --ref-wavs path/to/reference_1.wav path/to/reference_2.wav \
-#     --max-ref-seconds 120 \
-#     --expected-local-tokens 750 \
-#     --output path/to/name.speaker-base.safetensors
+# Speaker Inversion training for Irodori-TTS-v4-Small.
 #
 # Usage:
 #   uv run train.py \
 #     --config configs/train_v4_small_speaker_inversion.yaml \
 #     --manifest path/to/manifest.jsonl \
 #     --init-checkpoint path/to/Irodori-TTS-v4-Small/model.safetensors \
-#     --speaker-inversion-base-embedding path/to/name.speaker-base.safetensors \
 #     --output-dir outputs/speaker_inversion/name
 #
 # The saved embedding can be used with:
@@ -22,9 +13,6 @@
 #     --ref-embed outputs/speaker_inversion/name/checkpoint_final.speaker.safetensors \
 #     --text "読み上げるテキスト" \
 #     --caption "声質やスタイルの記述"
-#
-# The reference inputs must contain at least 120 seconds of audio. The preparation
-# command truncates them to 120 seconds and verifies the 750 local tokens required here.
 
 model:
   latent_dim: 32
@@ -70,13 +58,9 @@ model:
 train:
   train_mode: rf
   speaker_inversion_enabled: true
-  # The base preparation command must verify 750 local tokens before this recipe is used.
-  speaker_inversion_tokens: 751
+  speaker_inversion_tokens: 16
   speaker_inversion_init_std: 0.02
   speaker_inversion_init_embedding:
-  speaker_inversion_base_embedding:
-  speaker_inversion_residual_regularization_weight: 0.01
-  speaker_inversion_max_relative_residual_norm: 0.15
   batch_size: 16
   gradient_accumulation_steps: 1
   num_workers: 8
@@ -87,15 +71,13 @@ train:
   gradient_checkpointing: true
   precision: bf16
   optimizer: adamw
-  learning_rate: 0.001
+  learning_rate: 0.01
   weight_decay: 0.0
   adam_beta1: 0.9
   adam_beta2: 0.999
   adam_eps: 0.00000001
-  lr_scheduler: cosine
-  warmup_steps: 50
-  max_steps: 2000
-  min_lr_scale: 0.1
+  lr_scheduler: none
+  max_steps: 3000
   max_text_len: 256
   max_caption_len: 512
   text_condition_dropout: 0.0
