@@ -2655,7 +2655,7 @@ def main() -> None:
         ),
     )
     parser.add_argument("--weight-decay", type=float, default=0.01)
-    parser.add_argument("--optimizer", choices=["adamw", "muon"], default="muon")
+    parser.add_argument("--optimizer", choices=["adamw", "radam", "muon"], default="muon")
     parser.add_argument("--adam-beta1", type=float, default=0.9)
     parser.add_argument("--adam-beta2", type=float, default=0.999)
     parser.add_argument("--adam-eps", type=float, default=1e-8)
@@ -3257,7 +3257,7 @@ def main() -> None:
         if str(train_cfg.optimizer).strip().lower() == "muon":
             if optimizer_explicit:
                 raise ValueError(
-                    "speaker_inversion_enabled=True supports optimizer='adamw'. "
+                    "speaker_inversion_enabled=True supports optimizer='adamw' or 'radam'. "
                     "Muon has no compatible matrix parameter when only speaker tokens are trainable."
                 )
             train_cfg = replace(train_cfg, optimizer="adamw")

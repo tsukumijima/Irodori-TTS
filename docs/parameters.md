@@ -307,11 +307,11 @@ The v2 configs use fixed 30-second targets. v4-Small and the variable-length v3 
 | `allow_tf32` / `--tf32` | `False` | Enables TF32 CUDA kernels for speed. |
 | `compile_model` / `--compile-model` | `False` | Enables `torch.compile` during training. |
 | `gradient_checkpointing` / `--gradient-checkpointing` | `False` | Enables activation checkpointing on diffusion blocks and, when supported, a trainable pretrained text encoder. Reduces memory usage at the cost of extra compute. |
-| `optimizer` / `--optimizer` | `muon` | `muon` or `adamw`. |
+| `optimizer` / `--optimizer` | `muon` | `muon`, `adamw`, or `radam`. Speaker Inversion supports `adamw` and `radam`. |
 | `learning_rate` / `--lr` | `1e-4` | Base learning rate. |
-| `pretrained_text_encoder_learning_rate` / `--pretrained-text-encoder-learning-rate` | `1e-5` | AdamW learning rate for a trainable pretrained text/caption backbone. It receives the same scheduler multiplier as the main LR and should be tuned for the selected backbone. |
+| `pretrained_text_encoder_learning_rate` / `--pretrained-text-encoder-learning-rate` | `1e-5` | Learning rate for the dedicated optimizer group of a trainable pretrained text/caption backbone. It receives the same scheduler multiplier as the main LR and should be tuned for the selected backbone. |
 | `weight_decay` / `--weight-decay` | `0.01` | Weight decay for optimizer groups that use it. |
-| `adam_beta1`, `adam_beta2`, `adam_eps` | `0.9`, `0.999`, `1e-8` | AdamW hyperparameters. |
+| `adam_beta1`, `adam_beta2`, `adam_eps` | `0.9`, `0.999`, `1e-8` | AdamW and RAdam hyperparameters. |
 | `muon_momentum` / `--muon-momentum` | `0.95` | Momentum used by Muon. |
 | `lr_scheduler` / `--lr-scheduler` | `none` | `none`, `cosine`, or `wsd`. |
 | `warmup_steps` / `--warmup-steps` | `0` | Number of optimizer steps for LR warmup. |
@@ -322,7 +322,8 @@ The v2 configs use fixed 30-second targets. v4-Small and the variable-length v3 
 The v4-Small and full-training v3 example configs use `optimizer: muon` and
 `lr_scheduler: wsd`.
 When changing effective batch size, revisit the learning rate and warmup length together.
-During full training, all pretrained-backbone parameters use a dedicated AdamW group, including
+RAdam uses the same parameter groups and decoupled weight decay as AdamW, with adaptive learning-rate rectification enabled.
+During full training with Muon, all pretrained-backbone parameters use a dedicated AdamW group, including
 matrix weights that would otherwise be assigned to Muon. The remaining TTS model keeps the
 selected main optimizer. During LoRA training, PEFT freezes base parameters and saves only LoRA
 weights plus explicitly selected `modules_to_save`; LoRA can therefore also be used with a

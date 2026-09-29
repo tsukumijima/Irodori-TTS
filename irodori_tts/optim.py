@@ -248,7 +248,7 @@ def _append_param_group(
 
 def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
     opt_name = cfg.optimizer.lower()
-    if opt_name == "adamw":
+    if opt_name in {"adamw", "radam"}:
         partitions = _partition_adamw_params(model)
         param_groups: list[dict[str, Any]] = []
         _append_param_group(
@@ -280,14 +280,25 @@ def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
             group_name="pretrained_text_encoder_no_decay",
         )
         if not param_groups:
-            raise ValueError("No trainable parameters found for optimizer=adamw.")
-        optimizer = torch.optim.AdamW(
-            param_groups,
-            lr=cfg.learning_rate,
-            weight_decay=0.0,
-            betas=(cfg.adam_beta1, cfg.adam_beta2),
-            eps=cfg.adam_eps,
-        )
+            raise ValueError(f"No trainable parameters found for optimizer={opt_name}.")
+        if opt_name == "radam":
+            # 減衰の対象と適用方法を AdamW に揃え、更新量の補正だけを切り替える
+            optimizer = torch.optim.RAdam(
+                param_groups,
+                lr=cfg.learning_rate,
+                weight_decay=0.0,
+                betas=(cfg.adam_beta1, cfg.adam_beta2),
+                eps=cfg.adam_eps,
+                decoupled_weight_decay=True,
+            )
+        else:
+            optimizer = torch.optim.AdamW(
+                param_groups,
+                lr=cfg.learning_rate,
+                weight_decay=0.0,
+                betas=(cfg.adam_beta1, cfg.adam_beta2),
+                eps=cfg.adam_eps,
+            )
         optimizer_state = cast(Any, optimizer)
         optimizer_state.main_group_index = 0 if partitions.decay or partitions.no_decay else None
         optimizer_state.pretrained_text_encoder_group_index = (
