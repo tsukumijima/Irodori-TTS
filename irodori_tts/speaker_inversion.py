@@ -315,7 +315,10 @@ def save_speaker_inversion_safetensors(
         SPEAKER_EMBEDDING_KEY: normalized[SPEAKER_EMBEDDING_KEY].to(dtype=dtype),
     }
     target.parent.mkdir(parents=True, exist_ok=True)
-    save_safetensors_file(tensors, str(target), metadata={})
+    # 書き込みの途中で学習が止まっても、壊れたファイルを正規の名前で読まれないよう、書き終えてから差し替える
+    temporary_target = target.with_name(f".{target.name}.tmp")
+    save_safetensors_file(tensors, str(temporary_target), metadata={})
+    temporary_target.replace(target)
 
 
 def speaker_inversion_batch_tensors(
