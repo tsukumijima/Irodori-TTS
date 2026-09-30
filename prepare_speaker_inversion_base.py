@@ -6,6 +6,7 @@ from pathlib import Path
 
 from irodori_tts.inference_runtime import (
     InferenceRuntime,
+    InputLimitExceededError,
     RuntimeKey,
     SamplingRequest,
     default_runtime_device,
@@ -189,6 +190,17 @@ def main() -> None:
         raise ValueError(
             "Reference length produced an unexpected number of local speaker tokens: "
             f"expected {int(args.expected_local_tokens)}, got {int(condition.state.shape[1])}."
+        )
+    # Refuse a speaker file that ordinary inference would reject, before writing any output.
+    max_speaker_tokens = runtime.input_limits.max_speaker_tokens
+    speaker_tokens = int(condition.condition_state.shape[1])
+    if (
+        speaker_output_path is not None
+        and max_speaker_tokens is not None
+        and speaker_tokens > max_speaker_tokens
+    ):
+        raise InputLimitExceededError(
+            name="speaker_tokens", actual=speaker_tokens, limit=max_speaker_tokens
         )
     # The base keeps the pre-normalization tokens so callers can recompose them with the model.
     save_speaker_inversion_base_safetensors(

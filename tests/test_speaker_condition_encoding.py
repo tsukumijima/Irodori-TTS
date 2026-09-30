@@ -9,7 +9,12 @@ import pytest
 import torch
 
 import irodori_tts.inference_runtime as inference_runtime_module
-from irodori_tts.inference_runtime import InferenceRuntime, SamplingRequest, SpeakerCondition
+from irodori_tts.inference_runtime import (
+    InferenceRuntime,
+    InputTokenCounts,
+    SamplingRequest,
+    SpeakerCondition,
+)
 
 
 class RecordingSpeakerModel:
@@ -251,6 +256,9 @@ def test_no_ref_request_uses_inherited_speaker_condition_for_cfg(
         use_speaker_condition_resolved=True,
     )
     runtime._resolve_lora_adapter_path = lambda _value: None
+    runtime.count_input_tokens = lambda _text, _caption=None: InputTokenCounts(
+        text_tokens=1, caption_tokens=0
+    )
     captured: dict[str, bool] = {}
 
     def record_speaker_condition(**kwargs: Any) -> tuple[float, float, float, list[str]]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -73,6 +74,7 @@ from irodori_tts.speaker_inversion import (
     load_speaker_inversion_payload,
     save_speaker_inversion_checkpoint,
     speaker_inversion_state_dict,
+    speaker_token_limit,
 )
 from irodori_tts.tokenizer import PretrainedTextTokenizer
 
@@ -1649,6 +1651,34 @@ def _restore_resume_lora_config(
     if updates:
         train_cfg = replace(train_cfg, **updates)
     return train_cfg
+
+
+def _speaker_inversion_base_ref_max_seconds(
+    base_checkpoint_path: Path,
+    checkpoint_train_cfg: dict[str, Any] | None,
+) -> float:
+    """
+    Speaker Inversion の基盤モデルが受け付ける参照音声の上限秒数を返す。
+
+    Args:
+        base_checkpoint_path (Path): 基盤モデルのチェックポイントのパス
+        checkpoint_train_cfg (dict[str, Any] | None): 読み込み済みの .pt チェックポイントの学習設定
+
+    Returns:
+        float: 上限秒数 (0 以下は上限なし、メタデータに無ければ推論ランタイムと同じ 30 秒)
+    """
+
+    config: dict[str, Any] | None = checkpoint_train_cfg
+    if base_checkpoint_path.suffix.lower() == ".safetensors":
+        from safetensors import safe_open
+
+        with safe_open(str(base_checkpoint_path), framework="pt", device="cpu") as handle:
+            config_json = (handle.metadata() or {}).get(SAFETENSORS_CONFIG_META_KEY)
+        config = json.loads(config_json) if config_json else None
+    value = config.get("ref_max_seconds") if isinstance(config, dict) else None
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+        return float(value)
+    return 30.0
 
 
 def _restore_resume_speaker_inversion_config(
@@ -3901,6 +3931,43 @@ def main() -> None:
                     load_pretrained_backbone_weights = False
                     pretrained_backbone_config = init_text_encoder_config
 
+    if train_cfg.speaker_inversion_enabled:
+        # 基盤モデル自身の参照上限から話者トークン数の上限を決める (基盤は初期化にも使うので読み込み結果を使い回す)
+        base_checkpoint_path = None
+        if args.resume is None:
+            if args.init_checkpoint is not None:
+                base_checkpoint_path = _normalize_checkpoint_path(args.init_checkpoint)
+        elif isinstance(resume_base_init, dict) and isinstance(
+            resume_base_init.get("checkpoint_path"), str
+        ):
+            if resume_base_init.get("mode") == "checkpoint":
+                base_checkpoint_path = _normalize_checkpoint_path(
+                    resume_base_init["checkpoint_path"]
+                )
+        if base_checkpoint_path is not None and preloaded_init_checkpoint is None:
+            preloaded_init_checkpoint = _load_model_state_from_checkpoint(base_checkpoint_path)
+        base_ref_max_seconds = (
+            train_cfg.ref_max_seconds
+            if base_checkpoint_path is None or preloaded_init_checkpoint is None
+            else _speaker_inversion_base_ref_max_seconds(
+                base_checkpoint_path, preloaded_init_checkpoint[2]
+            )
+        )
+        max_speaker_tokens = speaker_token_limit(
+            ref_max_seconds=base_ref_max_seconds,
+            frames_per_second=DACVAE_LATENT_FRAMES_PER_SECOND,
+            latent_patch_size=model_cfg.latent_patch_size,
+            speaker_patch_size=model_cfg.speaker_patch_size,
+        )
+        if (
+            max_speaker_tokens is not None
+            and train_cfg.speaker_inversion_tokens > max_speaker_tokens
+        ):
+            raise ValueError(
+                "speaker_inversion_tokens must be <= the base model speaker token limit "
+                f"{max_speaker_tokens}, got {train_cfg.speaker_inversion_tokens}"
+            )
+
     raw_model: torch.nn.Module = TextToLatentRFDiT(
         model_cfg,
         pretrained_backbone_config=pretrained_backbone_config,
@@ -3933,6 +4000,7 @@ def main() -> None:
             base_init=base_init,
             distributed=distributed,
             is_main_process=is_main_process,
+            preloaded_checkpoint=preloaded_init_checkpoint,
         )
     elif args.resume is None and args.init_checkpoint is None:
         _apply_base_initialization(
@@ -3959,6 +4027,8 @@ def main() -> None:
         if train_config_uses_lora(train_cfg) and not lora_wrapped:
             raw_model = apply_lora(raw_model, train_cfg)
             lora_wrapped = True
+    # 基盤の重みは初期化で使い終わったので、学習中まで保持しない
+    preloaded_init_checkpoint = None
 
     if train_config_uses_lora(train_cfg) and is_main_process:
         trainable_params, total_params = count_parameters(raw_model)

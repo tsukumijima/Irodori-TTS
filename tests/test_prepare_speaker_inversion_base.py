@@ -9,6 +9,7 @@ import torch
 from safetensors import safe_open
 
 import prepare_speaker_inversion_base
+from irodori_tts.inference_runtime import InputLimitExceededError
 from irodori_tts.speaker_inversion import (
     SPEAKER_EMBEDDING_KEY,
     load_speaker_inversion_payload,
@@ -22,11 +23,13 @@ class SpeakerInversionBaseRuntime:
 
     Args:
         local_tokens (int): 返す局所話者 token 数
+        max_speaker_tokens (int | None): 推論ランタイムが受け付ける話者 token 数の上限
     """
 
-    def __init__(self, local_tokens: int) -> None:
+    def __init__(self, local_tokens: int, max_speaker_tokens: int | None = None) -> None:
         self.local_tokens = int(local_tokens)
         self.model_cfg = SimpleNamespace(speaker_patch_size=4)
+        self.input_limits = SimpleNamespace(max_speaker_tokens=max_speaker_tokens)
 
     def encode_speaker_inversion_base(
         self,
@@ -62,6 +65,7 @@ def _run_prepare_command(
     actual_local_tokens: int,
     expected_local_tokens: int,
     speaker_output_path: Path | None = None,
+    max_speaker_tokens: int | None = None,
 ) -> tuple[Path, Path]:
     """
     一時 checkpoint と参照音声を使って base 作成コマンドを実行する。
@@ -72,6 +76,7 @@ def _run_prepare_command(
         actual_local_tokens (int): 推論ランタイムが返す局所話者 token 数
         expected_local_tokens (int): コマンドへ指定する期待 token 数
         speaker_output_path (Path | None): 指定した場合に追加で書き出す .speaker.safetensors のパス
+        max_speaker_tokens (int | None): 推論ランタイムが受け付ける話者 token 数の上限
 
     Returns:
         tuple[Path, Path]: checkpoint と出力 base のパス
@@ -82,7 +87,7 @@ def _run_prepare_command(
     reference_path = tmp_path / "reference.wav"
     reference_path.write_bytes(b"reference placeholder")
     output_path = tmp_path / "voice.speaker-base.safetensors"
-    runtime = SpeakerInversionBaseRuntime(actual_local_tokens)
+    runtime = SpeakerInversionBaseRuntime(actual_local_tokens, max_speaker_tokens)
     monkeypatch.setattr(
         prepare_speaker_inversion_base.InferenceRuntime,
         "from_key",
@@ -167,6 +172,33 @@ def test_prepare_command_saves_zero_shot_speaker_embedding(
     embedding = payload[SPEAKER_EMBEDDING_KEY]
     assert embedding.shape == (7, 8)
     torch.testing.assert_close(embedding[0], embedding[1:].mean(dim=0))
+
+
+def test_prepare_command_rejects_speaker_embedding_above_runtime_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    推論ランタイムが拒否する長さの話者埋め込みは、base も含めて何も書き出さない。
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): 推論ランタイムとコマンド引数の差し替え
+        tmp_path (Path): 入出力を置く一時ディレクトリ
+    """
+
+    speaker_output_path = tmp_path / "voice.speaker.safetensors"
+    with pytest.raises(InputLimitExceededError, match="speaker_tokens=7, limit=6"):
+        _run_prepare_command(
+            monkeypatch,
+            tmp_path,
+            actual_local_tokens=6,
+            expected_local_tokens=6,
+            speaker_output_path=speaker_output_path,
+            max_speaker_tokens=6,
+        )
+
+    assert not speaker_output_path.exists()
+    assert not (tmp_path / "voice.speaker-base.safetensors").exists()
 
 
 def test_prepare_command_rejects_speaker_output_suffix_before_loading_model(

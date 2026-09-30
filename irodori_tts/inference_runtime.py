@@ -38,6 +38,7 @@ from .rf import (
 from .speaker_inversion import (
     load_speaker_inversion_payload,
     speaker_inversion_batch_tensors,
+    speaker_token_limit,
 )
 from .text_normalization import normalize_text
 from .tokenizer import PretrainedTextTokenizer
@@ -124,6 +125,43 @@ class ContextCapacityExceededError(ValueError):
         self.text_tokens = text_tokens
         self.speaker_tokens = speaker_tokens
         self.caption_tokens = caption_tokens
+
+
+class InputLimitExceededError(ValueError):
+    """
+    入力がチェックポイントの学習時上限を超えたことを表す。
+    """
+
+    def __init__(self, *, name: str, actual: int, limit: int) -> None:
+        super().__init__(f"Input limit exceeded: {name}={actual}, limit={limit}.")
+        self.name = name
+        self.actual = actual
+        self.limit = limit
+
+
+@dataclass(frozen=True)
+class InputLimits:
+    """
+    チェックポイントのメタデータから導いた入力上限。
+
+    max_caption_tokens と max_speaker_tokens は、その条件を持たないモデルでは 0 になる。
+    max_speaker_tokens は、参照音声の上限がないモデル (ref_max_seconds が 0 以下) では None になり、検査しない。
+    """
+
+    max_text_tokens: int
+    max_caption_tokens: int
+    max_speaker_tokens: int | None
+    max_seconds: float
+
+
+@dataclass(frozen=True)
+class InputTokenCounts:
+    """
+    正規化後の本文とキャプションのトークン数 (BOS 込み)。空のキャプションは 0 になる。
+    """
+
+    text_tokens: int
+    caption_tokens: int
 
 
 def list_available_runtime_precisions(device: str | torch.device) -> list[str]:
@@ -387,6 +425,10 @@ class SamplingRequest:
     # チャンク間で話者条件を引き継ぐ場合は参照音声の再エンコードを省く
     speaker_condition_override: SpeakerCondition | None = None
     capture_generated_speaker_condition: bool = False
+    # Appended last so positional construction keeps its meaning.
+    # True raises InputLimitExceededError when the predicted duration exceeds max_seconds
+    # instead of silently truncating the speech.
+    strict_duration_limit: bool = True
 
 
 @dataclass
@@ -934,6 +976,52 @@ class InferenceRuntime:
         """Return the number of patched latent positions generated per second."""
         hop_length = int(self.codec.model.hop_length)
         return float(self.sample_rate) / float(hop_length * self.model_cfg.latent_patch_size)
+
+    @property
+    def input_limits(self) -> InputLimits:
+        """Return the input limits derived from the checkpoint metadata."""
+        return InputLimits(
+            max_text_tokens=int(self.default_text_max_len),
+            max_caption_tokens=(
+                int(self.default_caption_max_len) if self.model_cfg.use_caption_condition else 0
+            ),
+            max_speaker_tokens=(
+                speaker_token_limit(
+                    ref_max_seconds=self.default_max_ref_seconds,
+                    frames_per_second=float(self.sample_rate)
+                    / float(int(self.codec.model.hop_length)),
+                    latent_patch_size=int(self.model_cfg.latent_patch_size),
+                    speaker_patch_size=int(self.model_cfg.speaker_patch_size),
+                )
+                if self.model_cfg.use_speaker_condition_resolved
+                else 0
+            ),
+            max_seconds=float(SamplingRequest.max_seconds),
+        )
+
+    def count_input_tokens(self, text: str, caption: str | None = None) -> InputTokenCounts:
+        """
+        synthesize と同じ正規化・トークナイズで、本文とキャプションのトークン数を数える。
+
+        Args:
+            text (str): 合成する本文
+            caption (str | None): VoiceDesign キャプション
+
+        Returns:
+            InputTokenCounts: 本文とキャプションのトークン数 (BOS 込み)
+        """
+
+        normalized_text = normalize_text(str(text)).strip()
+        text_tokens = int(self.tokenizer.encode(normalized_text).shape[0])
+        caption_text = "" if caption is None else str(caption).strip()
+        caption_tokens = 0
+        if self.model_cfg.use_caption_condition and caption_text != "":
+            if self.caption_tokenizer is None:
+                raise RuntimeError(
+                    "Caption conditioning is enabled but caption tokenizer is not loaded."
+                )
+            caption_tokens = int(self.caption_tokenizer.encode(caption_text).shape[0])
+        return InputTokenCounts(text_tokens=text_tokens, caption_tokens=caption_tokens)
 
     def latent_patches_for_seconds(self, seconds: float) -> int:
         """Return the patched latent length required for an audio duration."""
@@ -2068,6 +2156,11 @@ class InferenceRuntime:
             device=self.model_device,
             dtype=runtime_dtype,
         )
+        max_speaker_tokens = self.input_limits.max_speaker_tokens
+        if max_speaker_tokens is not None and state.shape[1] > max_speaker_tokens:
+            raise InputLimitExceededError(
+                name="speaker_tokens", actual=int(state.shape[1]), limit=max_speaker_tokens
+            )
         messages.append(
             "info: using speaker inversion embedding "
             f"tokens={state.shape[1]} uncond_mode={req.speaker_uncond_mode}."
@@ -2160,6 +2253,27 @@ class InferenceRuntime:
         if has_caption_override and not self.model_cfg.use_caption_condition:
             raise ValueError("Caption condition overrides require a caption-conditioned model.")
         has_caption_condition = bool(has_caption_text or has_caption_override)
+
+        # 学習時の長さを超える指定と入力は、切り詰めずに明示エラーにする
+        if text_max_len > self.default_text_max_len:
+            raise InputLimitExceededError(
+                name="max_text_len", actual=text_max_len, limit=self.default_text_max_len
+            )
+        if self.model_cfg.use_caption_condition and caption_max_len > self.default_caption_max_len:
+            raise InputLimitExceededError(
+                name="max_caption_len",
+                actual=caption_max_len,
+                limit=self.default_caption_max_len,
+            )
+        token_counts = self.count_input_tokens(raw_text, req.caption if has_caption_text else None)
+        if token_counts.text_tokens > text_max_len:
+            raise InputLimitExceededError(
+                name="text_tokens", actual=token_counts.text_tokens, limit=text_max_len
+            )
+        if token_counts.caption_tokens > caption_max_len:
+            raise InputLimitExceededError(
+                name="caption_tokens", actual=token_counts.caption_tokens, limit=caption_max_len
+            )
 
         truncation_factor = None if req.truncation_factor is None else float(req.truncation_factor)
         rescale_k = None if req.rescale_k is None else float(req.rescale_k)
@@ -2497,6 +2611,10 @@ class InferenceRuntime:
                 min_frames = max(1, math.ceil(min_seconds * self.codec.sample_rate / hop_length))
                 max_frames = max(1, math.floor(max_seconds * self.codec.sample_rate / hop_length))
                 rounded_frames = round(scaled_frames)
+                if req.strict_duration_limit and rounded_frames > max_frames:
+                    raise InputLimitExceededError(
+                        name="duration_frames", actual=rounded_frames, limit=max_frames
+                    )
                 latent_steps = max(min_frames, min(max_frames, rounded_frames))
                 duration_was_clamped = latent_steps != rounded_frames
                 target_samples = int(latent_steps * hop_length)

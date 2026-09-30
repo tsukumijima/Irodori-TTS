@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from pathlib import Path
 
 import torch
@@ -56,6 +57,34 @@ def normalize_speaker_embedding_tensor(
         )
 
     return tensor.detach().float().contiguous()
+
+
+def speaker_token_limit(
+    *,
+    ref_max_seconds: float,
+    frames_per_second: float,
+    latent_patch_size: int,
+    speaker_patch_size: int,
+) -> int | None:
+    """
+    話者条件として受け付けられる最大トークン数を返す。
+
+    Args:
+        ref_max_seconds (float): 参照音声の上限秒数 (0 以下は上限なし)
+        frames_per_second (float): パッチ化前の潜在表現の 1 秒あたりのフレーム数
+        latent_patch_size (int): 潜在表現のパッチサイズ
+        speaker_patch_size (int): Speaker Encoder のパッチサイズ
+
+    Returns:
+        int | None: 参照音声の最大パッチ数に、先頭へ追加される平均トークン 1 個を足した数 (上限なしなら None)
+    """
+
+    if ref_max_seconds <= 0:
+        return None
+    # 参照音声の処理と同じく、フレーム数を切り上げてから2段のパッチ化でそれぞれ端数を捨てる
+    latent_frames = math.ceil(ref_max_seconds * frames_per_second)
+    latent_patches = latent_frames // int(latent_patch_size)
+    return latent_patches // int(speaker_patch_size) + 1
 
 
 def is_speaker_inversion_safetensors_path(path: str | Path) -> bool:
