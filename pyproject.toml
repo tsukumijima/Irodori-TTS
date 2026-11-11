@@ -4,11 +4,12 @@ version = "0.1.0"
 description = "Irodori-TTS training and inference codebase"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "dacvae",
     "huggingface-hub>=0.34.0,<2.0",
-    "numpy>=1.26.0,<3.0",
+    "numpy>=1.26.0",
     "pyyaml>=6.0",
     "safetensors>=0.7.0",
     "soundfile>=0.12.0",
@@ -32,18 +33,19 @@ dev = [
     "llvmlite>=0.40.0",
     "numba>=0.57.0",
     "peft>=0.18.0",
-    "pyright>=1.1.407,<2.0.0",
-    "pytest>=8.4.2",
+    "pyright>=1.1.407",
+    "pytest>=9.1.1",
     "ruff>=0.14.8,<0.15.0",
     "silentcipher @ git+https://github.com/SesameAILabs/silentcipher.git@d46d7d0893a583d8968ab3a6626e2289faec9152",
-    "taskipy>=1.14.0,<2.0.0",
+    "taskipy>=1.14.1",
+    "wandb>=0.17.0",
+    # PyTorch 関連
     "torchao>=0.17.0,<0.18.0",
     "torchdata>=0.11.0",
-    "wandb>=0.17.0",
 ]
 
 [tool.taskipy.tasks]
-lint = "ruff check --fix . && pyright"
+lint = "ruff check --fix . ; pyright"
 format = "ruff format ."
 typecheck = "pyright"
 test = "pytest"
@@ -128,13 +130,10 @@ indent-style = "space"
 [tool.pyright]
 # Python バージョンを指定
 pythonVersion = "3.11"
-# Pyright 実行時に .venv/ を確実に参照させる
-# この設定により Codex サンドボックス上から Pyright を実行すると依存関係を解決できない問題を回避できる
+# プロジェクトの仮想環境を参照する
 venvPath = "."
 venv = ".venv"
-# TypeCheckingMode を strict に設定（VSCode の設定と同等）
 typeCheckingMode = "strict"
-# 型検査の対象プラットフォームを指定
 pythonPlatform = "All"
 # インクルードするパッケージパス
 include = [
@@ -158,7 +157,7 @@ exclude = [
 ]
 # 型スタブがない機械学習系ライブラリの実装解析で、ベンチマーク全体の型チェックが極端に遅くなることを防ぐ
 useLibraryCodeForTypes = false
-# VSCode の settings.json の diagnosticSeverityOverrides に対応する設定
+# Pyright/Pylance の型チェックのうち、いくつかのエラー報告を抑制する
 reportConstantRedefinition = "none"
 reportDeprecated = "warning"
 reportGeneralTypeIssues = "warning"
